@@ -39,7 +39,6 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
     const total = questions.length;
     const options = question?.options ?? [];
     const canType = question?.allow_free_text !== false;
-    const recommendedIndex = options.findIndex((option) => option.recommended);
     const hasOptions = options.length > 0;
     const width = Math.max(20, columns - 8);
     const currentAnswer = () => {

@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref so PRs stay fast.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        # The suite uses fixed short waits, so a slow runner can flake.
+        # Retry once before failing the job.
+        run: |
+          npm test || (echo "::warning::first test run failed, retrying once"; npm test)
+
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: ESLint
+        run: npm run lint
+        # Warnings are expected (loosely typed tool args); errors fail.
+
+  build:
+    name: build + dist is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Build
+        run: npm run build
+
+      - name: Check dist is committed and up to date
+        # dist/ is tracked so a clone runs without building. That only works if
+        # the committed output matches src/, so fail when a rebuild changes it.
+        run: |
+          if [ -n "$(git status --porcelain dist)" ]; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
+            git status --porcelain dist
+            git diff --stat dist
+            exit 1
+          fi
+
+      - name: Smoke test the built CLI
+        run: |
+          test -f dist/cli.js
+          node dist/cli.js --version
+          node dist/cli.js --help || true

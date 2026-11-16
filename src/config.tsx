@@ -5,7 +5,6 @@ import React, { useState } from 'react';
 import { Box, Text } from 'ink';
 import { Select, TextInput, PasswordInput } from '@inkjs/ui';
 import { parse } from 'jsonc-parser';
-import { z } from 'zod';
 import { 
   getActiveRuntimeConfigPath, 
   type RuntimeConfigFile, 

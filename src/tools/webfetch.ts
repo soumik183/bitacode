@@ -215,7 +215,7 @@ function htmlToText(html: string): string {
         { selector: "a", options: { ignoreHref: true } },
       ],
     });
-  } catch (error) {
+  } catch {
     // Fallback: basic regex if library fails
     return html
       .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, "")
@@ -235,7 +235,7 @@ async function htmlToMarkdown(html: string): Promise<string> {
   try {
     const turndown = await getTurndownService();
     return turndown.turndown(html);
-  } catch (error) {
+  } catch {
     // Fallback: treat as code block
     return `\`\`\`html\n${html}\n\`\`\``;
   }

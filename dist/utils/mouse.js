@@ -1,7 +1,9 @@
 // SGR mouse reports: ESC [ < button ; x ; y M/m. Ink strips the leading ESC
 // before handing input to useInput, so accept both forms.
+/* eslint-disable no-control-regex -- matching ESC is the point here */
 const MOUSE_REPORT = /(?:\x1b)?\[?<(\d+);\d+;\d+[Mm]/g;
 const LEFT_PRESS = /(?:\x1b)?\[?<(\d+);\d+;\d+M/g;
+/* eslint-enable no-control-regex */
 /** Remove mouse reports that would otherwise be inserted into a text input. */
 export function stripMouseReports(input) {
     return input.replace(MOUSE_REPORT, '');

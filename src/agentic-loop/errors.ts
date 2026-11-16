@@ -239,7 +239,7 @@ async function handle400Error(
 // Repair invalid JSON escape sequences.
 // Models sometimes emit \| \! \- etc. (e.g. grep regex args).
 function repairInvalidEscapes(value: string): string {
-  return value.replace(/\\([^"\\\/bfnrtu])/g, '\\\\$1');
+  return value.replace(/\\([^"/bfnrtu])/g, '\\\\$1');
 }
 
 // Remove orphaned tool result messages that don't have a matching tool_call_id.

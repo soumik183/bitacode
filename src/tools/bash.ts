@@ -63,7 +63,7 @@ const SAFE_COMMANDS = [
 // Security: Stricter shell control pattern to catch bypass attempts
 // Naive approach: Simple regex misses many bypasses
 // Bypasses: Newlines, encoded chars, quoted operators, backticks
-const SHELL_CONTROL_PATTERN = /[;&|<>()`$\[\]{}!]/;
+const SHELL_CONTROL_PATTERN = /[;&|<>()`$[\]]{}!]/;
 
 // Commands that read files - require path validation
 const FILE_READING_COMMANDS = new Set(['cat', 'head', 'tail', 'grep', 'rg', 'find', 'awk', 'sed', 'sort', 'uniq', 'cut', 'wc', 'tree', 'file', 'dir', 'ls', 'echo']);

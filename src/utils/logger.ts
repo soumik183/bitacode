@@ -32,7 +32,7 @@ export interface LogEntry {
   context?: Record<string, unknown>;
 }
 
-let logBuffer: LogEntry[] = [];
+const logBuffer: LogEntry[] = [];
 let logListeners: Array<(entry: LogEntry) => void> = [];
 
 export function setLogLevel(level: LogLevel): void {

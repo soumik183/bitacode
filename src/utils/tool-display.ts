@@ -11,10 +11,11 @@ export function extractToolDetail(tool: string, args: Record<string, unknown>): 
       return typeof args.search_term === 'string' ? `"${args.search_term}"` : '';
     case 'glob':
       return typeof args.pattern === 'string' ? args.pattern : '';
-    case 'bash':
+    case 'bash': {
       if (typeof args.command !== 'string') return '';
       const parts = args.command.split(/\s+/);
       return parts.slice(0, 3).join(' ') + (parts.length > 3 ? '...' : '');
+    }
     case 'todo_write':
       return Array.isArray(args.todos) ? `${args.todos.length} task(s)` : '';
     case 'todo_read':

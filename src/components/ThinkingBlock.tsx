@@ -14,19 +14,6 @@ export interface ThinkingBlockProps {
   elapsedMs?: number;
 }
 
-/**
- * Number of terminal rows a wrapped string occupies at the given width.
- * Mirrors Ink's wrap behaviour closely enough to size the block, so the
- * scroll viewport and the thinking-block click target stay in sync.
- */
-function countWrappedRows(text: string, width: number): number {
-  const safeWidth = Math.max(1, width);
-  return text.split('\n').reduce((total, line) => {
-    const length = Math.max(1, line.length);
-    return total + Math.max(1, Math.ceil(length / safeWidth));
-  }, 0);
-}
-
 /** How many content rows the expanded panel may use at this terminal size. */
 function previewRowBudget(rows: number): number {
   return Math.max(2, Math.min(8, rows - 14));
@@ -90,7 +77,6 @@ export function thinkingBlockHeight(
   if (!expanded || !hasText) return 2;
   const budget = previewRowBudget(rows);
   const { shown } = clipToPreview(text, Math.max(1, columns - 6), budget, previewMaxChars(columns, rows));
-  const contentRows = countWrappedRows(shown, Math.max(1, columns - 6));
   const summaryRows = shown.length < text.trim().length ? 1 : 0;
   // header + marginTop(1) + optional overflow note + marginBottom(1)
   return 1 + 1 + summaryRows + 1;

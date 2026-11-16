@@ -21,7 +21,7 @@ export var LogLevel;
 })(LogLevel || (LogLevel = {}));
 let currentLevel = LogLevel.INFO;
 let logFilePath = null;
-let logBuffer = [];
+const logBuffer = [];
 let logListeners = [];
 export function setLogLevel(level) {
     currentLevel = level;

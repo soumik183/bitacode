@@ -7,7 +7,7 @@
 
 import type { AgentEventHandler, ToolCallEvent } from '../agentic-loop.js';
 import { handleToolCall, truncateToolResult } from '../tools/index.js';
-import { runSubAgent, type SubAgentProgressHandler, type SubAgentUsage } from '../sub-agent.js';
+import { runSubAgent, type SubAgentProgressHandler } from '../sub-agent.js';
 import { logger } from '../utils/logger.js';
 
 /**

@@ -3,7 +3,13 @@
 █▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄
 ```
 
+[![CI](https://github.com/soumik183/bitacode/actions/workflows/ci.yml/badge.svg)](https://github.com/soumik183/bitacode/actions/workflows/ci.yml)
+[![Security](https://github.com/soumik183/bitacode/actions/workflows/security.yml/badge.svg)](https://github.com/soumik183/bitacode/actions/workflows/security.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A minimal, educational AI coding agent CLI written in TypeScript. It stays small enough to read in an afternoon, but it still has the core pieces you expect from a real coding agent: a streaming tool-use loop, approvals, sessions, MCP, skills, sub-agents, and cost tracking.
+
+Ask it to build something and it will read your code, edit files, run commands, and ask you questions when a decision is genuinely yours to make.
 
 ## Features
 
@@ -17,9 +23,19 @@ A minimal, educational AI coding agent CLI written in TypeScript. It stays small
 
 ## Quick Start
 
+Not yet published to npm. From a clone:
+
 ```bash
-npm install -g bitacode
-bitacode
+git clone https://github.com/soumik183/bitacode.git
+cd bitacode
+npm install
+npm run dev
+```
+
+`dist/` is committed, so you can also run the compiled build directly:
+
+```bash
+node dist/cli.js
 ```
 
 On first run, Bitacode shows an inline setup flow where you pick a provider/model pair and enter an API key. Bitacode stores that selection in `bitacode.jsonc`.
@@ -113,9 +129,20 @@ border in that area and the two do not read as a double edge.
 
 ```bash
 npm install
-npm run build
-npm run dev
+npm run build        # compile to dist/ (tracked - commit after building)
+npm run dev          # run from source with tsx
+npm run typecheck    # tsc --noEmit
+npm test             # 131 tests
+npm run lint         # eslint
 ```
+
+CI runs all of the above on Node 20, 22, and 24, and fails if the committed
+`dist/` no longer matches `src/`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through
+[SECURITY.md](SECURITY.md), not a public issue.
 
 ## Documentation
 

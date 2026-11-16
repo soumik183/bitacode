@@ -131,7 +131,7 @@ const SPLASH_LINES = [
     '█▄▄ █ ▀█▀ ▄▀█ █▀▀ █▀█ █▀▄ █▀▀',
     '█▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄',
 ];
-function printSplash(addStatic, columns, rows) {
+function printSplash(addStatic, columns) {
     if (columns < 36)
         return;
     const width = SPLASH_LINES[0].length;
@@ -454,7 +454,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 setSession(loadedSession);
                 setCompletionMessages(loadedSession.completionMessages);
                 if (!didPrintIntroRef.current) {
-                    printSplash(addStatic, columns, rows);
+                    printSplash(addStatic, columns);
                     replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES);
                     didPrintIntroRef.current = true;
                     sessionSavedRef.current = true;
@@ -473,7 +473,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             newSession.completionMessages = initialCompletionMessages;
             setSession(newSession);
             if (!didPrintIntroRef.current) {
-                printSplash(addStatic, columns, rows);
+                printSplash(addStatic, columns);
                 didPrintIntroRef.current = true;
             }
         }
@@ -626,7 +626,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         if (height > 0 && height !== viewportRows) {
             setViewportRows(height);
         }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [liveAreaSignature]);
     // One-time initialization: logging, approval handlers, config loading
     useEffect(() => {
@@ -962,7 +961,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             stdout?.write('\x1b[2J\x1b[H');
             setStaticItems([]);
             setUserScroll(0);
-            printSplash(addStatic, columns, rows);
+            printSplash(addStatic, columns);
             addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: theme.dim, children: ["New session \u00B7 ", config.provider, " / ", config.model] }) }));
         }
         catch (err) {
@@ -1076,7 +1075,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             stdout?.write('\x1b[2J\x1b[H');
             setStaticItems([]);
             setUserScroll(0);
-            printSplash(addStatic, columns, rows);
+            printSplash(addStatic, columns);
             replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES);
             didPrintIntroRef.current = true;
             sessionSavedRef.current = true;
@@ -1601,7 +1600,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     useEffect(() => {
         setCommandIndex(0);
     }, [inputText]);
-    const hasConversation = completionMessages.some((message) => message.role !== 'system') || isStreaming || loading;
     const chosenVariant = VARIANTS.find((item) => item.id === variantId) ?? VARIANTS[0];
     const remoteModelLabel = config
         ? remoteModels[config.provider]?.find((item) => item.id === config.model)?.label
@@ -1613,7 +1611,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const folderName = basename(process.cwd());
     // Responsive breakpoints live in utils/layout.ts so every panel agrees.
     const layout = resolveLayout(columns, rows);
-    const { inputWidth, paletteWindow, visibleTodos, gutter } = layout;
+    const { paletteWindow, visibleTodos, gutter } = layout;
     const inputFocused = initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
     // Provider-driven only: the block appears when the model actually streams
     // reasoning, never just because a request is in flight. A busy agent with no

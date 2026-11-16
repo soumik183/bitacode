@@ -106,7 +106,7 @@ import { generateSystemPrompt } from './system-prompt.js';
 import { renderFormattedText, normalizeTranscriptText } from './utils/format-message.js';
 import { parseFileMutationDiff, parseFileReadResult } from './utils/file-diff.js';
 import { formatContextWindow, listProviderModels } from './utils/provider-models.js';
-import { formatSubAgentActivity, formatToolActivity } from './utils/tool-display.js';
+import { formatToolActivity } from './utils/tool-display.js';
 import { getLeftMousePress, getWheelDelta, isClickOnThinkingBlock, isMouseReport, stripMouseReports } from './utils/mouse.js';
 import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import {
@@ -179,7 +179,7 @@ const SPLASH_LINES = [
   '█▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄',
 ];
 
-function printSplash(addStatic: AddStaticFn, columns: number, rows: number): void {
+function printSplash(addStatic: AddStaticFn, columns: number): void {
   if (columns < 36) return;
   const width = SPLASH_LINES[0].length;
   const leftPad = ' '.repeat(Math.max(0, Math.floor((columns - width) / 2)));
@@ -609,7 +609,7 @@ export const App: React.FC<AppProps> = ({
         setSession(loadedSession);
         setCompletionMessages(loadedSession.completionMessages);
         if (!didPrintIntroRef.current) {
-          printSplash(addStatic, columns, rows);
+          printSplash(addStatic, columns);
           replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES);
           didPrintIntroRef.current = true;
           sessionSavedRef.current = true;
@@ -629,7 +629,7 @@ export const App: React.FC<AppProps> = ({
       newSession.completionMessages = initialCompletionMessages;
       setSession(newSession);
       if (!didPrintIntroRef.current) {
-        printSplash(addStatic, columns, rows);
+        printSplash(addStatic, columns);
         didPrintIntroRef.current = true;
       }
     }
@@ -802,7 +802,6 @@ export const App: React.FC<AppProps> = ({
     if (height > 0 && height !== viewportRows) {
       setViewportRows(height);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveAreaSignature]);
 
   // One-time initialization: logging, approval handlers, config loading
@@ -1201,7 +1200,7 @@ export const App: React.FC<AppProps> = ({
       stdout?.write('\x1b[2J\x1b[H');
       setStaticItems([]);
       setUserScroll(0);
-      printSplash(addStatic, columns, rows);
+      printSplash(addStatic, columns);
       addStatic(
         <Box paddingX={2} marginBottom={1}>
           <Text color={theme.dim}>
@@ -1332,7 +1331,7 @@ export const App: React.FC<AppProps> = ({
         stdout?.write('\x1b[2J\x1b[H');
         setStaticItems([]);
         setUserScroll(0);
-        printSplash(addStatic, columns, rows);
+        printSplash(addStatic, columns);
         replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES);
         didPrintIntroRef.current = true;
         sessionSavedRef.current = true;
@@ -1909,8 +1908,6 @@ export const App: React.FC<AppProps> = ({
     setCommandIndex(0);
   }, [inputText]);
 
-  const hasConversation =
-    completionMessages.some((message) => message.role !== 'system') || isStreaming || loading;
   const chosenVariant = VARIANTS.find((item) => item.id === variantId) ?? VARIANTS[0];
   const remoteModelLabel = config
     ? remoteModels[config.provider]?.find((item) => item.id === config.model)?.label
@@ -1922,7 +1919,7 @@ export const App: React.FC<AppProps> = ({
   const folderName = basename(process.cwd());
   // Responsive breakpoints live in utils/layout.ts so every panel agrees.
   const layout = resolveLayout(columns, rows);
-  const { inputWidth, paletteWindow, visibleTodos, gutter } = layout;
+  const { paletteWindow, visibleTodos, gutter } = layout;
   const inputFocused =
     initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
 

@@ -1,0 +1,59 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so new advisories surface even without a commit.
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
+
+  dependency-review:
+    name: dependency review
+    # Only meaningful on a PR, where there is a base to diff against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Audit production dependencies
+        # This is a CLI that ships to users, so only runtime deps block a merge.
+        run: npm audit --omit=dev --audit-level=high

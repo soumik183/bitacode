@@ -1,0 +1,38 @@
+version: 2
+
+updates:
+  # Application and dev dependencies.
+  - package-ecosystem: npm
+    directory: '/'
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    commit-message:
+      prefix: 'chore(deps)'
+      prefix-development: 'chore(deps-dev)'
+    groups:
+      # Group the noisy ones so one PR covers many minor bumps.
+      dev-dependencies:
+        dependency-type: development
+        update-types: [minor, patch]
+      production-minor:
+        dependency-type: production
+        update-types: [minor, patch]
+    labels:
+      - dependencies
+    ignore:
+      # Ink majors change layout semantics; upgrade deliberately, by hand.
+      - dependency-name: ink
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: 'ci(deps)'
+    labels:
+      - dependencies
+      - ci
