@@ -47,7 +47,6 @@
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
-    "bitacode": "file:bitacode-0.1.21.tgz",
     "commander": "^14.0.1",
     "diff": "^8.0.4",
     "he": "^1.2.0",
