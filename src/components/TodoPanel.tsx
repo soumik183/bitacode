@@ -1,0 +1,151 @@
+import React from 'react';
+import { Box, Text } from 'ink';
+import { theme } from '../theme.js';
+import type { TodoItem } from '../tools/todo.js';
+
+export interface TodoPanelProps {
+  todos: TodoItem[];
+  columns: number;
+  maxVisible?: number;
+}
+
+const STATUS_ICON: Record<TodoItem['status'], string> = {
+  completed: '✓',
+  in_progress: '◐',
+  pending: '○',
+  cancelled: '✕',
+};
+
+const STATUS_COLOR: Record<TodoItem['status'], string> = {
+  completed: theme.success,
+  in_progress: theme.info,
+  pending: theme.dim,
+  cancelled: theme.dim,
+};
+
+/** Collapse whitespace and trim, without losing the end of long items. */
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Fit one task into `max` characters. The task description itself matters more
+ * than the trailing priority marker, so only shorten when it truly overflows.
+ */
+export function truncateTodo(text: string, max: number): string {
+  const singleLine = oneLine(text);
+  const limit = Math.max(1, max);
+  if (singleLine.length <= limit) return singleLine;
+  if (limit <= 1) return '…';
+  return `${singleLine.slice(0, limit - 1)}…`;
+}
+
+/**
+ * Pick the slice of todos to show. The list is windowed around the item that
+ * is actually in progress (falling back to the first unfinished item), so the
+ * live task is always visible instead of the panel being pinned to the top and
+ * hiding progress behind a "+N" counter.
+ */
+export function visibleTodoWindow(
+  todos: TodoItem[],
+  maxVisible: number
+): { start: number; items: TodoItem[] } {
+  const limit = Math.max(1, maxVisible);
+  if (todos.length <= limit) return { start: 0, items: todos };
+
+  const anchorStatus: TodoItem['status'] = 'in_progress';
+  let anchor = todos.findIndex((todo) => todo.status === anchorStatus);
+  if (anchor === -1) {
+    anchor = todos.findIndex((todo) => todo.status === 'pending');
+  }
+  if (anchor === -1) anchor = todos.length - 1;
+
+  const half = Math.floor(limit / 2);
+  let start = Math.max(0, anchor - half);
+  start = Math.min(start, todos.length - limit);
+  return { start, items: todos.slice(start, start + limit) };
+}
+
+/**
+ * Live task panel. Updates whenever the agent calls todo_write, so checkmarks
+ * and the progress bar move in real time.
+ */
+export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible = 5 }) => {
+  if (todos.length === 0) return null;
+
+  const total = todos.length;
+  const done = todos.filter((todo) => todo.status === 'completed').length;
+  const { start, items: visible } = visibleTodoWindow(todos, maxVisible);
+  const hiddenAbove = start;
+  const hiddenBelow = Math.max(0, total - start - visible.length);
+
+  const barWidth = columns >= 80 ? 10 : 6;
+  const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
+  const digits = String(total).length;
+  // "  " indent + icon + space + index column + space
+  const reserved = 2 + 2 + digits + 1 + (hiddenAbove + hiddenBelow > 0 ? 2 : 0);
+  const contentWidth = Math.max(10, columns - reserved);
+
+  return (
+    <Box flexDirection="column" paddingX={2} marginBottom={1}>
+      <Text wrap="truncate-end">
+        <Text color={theme.text} bold>
+          Tasks
+        </Text>
+        <Text color={theme.dim}>{`  ${done}/${total} done  `}</Text>
+        <Text color={theme.success}>{'▰'.repeat(filled)}</Text>
+        <Text color={theme.border}>{'▱'.repeat(barWidth - filled)}</Text>
+      </Text>
+
+      {hiddenAbove > 0 && (
+        <Text color={theme.dim}>{`  ↑ ${hiddenAbove} more`}</Text>
+      )}
+
+      {visible.map((todo, index) => {
+        const dimmed = todo.status === 'completed' || todo.status === 'cancelled';
+        return (
+          <Box key={`${todo.id}-${start + index}`}>
+            <Text color={STATUS_COLOR[todo.status]}>{`${STATUS_ICON[todo.status]} `}</Text>
+            <Text
+              color={
+                dimmed
+                  ? theme.dim
+                  : todo.status === 'in_progress'
+                    ? theme.text
+                    : theme.muted
+              }
+              bold={todo.status === 'in_progress'}
+              strikethrough={dimmed}
+              wrap="truncate-end"
+            >
+              {todo.status === 'in_progress'
+                ? truncateTodo(todo.content, contentWidth)
+                : `(${todo.priority}) ${truncateTodo(todo.content, Math.max(8, contentWidth - todo.priority.length - 3))}`}
+            </Text>
+          </Box>
+        );
+      })}
+
+      {hiddenBelow > 0 && (
+        <Text color={theme.dim}>{`  ↓ ${hiddenBelow} more`}</Text>
+      )}
+    </Box>
+  );
+};
+
+/**
+ * Exact row count for a given list, matching what this component renders:
+ * header + one row per visible task + an "↑ N more" row when tasks are hidden
+ * above + a "↓ N more" row when tasks are hidden below, plus the bottom margin.
+ *
+ * App uses this to budget the live area, so the panel and the transcript always
+ * agree and the composer never gets pushed off-screen.
+ */
+export function todoPanelRows(todos: TodoItem[], maxVisible: number): number {
+  if (todos.length === 0) return 0;
+  const { start, items } = visibleTodoWindow(todos, maxVisible);
+  const hiddenAbove = start > 0 ? 1 : 0;
+  const hiddenBelow = todos.length > start + items.length ? 1 : 0;
+  // header + tasks + overflow markers + trailing margin
+  return 1 + items.length + hiddenAbove + hiddenBelow + 1;
+}

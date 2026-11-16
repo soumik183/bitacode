@@ -1,0 +1,78 @@
+{
+  "name": "bitacode",
+  "version": "0.1.21",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bin": {
+    "bitacode": "./dist/cli.js"
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "dev": "NODE_NO_WARNINGS=1 tsx src/cli.tsx",
+    "test": "node --test --import tsx tests/**/*.test.{ts,tsx}",
+    "build": "npm run clean && tsc && node -e \"const fs=require('node:fs'); if (fs.existsSync('dist/cli.js')) fs.chmodSync('dist/cli.js', 0o755)\"",
+    "build:watch": "tsc --watch",
+    "prepack": "npm run build"
+  },
+  "author": "soumik183",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/soumik183/bitacode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/soumik183/bitacode/issues"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "coding-agent",
+    "llm",
+    "openai",
+    "anthropic",
+    "gemini",
+    "terminal",
+    "typescript"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@inkjs/ui": "^2.0.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "commander": "^14.0.1",
+    "diff": "^8.0.4",
+    "he": "^1.2.0",
+    "html-to-text": "^9.0.5",
+    "ink": "^6.8.0",
+    "jsonc-parser": "^3.3.1",
+    "leven": "^4.1.0",
+    "openai": "^5.23.1",
+    "react": "^19.1.1",
+    "strip-ansi": "^7.2.0",
+    "turndown": "^7.2.2",
+    "yaml": "^2.8.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@tailwindcss/postcss": "^4.1.18",
+    "@types/diff": "^7.0.2",
+    "@types/he": "^1.2.3",
+    "@types/html-to-text": "^9.0.4",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.15",
+    "@types/turndown": "^5.0.6",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.36.0",
+    "ink-testing-library": "^4.0.0",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.44.1"
+  }
+}
