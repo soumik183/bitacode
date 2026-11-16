@@ -139,6 +139,25 @@ npm run lint         # eslint
 CI runs all of the above on Node 20, 22, and 24, and fails if the committed
 `dist/` no longer matches `src/`.
 
+## Releasing
+
+Merging a PR into `main` builds and publishes the package automatically. The
+workflow checks the version is new, runs the full suite, packs the tarball,
+installs it into a clean directory to prove it works, then publishes.
+
+It waits for approval first: the job uses the `npm-release` environment, so a
+required reviewer must approve each publish in the Actions tab. To configure it,
+go to Settings → Environments → `npm-release` and add reviewers.
+
+Two prerequisites on the repository:
+
+- `NPM_TOKEN` secret — an npm automation token with publish rights.
+- The `npm-release` environment with a required reviewer.
+
+To cut a new version, run **Actions → Publish → Run workflow** and choose the
+bump (`patch`/`minor`/`major`), or tick `dry_run` to build and pack without
+publishing.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through

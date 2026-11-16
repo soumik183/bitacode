@@ -14,7 +14,7 @@ export const RuntimeModelConfigSchema = z.object({
   inputPricePerMillion: z.number().optional(),
   outputPricePerMillion: z.number().optional(),
   cachedPricePerMillion: z.number().optional(),
-  defaultParams: z.record(z.unknown()).optional(),
+  defaultParams: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const RuntimeProviderConfigSchema = z.object({
@@ -22,16 +22,16 @@ export const RuntimeProviderConfigSchema = z.object({
   baseURL: z.string().optional(),
   apiKey: z.string().optional(),
   apiKeyEnvVar: z.string().optional(),
-  headers: z.record(z.string()).optional(),
-  defaultParams: z.record(z.unknown()).optional(),
-  models: z.record(RuntimeModelConfigSchema).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+  defaultParams: z.record(z.string(), z.unknown()).optional(),
+  models: z.record(z.string(), RuntimeModelConfigSchema).optional(),
 });
 
 export const StdioServerConfigSchema = z.object({
   type: z.literal('stdio'),
   command: z.string(),
   args: z.array(z.string()).optional(),
-  env: z.record(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
   cwd: z.string().optional(),
   enabled: z.boolean().optional(),
   timeoutMs: z.number().optional(),
@@ -40,7 +40,7 @@ export const StdioServerConfigSchema = z.object({
 export const HttpServerConfigSchema = z.object({
   type: z.literal('http'),
   url: z.string(),
-  headers: z.record(z.string()).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
   enabled: z.boolean().optional(),
   timeoutMs: z.number().optional(),
 });
@@ -48,9 +48,9 @@ export const HttpServerConfigSchema = z.object({
 export const RuntimeMcpServerConfigSchema = z.union([StdioServerConfigSchema, HttpServerConfigSchema]);
 
 export const RuntimeConfigFileSchema = z.object({
-  providers: z.record(z.any()).optional(),
+  providers: z.record(z.string(), z.any()).optional(),
   mcp: z.object({
-    servers: z.record(z.any()).optional(),
+    servers: z.record(z.string(), z.any()).optional(),
   }).optional(),
 });
 

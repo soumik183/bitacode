@@ -12,7 +12,7 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "dev": "NODE_NO_WARNINGS=1 tsx src/cli.tsx",
-    "test": "node --test --import tsx tests/**/*.test.{ts,tsx}",
+    "test": "node --test --import tsx \"tests/*.test.ts\" \"tests/*.test.tsx\"",
     "build": "npm run clean && tsc && node -e \"const fs=require('node:fs'); if (fs.existsSync('dist/cli.js')) fs.chmodSync('dist/cli.js', 0o755)\"",
     "build:watch": "tsc --watch",
     "lint": "eslint .",
@@ -47,6 +47,7 @@
   "dependencies": {
     "@inkjs/ui": "^2.0.0",
     "@modelcontextprotocol/sdk": "^1.27.1",
+    "bitacode": "file:bitacode-0.1.21.tgz",
     "commander": "^14.0.1",
     "diff": "^8.0.4",
     "he": "^1.2.0",
@@ -54,12 +55,12 @@
     "ink": "^6.8.0",
     "jsonc-parser": "^3.3.1",
     "leven": "^4.1.0",
-    "openai": "^5.23.1",
+    "openai": "^7.57.0",
     "react": "^19.1.1",
     "strip-ansi": "^7.2.0",
     "turndown": "^7.2.2",
     "yaml": "^2.8.2",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",
