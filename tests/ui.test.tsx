@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { Box, Text } from 'ink';
 import { render } from 'ink-testing-library';
+import { settle } from './helpers/wait.js';
 import { ThinkingBlock, clipToPreview, thinkingBlockHeight } from '../src/components/ThinkingBlock.js';
 import { ThinkingArchive, archivePreviewChars } from '../src/components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from '../src/components/TodoPanel.js';
@@ -95,9 +96,9 @@ test('prompt input ignores SGR mouse reports', async () => {
   };
 
   const { stdin } = render(<Harness />);
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await settle();
   stdin.write('\x1b[<0;10;5M');
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await settle(50);
 
   assert.equal(value, '');
 });

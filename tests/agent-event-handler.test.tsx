@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { render } from 'ink-testing-library';
+import { waitForFrame, waitFor } from './helpers/wait.js';
 import type { AgentEvent, Message } from '../src/agentic-loop.js';
 import {
   useAgentEventHandler,
@@ -75,8 +76,8 @@ test('a fast text delta followed by done archives the reply and clears streaming
   };
 
   const { lastFrame } = render(<Harness />);
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const frame = lastFrame() ?? '';
+  // Poll instead of sleeping: the archived text must appear without the cursor.
+  const frame = await waitForFrame(lastFrame, (f) => /fast response/.test(f) && !/▍/.test(f));
 
   assert.match(frame, /fast response/);
   assert.doesNotMatch(frame, /▍/);
@@ -160,8 +161,8 @@ test('reasoning archives once above the reply with its elapsed time', async () =
   };
 
   const { lastFrame } = render(<Harness />);
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const frame = lastFrame() ?? '';
+  await waitFor(() => state.thinkingArchived && state.startedAt === null);
+  const frame = await waitForFrame(lastFrame, (f) => /Thought/.test(f) && /Hello back/.test(f));
 
   assert.equal(state.thinkingArchived, true);
   assert.equal(state.thinkingText, '');

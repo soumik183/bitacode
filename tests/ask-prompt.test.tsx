@@ -5,7 +5,9 @@ import { render } from 'ink-testing-library';
 import { AskPrompt } from '../src/components/AskPrompt.js';
 import type { AskQuestion, AskResponse } from '../src/tools/ask.js';
 
-const wait = (ms = 60) => new Promise((resolve) => setTimeout(resolve, ms));
+import { settle, waitFor } from './helpers/wait.js';
+
+const wait = (ms = 25) => settle(ms);
 
 test('ask prompt renders the question, options and recommendation', async () => {
   const questions: AskQuestion[] = [
@@ -50,15 +52,18 @@ test('enter sends the highlighted option', async () => {
     { id: 'q', question: 'Pick one', options: [{ label: 'alpha', recommended: true }, { label: 'beta' }] },
   ];
   let response: AskResponse | null = null;
-  const { stdin } = render(
+  const { stdin, lastFrame } = render(
     <AskPrompt questions={questions} columns={80} onRespond={(result) => { response = result; }} />
   );
-  await wait();
+  const frame = () => lastFrame() ?? '';
+  // Wait for the first frame; input sent before mount is dropped.
+  await waitFor(() => /❯ 1\./.test(frame()), 5000, 'prompt did not render');
   // Down then Enter selects the second option.
   stdin.write('\u001B[B');
-  await wait();
+  // The highlight moves to the second option before Enter is honoured.
+  await waitFor(() => /❯ 2\./.test(frame()), 5000, 'cursor did not move to the second option');
   stdin.write('\r');
-  await wait();
+  await waitFor(() => response !== null, 5000, 'no response after enter');
   assert.equal(response?.[0].answer, 'beta');
 });
 

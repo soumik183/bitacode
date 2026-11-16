@@ -1,5 +1,5 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { theme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
@@ -31,10 +31,26 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
     const [index, setIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [cursor, setCursor] = useState(0);
+    // useInput closes over the render it was registered in, so a fast
+    // "down then enter" sequence could commit the previously highlighted
+    // option. Mirror the cursor in a ref that updates synchronously and read
+    // that inside the key handler.
+    const cursorRef = useRef(0);
+    const moveCursor = (next) => {
+        cursorRef.current = next;
+        setCursor(next);
+    };
     const [typing, setTyping] = useState(false);
     const [draft, setDraft] = useState('');
     // Multi-select state: option indexes chosen for the current question.
     const [picked, setPicked] = useState([]);
+    // Same staleness problem as the cursor: the input handler must see the
+    // selections made earlier in the same burst, not the ones from this render.
+    const pickedRef = useRef([]);
+    const setPickedNow = (next) => {
+        pickedRef.current = next;
+        setPicked(next);
+    };
     const question = questions[index];
     const total = questions.length;
     const options = question?.options ?? [];
@@ -42,8 +58,8 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
     const hasOptions = options.length > 0;
     const width = Math.max(20, columns - 8);
     const currentAnswer = () => {
-        if (question?.multiple && picked.length > 0) {
-            return picked
+        if (question?.multiple && pickedRef.current.length > 0) {
+            return pickedRef.current
                 .slice()
                 .sort((a, b) => a - b)
                 .map((optionIndex) => options[optionIndex]?.label)
@@ -52,7 +68,7 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
         }
         if (typing || !hasOptions)
             return draft.trim();
-        return options[cursor]?.label ?? '';
+        return options[cursorRef.current]?.label ?? '';
     };
     const commit = (value) => {
         const trimmed = value.trim();
@@ -61,10 +77,10 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
         if (index + 1 < total) {
             // Advance to the next question and reset its own input state.
             setIndex(index + 1);
-            setCursor(0);
+            moveCursor(0);
             setTyping(false);
             setDraft('');
-            setPicked([]);
+            setPickedNow([]);
             return;
         }
         // Last question: hand every answer back in ask order.
@@ -104,12 +120,12 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
         }
         if (key.upArrow) {
             if (hasOptions)
-                setCursor((prev) => (prev - 1 + options.length) % options.length);
+                moveCursor((cursorRef.current - 1 + options.length) % options.length);
             return;
         }
         if (key.downArrow) {
             if (hasOptions)
-                setCursor((prev) => (prev + 1) % options.length);
+                moveCursor((cursorRef.current + 1) % options.length);
             return;
         }
         // Tab switches between picking an option and typing a custom answer.
@@ -125,12 +141,13 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
             const optionIndex = Number(input) - 1;
             if (optionIndex < options.length) {
                 if (question.multiple) {
-                    setPicked((prev) => prev.includes(optionIndex)
-                        ? prev.filter((entry) => entry !== optionIndex)
-                        : [...prev, optionIndex]);
+                    const previous = pickedRef.current;
+                    setPickedNow(previous.includes(optionIndex)
+                        ? previous.filter((entry) => entry !== optionIndex)
+                        : [...previous, optionIndex]);
                 }
                 else {
-                    setCursor(optionIndex);
+                    moveCursor(optionIndex);
                     commit(options[optionIndex].label);
                 }
             }
@@ -138,11 +155,11 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
         }
         if (key.return) {
             if (question.multiple) {
-                if (picked.length > 0) {
+                if (pickedRef.current.length > 0) {
                     commit(currentAnswer());
                 }
                 else if (hasOptions) {
-                    setPicked([cursor]);
+                    setPickedNow([cursorRef.current]);
                 }
                 return;
             }
