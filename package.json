@@ -12,7 +12,7 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "dev": "NODE_NO_WARNINGS=1 tsx src/cli.tsx",
-    "test": "node --test --import tsx \"tests/*.test.ts\" \"tests/*.test.tsx\"",
+    "test": "node --test --import tsx --test-reporter=spec $(node -e \"const{readdirSync}=require('node:fs');console.log(readdirSync('tests').filter(f=>/\\.test\\.(ts|tsx)$/.test(f)).map(f=>'tests/'+f).join(' '))\")",
     "build": "npm run clean && tsc && node -e \"const fs=require('node:fs'); if (fs.existsSync('dist/cli.js')) fs.chmodSync('dist/cli.js', 0o755)\"",
     "build:watch": "tsc --watch",
     "lint": "eslint .",
