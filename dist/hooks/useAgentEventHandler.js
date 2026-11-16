@@ -1,15 +1,16 @@
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx } from "react/jsx-runtime";
 import { useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
-import { DiffView } from '../components/DiffView.js';
-import { ReadFileView } from '../components/ReadFileView.js';
 import { ThinkingArchive } from '../components/ThinkingArchive.js';
 import { theme } from '../theme.js';
 import { renderFormattedText, normalizeTranscriptText } from '../utils/format-message.js';
-import { parseFileMutationDiff, parseFileReadResult } from '../utils/file-diff.js';
-import { formatSubAgentActivity, formatToolActivity } from '../utils/tool-display.js';
-// Cap live-frame re-renders on fast streams; this matters on Android.
-const STREAM_UI_INTERVAL_MS = 50;
+import { logger } from '../utils/logger.js';
+import { formatSubAgentActivity } from '../utils/tool-display.js';
+import { addToolResultView } from '../utils/tool-result-view.js';
+// Cap live-frame re-renders on fast streams. With incremental rendering only
+// the changed line is written, so a 60 fps cadence is smooth without the
+// full-frame repaint cost that made the old 50 ms value necessary.
+const STREAM_UI_INTERVAL_MS = 16;
 export function useAgentEventHandler(options) {
     const reasoningUiRef = useRef(0);
     const reasoningStartedRef = useRef(0);
@@ -150,7 +151,9 @@ function archiveThinking(ctx) {
     const elapsedMs = ctx.reasoningStartedRef.current > 0
         ? Date.now() - ctx.reasoningStartedRef.current
         : 0;
-    ctx.addStatic(_jsx(ThinkingArchive, { text: reasoning, elapsedMs: elapsedMs, columns: ctx.columns }));
+    const collapsed = _jsx(ThinkingArchive, { text: reasoning, elapsedMs: elapsedMs, columns: ctx.columns });
+    const expanded = (_jsx(ThinkingArchive, { text: reasoning, elapsedMs: elapsedMs, columns: ctx.columns, expanded: true }));
+    ctx.addStatic(collapsed, { collapsed, expanded });
     ctx.reasoningRef.current = '';
     ctx.reasoningStartedRef.current = 0;
     ctx.setThinkingText('');
@@ -215,6 +218,7 @@ function handleTextDelta(event, ctx) {
         buffer.unflushedContent += deltaText;
         // Split on newlines to find complete lines
         const lines = buffer.unflushedContent.split('\n');
+        let flushedLine = false;
         // If we have more than 1 element, there were newlines
         if (lines.length > 1) {
             // All lines except the last one are complete (ended with \n)
@@ -224,14 +228,18 @@ function handleTextDelta(event, ctx) {
             if (textToFlush) {
                 addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(textToFlush) }) }));
                 buffer.hasFlushedAnyLine = true;
+                flushedLine = true;
             }
             // Keep only the last (incomplete) line in the buffer
             buffer.unflushedContent = lines[lines.length - 1];
         }
         // Show the incomplete line (if any) in the dynamic frame, but throttle
-        // fast streams so low-power devices are not re-rendered per token.
+        // fast streams so low-power devices are not re-rendered per token. A flush
+        // must update immediately: those lines just left the live area for static
+        // scrollback, and leaving the stale text up until the throttle elapses
+        // renders them twice, then makes them pop.
         const now = Date.now();
-        if (now - buffer.lastUiUpdate >= STREAM_UI_INTERVAL_MS) {
+        if (flushedLine || now - buffer.lastUiUpdate >= STREAM_UI_INTERVAL_MS) {
             buffer.lastUiUpdate = now;
             setStreamingText(buffer.unflushedContent);
         }
@@ -326,30 +334,12 @@ function handleToolResult(event, ctx) {
     // The next state change (setActiveTool(null)) doesn't affect
     // frame height so write() restores the correct frame.
     const rawResult = toolCall.result || '';
-    const compactResult = rawResult
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 180);
-    const isError = /^(Error\b|File not found\b|Operation cancelled\b)/i.test(rawResult.trim());
-    // Parse tool args to show relevant parameter
-    let toolDisplay = toolCall.name;
     try {
-        const args = JSON.parse(toolCall.args || '{}');
-        toolDisplay = formatToolActivity(toolCall.name, args);
+        addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult);
     }
-    catch {
-        // If parsing fails, just use the tool name
-    }
-    const fileDiff = parseFileMutationDiff(toolCall.name, toolCall.args, rawResult);
-    const fileRead = fileDiff ? null : parseFileReadResult(toolCall.name, toolCall.args, rawResult);
-    if (fileDiff) {
-        addStatic(_jsx(DiffView, { header: fileDiff.header, diff: fileDiff.diff, filePath: fileDiff.filePath, operation: fileDiff.operation }));
-    }
-    else if (fileRead) {
-        addStatic(_jsx(ReadFileView, { ...fileRead }));
-    }
-    else {
-        addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? theme.error : undefined, dimColor: !isError, children: ['▶ ', toolDisplay, ': ', compactResult] }) }));
+    catch (err) {
+        logger.warn('Could not render tool result', { error: err?.message ?? String(err) });
+        addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: theme.error, children: "Could not display this tool result." }) }));
     }
     // Flush the assistant message + tool result into completionMessages
     // for session saving.

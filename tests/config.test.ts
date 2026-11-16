@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeConfig, writeInitConfig, writeProviderApiKey } from '../src/config.js';
+import { ensureUserConfigDirectory, getUserRuntimeConfigDirectory, getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeConfig, writeInitConfig, writeProviderApiKey } from '../src/config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig, resetRuntimeConfigForTests } from '../src/runtime-config.js';
 
 test.afterEach(() => {
@@ -99,6 +99,24 @@ test('getActiveRuntimeConfigPath prefers project config over user config', () =>
 test('getRuntimeConfigPath returns project-local bitacode.jsonc path', () => {
   const projectPath = getRuntimeConfigPath('project', '/tmp/demo-project');
   assert.equal(projectPath, path.join('/tmp/demo-project', '.bitacode', 'bitacode.jsonc'));
+});
+
+test('ensureUserConfigDirectory creates the shared config folder on first run', () => {
+  const originalHome = process.env.HOME;
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-home-'));
+
+  try {
+    process.env.HOME = tempHome;
+
+    const configDir = ensureUserConfigDirectory();
+
+    assert.equal(configDir, getUserRuntimeConfigDirectory());
+    assert.ok(fs.existsSync(configDir));
+    assert.ok(fs.statSync(configDir).isDirectory());
+  } finally {
+    process.env.HOME = originalHome;
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  }
 });
 
 test('writeInitConfig creates project runtime config and reports the path', async () => {

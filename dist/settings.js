@@ -8,10 +8,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { logger } from './utils/logger.js';
 import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
+function isApprovalMode(value) {
+    return value === 'manual' || value === 'auto' || value === 'yolo';
+}
 export const DEFAULT_SETTINGS = {
     animations: true,
     mouseClicks: true,
     variant: DEFAULT_VARIANT,
+    approvalMode: 'manual',
 };
 function getSettingsPath() {
     const home = os.homedir();
@@ -29,6 +33,7 @@ export function loadSettings() {
             variant: VARIANTS.some((item) => item.id === parsed.variant)
                 ? parsed.variant
                 : DEFAULT_VARIANT,
+            approvalMode: isApprovalMode(parsed.approvalMode) ? parsed.approvalMode : 'manual',
         };
     }
     catch {

@@ -124,6 +124,60 @@ test('writeFile creates missing parent directories and returns a diff', async ()
   }
 });
 
+test('editFile works after a session is resumed in a new process', async () => {
+  const fixtureDir = path.join(process.cwd(), 'tests', 'tmp-edit-resume');
+  const fixturePath = path.join(fixtureDir, 'file.txt');
+
+  await fs.rm(fixtureDir, { recursive: true, force: true });
+  await fs.mkdir(fixtureDir, { recursive: true });
+  await fs.writeFile(fixturePath, 'old text', 'utf8');
+
+  try {
+    // No in-process read record exists for this session id, which is what a
+    // resumed session looks like after a restart.
+    const result = await editFile(
+      'tests/tmp-edit-resume/file.txt',
+      'old text',
+      'new text',
+      1,
+      'resumed-session'
+    );
+
+    assert.match(result, /Successfully edited/i);
+    assert.equal(await fs.readFile(fixturePath, 'utf8'), 'new text');
+  } finally {
+    await fs.rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test('editFile still rejects a file changed after an in-process read', async () => {
+  const fixtureDir = path.join(process.cwd(), 'tests', 'tmp-edit-stale');
+  const fixturePath = path.join(fixtureDir, 'file.txt');
+  const sessionId = 'stale-session';
+
+  await fs.rm(fixtureDir, { recursive: true, force: true });
+  await fs.mkdir(fixtureDir, { recursive: true });
+  await fs.writeFile(fixturePath, 'old text', 'utf8');
+
+  try {
+    await readFile('tests/tmp-edit-stale/file.txt', 0, 2000, sessionId);
+    const future = new Date(Date.now() + 5000);
+    await fs.utimes(fixturePath, future, future);
+
+    const result = await editFile(
+      'tests/tmp-edit-stale/file.txt',
+      'old text',
+      'new text',
+      1,
+      sessionId
+    );
+
+    assert.match(result, /changed on disk since you last read it/i);
+  } finally {
+    await fs.rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 test('listDirectory reports a file path clearly', async () => {
   const result = await listDirectory('package.json');
   assert.match(result, /not a directory/i);

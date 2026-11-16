@@ -11,12 +11,11 @@ export function archivePreviewChars(columns) {
     return Math.max(40, columns - 6);
 }
 /**
- * One-line record of a completed reasoning phase. Printed before the response
- * or tool result that followed it, so scrollback stays in chronological order.
- * The preview fills the available width rather than being cut at a fixed 240
- * characters, which used to truncate the useful part of long thoughts.
+ * Record of a completed reasoning phase. Collapsed it keeps one preview line;
+ * clicking it expands the full reasoning in place, and clicking again folds it
+ * back.
  */
-export const ThinkingArchive = ({ text, elapsedMs, columns }) => {
+export const ThinkingArchive = ({ text, elapsedMs, columns, expanded = false, }) => {
     const reasoning = text.trim();
     if (!reasoning)
         return null;
@@ -24,5 +23,6 @@ export const ThinkingArchive = ({ text, elapsedMs, columns }) => {
     const limit = archivePreviewChars(columns);
     const preview = singleLine.length > limit ? singleLine.slice(0, limit).trimEnd() : singleLine;
     const cutoff = singleLine.length > limit;
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.dim, children: "\u25B8 " }), _jsx(Text, { color: theme.muted, children: "Thought" }), _jsx(Text, { color: theme.dim, children: `  ${formatDuration(elapsedMs)} · ${reasoning.length} char${reasoning.length === 1 ? '' : 's'}` })] }), _jsxs(Text, { color: theme.dim, wrap: "truncate-end", children: [preview, cutoff ? '…' : ''] })] }));
+    const hint = expanded ? 'click to collapse' : 'click to expand';
+    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: theme.muted, children: "Thought" }), _jsx(Text, { color: theme.dim, children: `  ${formatDuration(elapsedMs)} · ${reasoning.length} char${reasoning.length === 1 ? '' : 's'}` }), _jsx(Text, { color: theme.dim, children: `  ${hint}` })] }), expanded ? (_jsx(Text, { color: theme.muted, wrap: "wrap", children: reasoning })) : (_jsxs(Text, { color: theme.dim, wrap: "truncate-end", children: [preview, cutoff ? '…' : ''] }))] }));
 };

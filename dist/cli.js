@@ -14,7 +14,9 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { App } from './App.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
+import { theme } from './theme.js';
 import { logger } from './utils/logger.js';
+import { installStableRenderer } from './utils/stable-render.js';
 import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig } from './config.js';
 // A rejected promise in a background fetch should be logged, not kill the TUI.
 process.on('unhandledRejection', (reason) => {
@@ -26,6 +28,11 @@ process.on('unhandledRejection', (reason) => {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const packageJson = JSON.parse(readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+// Ink's standard renderer repaints the whole frame but erases every row first,
+// which flickers on slow terminals. Rewrite those repaints into a home +
+// overwrite so nothing is blanked before it is drawn. Other writes (alt-screen,
+// mouse, OSC, logs) pass through untouched.
+installStableRenderer(process.stdout);
 const program = new Command();
 program
     .name('bitacode')
@@ -35,8 +42,13 @@ program
     .option('--log-level <level>', 'Log level: TRACE, DEBUG, INFO, WARN, ERROR', 'DEBUG')
     .option('--session <id>', 'Resume a previous session by ID')
     .action((options) => {
+    // Enter the alternate screen and clear BEFORE Ink's first render so the
+    // terminal starts from a known state.
+    process.stdout.write('\x1b[?1049h');
+    process.stdout.write(`\x1b]11;${theme.bg}\x07`);
+    process.stdout.write('\x1b[2J\x1b[H');
     // Default action - start the main app
-    render(_jsx(ErrorBoundary, { children: _jsx(App, { dangerouslySkipPermissions: options.dangerouslySkipPermissions || false, logLevel: options.logLevel, sessionId: options.session }) }));
+    render(_jsx(ErrorBoundary, { children: _jsx(App, { dangerouslySkipPermissions: options.dangerouslySkipPermissions || false, logLevel: options.logLevel, sessionId: options.session }) }), { maxFps: 60 });
 });
 // Configure subcommand
 program
@@ -73,7 +85,7 @@ program
         }
         return;
     }
-    render(_jsx(ConfigureComponent, {}));
+    render(_jsx(ConfigureComponent, {}), { maxFps: 60 });
 });
 program
     .command('init')
@@ -100,6 +112,6 @@ program
         console.log(result.path);
         return;
     }
-    render(_jsx(InitComponent, {}));
+    render(_jsx(InitComponent, {}), { maxFps: 60 });
 });
 program.parse(process.argv);

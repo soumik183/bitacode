@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { frameRows, resolveLayout, splitLiveArea } from '../src/utils/layout.js';
+import { clampIndex, composerTextWidth, frameRows, resolveLayout, splitLiveArea } from '../src/utils/layout.js';
 
 test('classifies compact, regular and wide terminals', () => {
   assert.equal(resolveLayout(40, 15).size, 'compact');
@@ -13,14 +13,31 @@ test('classifies compact, regular and wide terminals', () => {
 test('composer never touches the screen edges', () => {
   for (const [columns, rows] of [[40, 15], [80, 24], [200, 60], [1, 1]] as const) {
     const layout = resolveLayout(columns, rows);
-    assert.ok(layout.inputWidth >= 16, `min width at ${columns}x${rows}`);
-    assert.ok(layout.inputWidth <= Math.max(columns, 16), `does not exceed screen at ${columns}x${rows}`);
+    assert.ok(layout.inputWidth >= 1, `min width at ${columns}x${rows}`);
+    assert.ok(layout.inputWidth <= columns, `does not exceed screen at ${columns}x${rows}`);
   }
+});
+
+test('composer fits a tiny terminal instead of overflowing with a 16-column floor', () => {
+  for (const columns of [1, 4, 8, 10, 12, 15]) {
+    const layout = resolveLayout(columns, 10);
+    assert.ok(layout.inputWidth <= Math.max(1, columns - 2 * layout.gutter), `fits at ${columns} columns`);
+    assert.ok(layout.inputWidth >= 1, `still usable at ${columns} columns`);
+  }
+  assert.equal(resolveLayout(8, 10).showSubmitHint, false);
+  assert.equal(composerTextWidth(resolveLayout(8, 10).inputWidth, false), 1);
 });
 
 test('composer is capped so it does not stretch on ultrawide terminals', () => {
   const layout = resolveLayout(300, 60);
   assert.ok(layout.inputWidth <= 110);
+});
+
+test('composer text width reserves padding, accent bar and submit hint', () => {
+  // outer paddingLeft (1) + accent bar (2) + inner paddingRight (2) = 5.
+  assert.equal(composerTextWidth(80, true), 73);
+  assert.equal(composerTextWidth(80, false), 75);
+  assert.equal(composerTextWidth(4, true), 1, 'never returns zero or a negative width');
 });
 
 test('todo rows always leave room for transcript and composer', () => {
@@ -52,13 +69,15 @@ test('narrow screens use a tighter gutter', () => {
 test('frame stays one row below the terminal to avoid full repaints', () => {
   assert.equal(frameRows(24), 23);
   assert.equal(frameRows(1), 1);
-  assert.equal(frameRows(4), 4);
+  assert.equal(frameRows(2), 1);
+  assert.equal(frameRows(3), 2);
+  assert.equal(frameRows(4), 3);
   assert.equal(frameRows(0), 1);
   // Ink repaints the whole screen when the committed output height reaches the
   // terminal height (`lastOutputHeight >= stdout.rows`). Staying strictly
-  // below keeps every update on the incremental diff path.
+  // below keeps every update on the incremental diff path, even on 4-row terms.
   const inkWouldClear = (outputHeight: number, rows: number) => outputHeight >= rows;
-  for (const rows of [5, 10, 24, 60, 200]) {
+  for (const rows of [2, 3, 4, 5, 10, 24, 60, 200]) {
     assert.ok(frameRows(rows) < rows, `frameRows(${rows}) must stay below the terminal height`);
     assert.equal(inkWouldClear(frameRows(rows), rows), false, `frame at ${rows} must not clear`);
   }
@@ -85,4 +104,12 @@ test('live rows sum every panel that is present', () => {
   // Fixed chrome is composer + footer + gap (5 rows) now that the horizontal
   // rule between chat and composer has been removed.
   assert.equal(split.transcriptRows, 23 - 5 - 10);
+});
+
+test('clampIndex keeps a picker selection inside a list that just shrank', () => {
+  assert.equal(clampIndex(5, 3), 2, 'selection past the end clamps to the last row');
+  assert.equal(clampIndex(2, 3), 2, 'a valid selection is unchanged');
+  assert.equal(clampIndex(-1, 3), 0);
+  assert.equal(clampIndex(5, 0), 0, 'an empty list has no selection');
+  assert.equal(clampIndex(Number.NaN, 3), 0);
 });

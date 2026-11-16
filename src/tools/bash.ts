@@ -184,6 +184,15 @@ async function isSafe(command: string): Promise<boolean> {
   return true;
 }
 
+// Cap captured output so a runaway command cannot exhaust memory. The final
+// result is trimmed further before it goes back to the model.
+const MAX_CAPTURE_CHARS = 200_000;
+
+function appendCaptured(current: string, chunk: string): string {
+  if (current.length >= MAX_CAPTURE_CHARS) return current;
+  return current + chunk.slice(0, MAX_CAPTURE_CHARS - current.length);
+}
+
 export async function runBash(
   command: string,
   timeoutMs = 30_000,
@@ -226,6 +235,8 @@ export async function runBash(
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
+    let stdoutChars = 0;
+    let stderrChars = 0;
     let timedOut = false;
     let aborted = false;
 
@@ -233,15 +244,55 @@ export async function runBash(
       shell: true,
       cwd: process.cwd(),
       env: { ...process.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // On POSIX, give the command its own process group so timeout/abort can
+      // stop grandchildren too (a killed shell otherwise leaves them running).
+      ...(process.platform === 'win32' ? {} : { detached: true }),
     });
 
-    child.stdout?.on('data', (data: Buffer) => { stdout += data.toString(); });
-    child.stderr?.on('data', (data: Buffer) => { stderr += data.toString(); });
+    child.stdout?.on('data', (data: Buffer) => {
+      const chunk = data.toString();
+      stdoutChars += chunk.length;
+      stdout = appendCaptured(stdout, chunk);
+    });
+    child.stderr?.on('data', (data: Buffer) => {
+      const chunk = data.toString();
+      stderrChars += chunk.length;
+      stderr = appendCaptured(stderr, chunk);
+    });
+
+    let killTimer: NodeJS.Timeout | null = null;
+    const killTree = (signal: NodeJS.Signals) => {
+      if (process.platform === 'win32') {
+        if (child.pid) {
+          const taskkill = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+          taskkill.on('error', () => {
+            // taskkill is best-effort; fall back to the direct child signal.
+            try {
+              child.kill('SIGTERM');
+            } catch {
+              // Process already gone.
+            }
+          });
+        }
+        return;
+      }
+      if (!child.pid) return;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          // Process already gone.
+        }
+      }
+    };
 
     const terminateChild = () => {
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 2000);
+      if (killTimer) clearTimeout(killTimer);
+      killTree('SIGTERM');
+      killTimer = setTimeout(() => killTree('SIGKILL'), 2000);
     };
 
     const onAbort = () => {
@@ -262,6 +313,7 @@ export async function runBash(
 
     child.on('close', (code) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       abortSignal?.removeEventListener('abort', onAbort);
 
       if (aborted) {
@@ -276,23 +328,27 @@ export async function runBash(
 
       // Truncate very long output
       const maxLen = 50_000;
-      const truncatedStdout = stdout.length > maxLen
-        ? stdout.slice(0, maxLen) + `\n... (output truncated, ${stdout.length} chars total)`
+      const truncatedStdout = stdoutChars > maxLen
+        ? stdout.slice(0, maxLen) + `\n... (output truncated, ${stdoutChars} chars total)`
         : stdout;
+      const truncatedStderr = stderrChars > 5_000
+        ? stderr.slice(0, 5_000) + `\n... (stderr truncated, ${stderrChars} chars total)`
+        : stderr;
 
       if (code === 0) {
         let output = truncatedStdout;
-        if (stderr.trim()) {
-          output += `${output ? '\n' : ''}stderr:\n${stderr.slice(0, 5000)}`;
+        if (truncatedStderr.trim()) {
+          output += `${output ? '\n' : ''}stderr:\n${truncatedStderr}`;
         }
         resolve(output || '(command completed successfully with no output)');
       } else {
-        resolve(`Command exited with code ${code}.\nstdout:\n${truncatedStdout}\nstderr:\n${stderr.slice(0, 5000)}`);
+        resolve(`Command exited with code ${code}.\nstdout:\n${truncatedStdout}\nstderr:\n${truncatedStderr}`);
       }
     });
 
     child.on('error', (err) => {
       clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       abortSignal?.removeEventListener('abort', onAbort);
       resolve(`Error executing command: ${err.message}`);
     });

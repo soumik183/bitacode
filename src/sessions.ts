@@ -12,7 +12,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { chmodSync } from 'node:fs';
 import type OpenAI from 'openai';
-import type { TodoItem } from './tools/todo.js';
+import { clearTodos, type TodoItem } from './tools/todo.js';
 import { logger } from './utils/logger.js';
 
 const SESSION_DIR_MODE = 0o700;
@@ -25,9 +25,14 @@ function hardenPermissions(targetPath: string, mode: number): void {
   chmodSync(targetPath, mode);
 }
 
+function isValidSessionId(id: string): boolean {
+  // Accept both legacy UUIDs and new short IDs. The patterns include no path
+  // separators or dots, so an accepted id can never escape the sessions dir.
+  return SESSION_ID_PATTERN.test(id) || SHORT_ID_PATTERN.test(id);
+}
+
 function assertValidSessionId(id: string): void {
-  // Accept both legacy UUIDs and new short IDs
-  if (!SESSION_ID_PATTERN.test(id) && !SHORT_ID_PATTERN.test(id)) {
+  if (!isValidSessionId(id)) {
     throw new Error(`Invalid session ID: ${id}`);
   }
 }
@@ -65,6 +70,13 @@ export interface SessionSummary {
   messageCount: number;
 }
 
+/** True once the transcript has anything beyond the system prompt. */
+export function hasConversationMessages(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+): boolean {
+  return messages.some((message) => message.role !== 'system');
+}
+
 export function ensureSystemPromptAtTop(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
   systemPrompt: string
@@ -89,12 +101,131 @@ export function ensureSystemPromptAtTop(
   ];
 }
 
+/**
+ * Repair histories that older builds or interrupted turns may leave invalid:
+ * an assistant tool call without a result, an orphaned tool result, or an
+ * empty assistant message. Providers reject all three, which used to make a
+ * resumed session fail every request.
+ */
+export function sanitizeCompletionMessages(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+  const sanitized: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+  let index = 0;
+
+  while (index < messages.length) {
+    const message = messages[index] as any;
+
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      index++;
+      continue;
+    }
+
+    if (message.role === 'assistant') {
+      const content = message.content;
+      const hasContent =
+        (typeof content === 'string' && content.trim().length > 0) ||
+        (Array.isArray(content) && content.length > 0);
+      const toolCalls = Array.isArray(message.tool_calls)
+        ? message.tool_calls.filter(
+            (call: any) =>
+              call &&
+              typeof call.id === 'string' &&
+              call.id.length > 0 &&
+              call.function &&
+              typeof call.function.name === 'string'
+          )
+        : [];
+
+      if (toolCalls.length === 0) {
+        // An empty assistant message is not valid history.
+        if (hasContent) {
+          const { tool_calls: _ignored, ...rest } = message;
+          sanitized.push(rest as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+        }
+        index++;
+        continue;
+      }
+
+      sanitized.push({ ...message, tool_calls: toolCalls });
+      index++;
+
+      const answered = new Set<string>();
+      while (index < messages.length && (messages[index] as any).role === 'tool') {
+        const toolMessage = messages[index] as any;
+        const id = toolMessage.tool_call_id;
+        if (
+          typeof id === 'string' &&
+          toolCalls.some((call: any) => call.id === id) &&
+          !answered.has(id)
+        ) {
+          answered.add(id);
+          sanitized.push({
+            ...toolMessage,
+            content: typeof toolMessage.content === 'string' ? toolMessage.content : String(toolMessage.content ?? ''),
+          });
+        }
+        index++;
+      }
+
+      // Keep every tool call paired with a result. A missing result happens
+      // when a turn is saved mid-execution; the provider would reject it.
+      for (const call of toolCalls) {
+        if (!answered.has(call.id)) {
+          sanitized.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: 'Tool result was missing from the saved session. Re-run the tool if needed.',
+          } as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+        }
+      }
+      continue;
+    }
+
+    // A tool result outside an assistant tool_calls group is orphaned.
+    if (message.role !== 'tool') {
+      sanitized.push(message);
+    }
+    index++;
+  }
+
+  return sanitized;
+}
+
 function getSessionsDir(): string {
   const homeDir = os.homedir();
   if (process.platform === 'win32') {
     return path.join(homeDir, 'AppData', 'Local', 'bitacode', 'sessions');
   }
   return path.join(homeDir, '.local', 'share', 'bitacode', 'sessions');
+}
+
+const TODO_STATUSES = new Set<TodoItem['status']>(['pending', 'in_progress', 'completed', 'cancelled']);
+const TODO_PRIORITIES = new Set<TodoItem['priority']>(['high', 'medium', 'low']);
+
+/** Drop malformed persisted todos instead of letting them crash the panel. */
+function sanitizeTodos(value: unknown): TodoItem[] {
+  if (!Array.isArray(value)) return [];
+  const todos: TodoItem[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const todo = item as Partial<TodoItem>;
+    if (
+      typeof todo.id !== 'string' ||
+      typeof todo.content !== 'string' ||
+      !TODO_STATUSES.has(todo.status as TodoItem['status']) ||
+      !TODO_PRIORITIES.has(todo.priority as TodoItem['priority'])
+    ) {
+      continue;
+    }
+    todos.push({
+      id: todo.id,
+      content: todo.content,
+      status: todo.status as TodoItem['status'],
+      priority: todo.priority as TodoItem['priority'],
+    });
+  }
+  return todos;
 }
 
 async function ensureSessionsDir(): Promise<string> {
@@ -139,15 +270,17 @@ export async function loadSession(id: string): Promise<Session | null> {
     const content = await fs.readFile(sessionPath(id), 'utf8');
     const session = JSON.parse(content) as Partial<Session>;
     return {
-      id: session.id ?? id,
-      title: session.title ?? 'New session',
-      createdAt: session.createdAt ?? new Date().toISOString(),
-      updatedAt: session.updatedAt ?? new Date().toISOString(),
-      model: session.model ?? '',
-      provider: session.provider ?? '',
+      id: typeof session.id === 'string' ? session.id : id,
+      title: typeof session.title === 'string' ? session.title : 'New session',
+      createdAt: typeof session.createdAt === 'string' ? session.createdAt : new Date().toISOString(),
+      updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : new Date().toISOString(),
+      model: typeof session.model === 'string' ? session.model : '',
+      provider: typeof session.provider === 'string' ? session.provider : '',
       variant: typeof session.variant === 'string' ? session.variant : undefined,
-      todos: Array.isArray(session.todos) ? session.todos : [],
-      completionMessages: Array.isArray(session.completionMessages) ? session.completionMessages : [],
+      todos: sanitizeTodos(session.todos),
+      completionMessages: sanitizeCompletionMessages(
+        Array.isArray(session.completionMessages) ? session.completionMessages : []
+      ),
     };
   } catch {
     return null;
@@ -167,16 +300,20 @@ export async function listSessions(): Promise<SessionSummary[]> {
   const summaries: SessionSummary[] = [];
   for (const entry of entries) {
     if (!entry.endsWith('.json')) continue;
+    // The id must match the filename so every listed session can be deleted;
+    // a stored id that differs from its filename is ignored.
+    const id = entry.replace(/\.json$/, '');
+    if (!isValidSessionId(id)) continue;
     try {
       const content = await fs.readFile(path.join(dir, entry), 'utf8');
       const session = JSON.parse(content) as Session;
       summaries.push({
-        id: session.id,
-        title: session.title ?? 'New session',
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-        provider: session.provider,
-        model: session.model,
+        id,
+        title: typeof session.title === 'string' ? session.title : 'New session',
+        createdAt: typeof session.createdAt === 'string' ? session.createdAt : '',
+        updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : '',
+        provider: typeof session.provider === 'string' ? session.provider : undefined,
+        model: typeof session.model === 'string' ? session.model : undefined,
         messageCount: Array.isArray(session.completionMessages) ? session.completionMessages.length : 0,
       });
     } catch {
@@ -189,10 +326,13 @@ export async function listSessions(): Promise<SessionSummary[]> {
   return summaries;
 }
 
-/** Delete a session. */
+/** Delete a session and all of its associated in-memory state. */
 export async function deleteSession(id: string): Promise<boolean> {
   try {
     await fs.unlink(sessionPath(id));
+    // Todos are persisted inside the session JSON (removed above); this clears
+    // the separate in-memory copy so a deleted session leaves nothing behind.
+    clearTodos(id);
     return true;
   } catch {
     return false;

@@ -20,7 +20,8 @@ import { todoReadTool, todoWriteTool, readTodos, writeTodos } from './todo.js';
 import { webfetchTool, webfetch } from './webfetch.js';
 import { askQuestionTool, askUser, normalizeAskRequest } from './ask.js';
 
-export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler } from '../utils/approval.js';
+export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
+export type { ApprovalMode } from '../settings.js';
 export { setAskHandler, clearAskHandler, hasAskHandler } from './ask.js';
 export type { AskRequest, AskResponse, AskAnswer, AskQuestion, AskOption } from './ask.js';
 

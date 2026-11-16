@@ -10,6 +10,13 @@ import path from 'node:path';
 import { logger } from './utils/logger.js';
 import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
 
+/** How write/edit/shell operations are approved. */
+export type ApprovalMode = 'manual' | 'auto' | 'yolo';
+
+function isApprovalMode(value: unknown): value is ApprovalMode {
+  return value === 'manual' || value === 'auto' || value === 'yolo';
+}
+
 export interface UiSettings {
   /** Animate spinners, shimmers and thinking dots. */
   animations: boolean;
@@ -22,12 +29,15 @@ export interface UiSettings {
   expandThinking?: boolean;
   /** Last selected reasoning variant, so the footer survives restarts. */
   variant: string;
+  /** Approval policy for write/edit/shell operations. */
+  approvalMode: ApprovalMode;
 }
 
 export const DEFAULT_SETTINGS: UiSettings = {
   animations: true,
   mouseClicks: true,
   variant: DEFAULT_VARIANT,
+  approvalMode: 'manual',
 };
 
 function getSettingsPath(): string {
@@ -48,6 +58,7 @@ export function loadSettings(): UiSettings {
       variant: VARIANTS.some((item) => item.id === parsed.variant)
         ? (parsed.variant as string)
         : DEFAULT_VARIANT,
+      approvalMode: isApprovalMode(parsed.approvalMode) ? parsed.approvalMode : 'manual',
     };
   } catch {
     return { ...DEFAULT_SETTINGS };

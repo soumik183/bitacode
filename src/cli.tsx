@@ -15,7 +15,9 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { App } from './App.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
+import { theme } from './theme.js';
 import { logger } from './utils/logger.js';
+import { installStableRenderer } from './utils/stable-render.js';
 import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig } from './config.js';
 
 // A rejected promise in a background fetch should be logged, not kill the TUI.
@@ -32,6 +34,12 @@ const packageJson: { version: string } = JSON.parse(
   readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8')
 );
 
+// Ink's standard renderer repaints the whole frame but erases every row first,
+// which flickers on slow terminals. Rewrite those repaints into a home +
+// overwrite so nothing is blanked before it is drawn. Other writes (alt-screen,
+// mouse, OSC, logs) pass through untouched.
+installStableRenderer(process.stdout);
+
 const program = new Command();
 
 program
@@ -42,6 +50,12 @@ program
   .option('--log-level <level>', 'Log level: TRACE, DEBUG, INFO, WARN, ERROR', 'DEBUG')
   .option('--session <id>', 'Resume a previous session by ID')
   .action((options) => {
+    // Enter the alternate screen and clear BEFORE Ink's first render so the
+    // terminal starts from a known state.
+    process.stdout.write('\x1b[?1049h');
+    process.stdout.write(`\x1b]11;${theme.bg}\x07`);
+    process.stdout.write('\x1b[2J\x1b[H');
+
     // Default action - start the main app
     render(
       <ErrorBoundary>
@@ -50,7 +64,8 @@ program
           logLevel={options.logLevel}
           sessionId={options.session}
         />
-      </ErrorBoundary>
+      </ErrorBoundary>,
+      { maxFps: 60 }
     );
   });
 
@@ -95,7 +110,7 @@ program
       return;
     }
 
-    render(<ConfigureComponent />);
+    render(<ConfigureComponent />, { maxFps: 60 });
   });
 
 program
@@ -125,7 +140,7 @@ program
       return;
     }
 
-    render(<InitComponent />);
+    render(<InitComponent />, { maxFps: 60 });
   });
 
 program.parse(process.argv);

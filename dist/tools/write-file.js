@@ -109,8 +109,7 @@ export async function writeFile(filePath, content, sessionId) {
         await fs.rm(tmpPath, { force: true }).catch(() => undefined);
     }
     const lines = content.split('\n').length;
-    // Record the write as a read so a subsequent edit_file on this file doesn't
-    // immediately fail the staleness guard with "you must read first".
+    // Record the write as a read so a follow-up edit can detect external changes.
     if (sessionId) {
         recordRead(sessionId, validated);
     }

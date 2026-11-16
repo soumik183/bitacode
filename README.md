@@ -38,7 +38,7 @@ npm run dev
 node dist/cli.js
 ```
 
-On first run, Bitacode shows an inline setup flow where you pick a provider/model pair and enter an API key. Bitacode stores that selection in `bitacode.jsonc`.
+On first run, Bitacode creates the shared config folder and shows an inline setup flow where you pick a provider/model pair and enter an API key. The selection is saved to the shared user `bitacode.jsonc`; use `bitacode configure --project` if you want a project-local file instead.
 
 Runtime config lookup is simple:
 
@@ -78,7 +78,7 @@ bitacode init --project --force
 
 - `/help` — Show available slash commands
 - `/new` — Start a fresh session
-- `/session` — Resume a saved session (`/session <id>` also works)
+- `/session` — Resume a saved session (`/session <id>` also works); press `d` in the picker to delete one, or use `/session delete <id>`
 - `/model` — Switch model
 - `/provider` — Switch API provider
 - `/variant` — Set reasoning variant

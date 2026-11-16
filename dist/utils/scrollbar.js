@@ -5,6 +5,7 @@
  * A one-column rail on the right edge shows where the visible window sits.
  * All the arithmetic lives here so it can be tested without a terminal.
  */
+import { clampScroll } from './scroll.js';
 export const SCROLLBAR_TRACK = '│';
 export const SCROLLBAR_THUMB = '┃';
 /**
@@ -25,7 +26,7 @@ export function scrollbarGeometry(transcriptRows, viewportRows, offset) {
     const thumb = Math.max(1, Math.min(height, Math.round(height * ratio)));
     const travel = height - thumb;
     const maxOffset = total - height;
-    const clampedOffset = Math.max(0, Math.min(offset, maxOffset));
+    const clampedOffset = clampScroll(offset, maxOffset);
     // offset 0 (bottom) -> thumb at the bottom; maxOffset (top) -> thumb at top.
     const fromTop = maxOffset === 0 ? 0 : (maxOffset - clampedOffset) / maxOffset;
     const start = Math.round(fromTop * travel);

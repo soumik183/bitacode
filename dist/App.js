@@ -63,8 +63,7 @@ import { Palette, SLASH_COMMANDS } from './components/Palette.js';
 import { ApprovalPrompt } from './components/ApprovalPrompt.js';
 import { AskPrompt } from './components/AskPrompt.js';
 import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
-import { DiffView } from './components/DiffView.js';
-import { ReadFileView } from './components/ReadFileView.js';
+import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
 import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.js';
 import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
@@ -73,24 +72,24 @@ import { loadSettings, saveSettings } from './settings.js';
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
 import { OpenAI } from 'openai';
-import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey } from './config.js';
+import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, ConfigureComponent } from './config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
 import { getAllProviders, getProvider, getModelDetails, getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { runAgenticLoop, initializeMessages, } from './agentic-loop.js';
-import { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setAskHandler, } from './tools/index.js';
+import { setDangerouslySkipPermissions, setApprovalMode, setApprovalHandler, clearApprovalHandler, setAskHandler, } from './tools/index.js';
 import { setLogLevel, LogLevel, initLogFile, logger } from './utils/logger.js';
-import { createSession, ensureSystemPromptAtTop, saveSession, loadSession, listSessions, generateTitle, } from './sessions.js';
+import { createSession, deleteSession, ensureSystemPromptAtTop, hasConversationMessages, saveSession, loadSession, listSessions, generateTitle, } from './sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession } from './tools/todo.js';
 import { initializeMcp, closeMcp } from './mcp.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { renderFormattedText, normalizeTranscriptText } from './utils/format-message.js';
-import { parseFileMutationDiff, parseFileReadResult } from './utils/file-diff.js';
 import { formatContextWindow, listProviderModels } from './utils/provider-models.js';
-import { formatToolActivity } from './utils/tool-display.js';
+import { addToolResultView } from './utils/tool-result-view.js';
+import { itemAtViewportRow } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isClickOnThinkingBlock, isMouseReport, stripMouseReports } from './utils/mouse.js';
 import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import { clampScroll, maxScrollOffset, scrollAfterGrowth, sliceItemsToWindow, visibleRowWindow, } from './utils/scroll.js';
-import { frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
+import { clampIndex, composerTextWidth, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from './utils/scrollbar.js';
 import { useAgentEventHandler } from './hooks/useAgentEventHandler.js';
 // Keep scrollback rendering light on long sessions and low-memory devices.
@@ -114,8 +113,12 @@ function fallbackItemRows(node) {
     return 2;
 }
 /** Renders one transcript row-group and reports its real height for scrolling. */
-const StaticEntry = React.memo(({ item, columns, onMeasure }) => {
+const StaticEntry = React.memo(({ item, columns, onMeasure, onRef }) => {
     const ref = React.useRef(null);
+    const setRef = React.useCallback((node) => {
+        ref.current = node;
+        onRef?.(item.id, node);
+    }, [item.id, onRef]);
     React.useEffect(() => {
         if (!ref.current)
             return;
@@ -123,25 +126,15 @@ const StaticEntry = React.memo(({ item, columns, onMeasure }) => {
         if (height > 0)
             onMeasure(item.id, height);
     }, [item.id, item.node, columns, onMeasure]);
-    return (_jsx(Box, { ref: ref, flexDirection: "column", children: item.node }));
+    return (_jsx(Box, { ref: setRef, flexDirection: "column", flexShrink: 0, children: _jsx(EntryErrorBoundary, { children: item.node }) }));
 });
-// Wordmark printed once as static output. Typing only re-renders the small
-// live region below it, so the terminal never blinks.
+// Empty-chat wordmark. It is rendered live (not into scrollback) so it can
+// disappear the moment the first message arrives.
 const SPLASH_LINES = [
     '█▄▄ █ ▀█▀ ▄▀█ █▀▀ █▀█ █▀▄ █▀▀',
     '█▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄',
 ];
-function printSplash(addStatic, columns) {
-    if (columns < 36)
-        return;
-    const width = SPLASH_LINES[0].length;
-    const leftPad = ' '.repeat(Math.max(0, Math.floor((columns - width) / 2)));
-    // One row of breathing room. The wordmark used to be vertically centred,
-    // which pushed it into the transcript and made it collide with the first
-    // messages on short terminals.
-    const body = SPLASH_LINES.map((line) => leftPad + line).join('\n');
-    addStatic(_jsx(Box, { flexDirection: "column", marginTop: 1, marginBottom: 1, children: _jsx(Text, { color: theme.text, bold: true, children: body }) }));
-}
+const Splash = () => (_jsx(Box, { flexDirection: "column", alignItems: "center", children: _jsx(Text, { color: theme.text, bold: true, children: SPLASH_LINES.join('\n') }) }));
 function printMessageToScrollback(addStatic, role, text) {
     const normalized = normalizeTranscriptText(text);
     if (!normalized) {
@@ -155,78 +148,103 @@ function printMessageToScrollback(addStatic, role, text) {
     // Fallback is assistant, render with Markdown formatting (bold, italic)
     addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized) }) }));
 }
+function replayOneMessage(addStatic, message, toolCallsById) {
+    const msgAny = message;
+    if (message.role === 'system')
+        return;
+    if (message.role === 'user' && typeof message.content === 'string') {
+        printMessageToScrollback(addStatic, 'user', message.content);
+        return;
+    }
+    if (message.role === 'assistant' &&
+        typeof message.content === 'string' &&
+        message.content.trim().length > 0) {
+        printMessageToScrollback(addStatic, 'assistant', message.content);
+        return;
+    }
+    if (message.role === 'tool') {
+        const savedCall = msgAny.tool_call_id ? toolCallsById.get(msgAny.tool_call_id) : undefined;
+        const toolName = typeof msgAny.name === 'string' && msgAny.name ? msgAny.name : savedCall?.name || 'tool';
+        const toolArgs = msgAny.args ?? savedCall?.args;
+        addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''));
+    }
+}
 function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.length) {
     const omitted = Math.max(0, messages.length - maxMessages);
     const visible = omitted > 0 ? messages.slice(omitted) : messages;
+    // Saved tool results only carry tool_call_id, so recover the tool name and
+    // arguments from the assistant message that requested them. Without this a
+    // resumed transcript renders every read/write/edit as "▶ tool".
+    const toolCallsById = new Map();
+    for (const message of messages) {
+        const msgAny = message;
+        if (msgAny.role !== 'assistant' || !Array.isArray(msgAny.tool_calls))
+            continue;
+        for (const call of msgAny.tool_calls) {
+            if (call?.id && call.function?.name) {
+                toolCallsById.set(call.id, { name: call.function.name, args: call.function.arguments });
+            }
+        }
+    }
     if (omitted > 0) {
         addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.dim, children: ["\u2026 ", omitted, " earlier message", omitted === 1 ? '' : 's', " kept in model context, not replayed \u2026"] }) }));
     }
     for (const message of visible) {
-        const msgAny = message;
-        if (message.role === 'system')
-            continue;
-        if (message.role === 'user' && typeof message.content === 'string') {
-            printMessageToScrollback(addStatic, 'user', message.content);
-            continue;
+        try {
+            replayOneMessage(addStatic, message, toolCallsById);
         }
-        if (message.role === 'assistant' && typeof message.content === 'string' && message.content.trim().length > 0) {
-            printMessageToScrollback(addStatic, 'assistant', message.content);
-            continue;
-        }
-        if (message.role === 'tool') {
-            const toolName = msgAny.name || 'tool';
-            const rawResult = String(msgAny.content || '');
-            const compact = rawResult.replace(/\s+/g, ' ').trim().slice(0, 180);
-            // Format tool display with args if available
-            let toolDisplay = toolName;
-            if (msgAny.args) {
-                try {
-                    const args = JSON.parse(msgAny.args);
-                    toolDisplay = formatToolActivity(toolName, args);
-                }
-                catch {
-                    // If parsing fails, use the tool name
-                }
-            }
-            const fileDiff = parseFileMutationDiff(toolName, msgAny.args, rawResult);
-            if (fileDiff) {
-                addStatic(_jsx(DiffView, { header: fileDiff.header, diff: fileDiff.diff, filePath: fileDiff.filePath, operation: fileDiff.operation }));
-                continue;
-            }
-            const fileRead = parseFileReadResult(toolName, msgAny.args, rawResult);
-            if (fileRead) {
-                addStatic(_jsx(ReadFileView, { ...fileRead }));
-                continue;
-            }
-            const isError = /^(Error\b|File not found\b|Operation cancelled\b)/i.test(rawResult.trim());
-            addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? theme.error : undefined, dimColor: !isError, children: ['▶ ', toolDisplay, ': ', compact] }) }));
+        catch (err) {
+            // One malformed saved message must not abort the rest of the transcript.
+            logger.warn('Skipped malformed session message during replay', {
+                error: err?.message ?? String(err),
+                role: message?.role,
+            });
+            addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: theme.dim, children: "\u2026 one saved message could not be displayed \u2026" }) }));
         }
     }
     if (messages.length > 0) {
         addStatic(_jsx(Box, { height: 1 }));
     }
 }
-// Limit streaming text to the free viewport rows to prevent overflow that
-// would trigger Ink's clearTerminal() and wipe scrollback history. Completed
-// lines are archived to <Static>; only the last visible lines stay live.
-function clipToRows(text, maxRows) {
-    const maxLines = Math.max(1, maxRows);
+// Limit streaming text to the free viewport rows. Count WRAPPED rows, not
+// logical lines: one long token with no newline can still wrap to many rows
+// and grow the frame (which pushes the composer off screen).
+function clipToRows(text, maxRows, columns) {
+    const budget = Math.max(1, maxRows);
+    const width = Math.max(1, columns);
     const lines = text.split('\n');
-    if (lines.length <= maxLines)
-        return text;
-    return lines.slice(lines.length - maxLines).join('\n');
+    const kept = [];
+    let rows = 0;
+    for (let index = lines.length - 1; index >= 0; index--) {
+        const lineRows = Math.max(1, Math.ceil(Array.from(lines[index]).length / width));
+        if (rows + lineRows > budget)
+            break;
+        rows += lineRows;
+        kept.unshift(lines[index]);
+    }
+    return (kept.length > 0 ? kept : [lines[lines.length - 1] ?? '']).join('\n');
 }
-// ─── Spinner frames for loading indicator ───
 // ─── Help text derived from slash commands ───
-const HELP_TEXT = [
-    'Commands:',
-    ...SLASH_COMMANDS.map((cmd) => `  ${cmd.name} - ${cmd.description}`),
-    '',
-    'Keys:',
-    '  ctrl+t - expand/collapse thinking',
-    '  esc    - close help / cancel the running turn',
-].join('\n');
-const SETTING_KEYS = ['animations', 'mouseClicks'];
+// Shortcuts accept ctrl OR alt (Ink reports Alt via `key.meta`). Text-editing
+// keys a/e/u/w belong to PromptInput, so they are deliberately absent here.
+const APPROVAL_MODES = ['manual', 'auto', 'yolo'];
+function buildHelpText(approvalMode) {
+    // Keep the panel compact: the live area is height-capped so the composer and
+    // footer can never be pushed off screen.
+    const commands = SLASH_COMMANDS.map((cmd) => cmd.name).join(' ');
+    return [
+        'Commands:',
+        `  ${commands}`,
+        '  /session delete <id> - delete a saved session',
+        '',
+        'Keys (ctrl or alt):',
+        '  n new · s sessions · m model · p provider · v variant',
+        '  h help · k clear · l clear chat · t thinking · b/f scroll',
+        '  , settings · / help · q sessions · esc close/cancel',
+        `  Approval mode: ${approvalMode} (ctrl+, or alt+, to change)`,
+    ].join('\n');
+}
+const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode'];
 function buildClient(config, apiKeyOverride) {
     const provider = getProvider(config.provider);
     const apiKey = apiKeyOverride?.trim() || resolveApiKey(config);
@@ -290,20 +308,74 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const [userScroll, setUserScroll] = useState(0);
     const [viewportRows, setViewportRows] = useState(Math.max(1, rows - 8));
     const [measuredHeights, setMeasuredHeights] = useState({});
+    // Restored sessions are measured off-screen before the transcript is shown,
+    // so a tall replay can never squeeze or overlap cards on the first frame.
+    const [measuringTranscript, setMeasuringTranscript] = useState(false);
     const viewportRef = useRef(null);
-    const addStatic = useCallback((node) => {
+    const entryNodesRef = useRef(new Map());
+    const registerEntryNode = useCallback((id, node) => {
+        if (node)
+            entryNodesRef.current.set(id, node);
+        else
+            entryNodesRef.current.delete(id);
+    }, []);
+    const addStatic = useCallback((node, toggle) => {
         staticCounterRef.current += 1;
         const id = `s${staticCounterRef.current}`;
         // Bound the React tree: the terminal keeps printed scrollback, but old
         // nodes should not accumulate in memory on long sessions.
         setStaticItems((prev) => {
-            const next = [...prev, { id, node }];
+            const next = [...prev, { id, node, toggle, expanded: false }];
             return next.length > MAX_STATIC_ITEMS ? next.slice(next.length - MAX_STATIC_ITEMS) : next;
         });
+    }, []);
+    const toggleStaticItem = useCallback((id) => {
+        setStaticItems((prev) => prev.map((item) => {
+            if (item.id !== id || !item.toggle)
+                return item;
+            const expanded = !item.expanded;
+            return {
+                ...item,
+                expanded,
+                node: expanded ? item.toggle.expanded : item.toggle.collapsed,
+            };
+        }));
     }, []);
     const handleMeasureItem = useCallback((id, rows) => {
         setMeasuredHeights((prev) => (prev[id] === rows ? prev : { ...prev, [id]: rows }));
     }, []);
+    // A restored transcript is fully measured before it is displayed. The timer
+    // is a safety net for a row that never reports a height (for example, an
+    // empty spacer), so a bad entry can never leave the UI stuck on "restoring".
+    useEffect(() => {
+        if (!measuringTranscript)
+            return;
+        if (staticItems.length > 0 &&
+            staticItems.every((item) => measuredHeights[item.id] !== undefined)) {
+            setMeasuringTranscript(false);
+        }
+    }, [measuringTranscript, staticItems, measuredHeights]);
+    useEffect(() => {
+        if (!measuringTranscript)
+            return;
+        const timer = setTimeout(() => setMeasuringTranscript(false), 2000);
+        return () => clearTimeout(timer);
+    }, [measuringTranscript]);
+    // staticItems is capped at MAX_STATIC_ITEMS; drop measurements for entries
+    // that have scrolled out of the React tree so the map cannot grow forever.
+    useEffect(() => {
+        const keep = new Set(staticItems.map((item) => item.id));
+        setMeasuredHeights((prev) => {
+            const ids = Object.keys(prev);
+            if (ids.every((id) => keep.has(id)))
+                return prev;
+            const next = {};
+            for (const id of ids)
+                if (keep.has(id))
+                    next[id] = prev[id];
+            return next;
+        });
+    }, [staticItems]);
     // Core state
     const [config, setConfig] = useState(null);
     const [completionMessages, setCompletionMessages] = useState([]);
@@ -315,7 +387,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const [helpMessage, setHelpMessage] = useState(null);
     const [threadErrors, setThreadErrors] = useState([]);
     const [initialized, setInitialized] = useState(false);
-    const [screenReady, setScreenReady] = useState(false);
     // User-facing preferences + live reasoning/todo state
     const [settings, setSettings] = useState(loadSettings);
     const [settingsIndex, setSettingsIndex] = useState(null);
@@ -346,6 +417,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const [modelSearch, setModelSearch] = useState('');
     const [sessionItems, setSessionItems] = useState([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
+    const [pendingSessionDelete, setPendingSessionDelete] = useState(null);
     // Approval state
     const [pendingAsk, setPendingAsk] = useState(null);
     const [pendingApproval, setPendingApproval] = useState(null);
@@ -405,6 +477,9 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const didPrintIntroRef = useRef(false);
     const printedThreadErrorIdsRef = useRef(new Set());
     const initializeWithConfig = useCallback(async (loadedConfig) => {
+        // The first-run wizard may have just written a new config, so refresh the
+        // provider registry before building the client.
+        await loadRuntimeConfig(true);
         setConfig(loadedConfig);
         clientRef.current = buildClient(loadedConfig);
         // Initialize MCP servers
@@ -454,7 +529,9 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 setSession(loadedSession);
                 setCompletionMessages(loadedSession.completionMessages);
                 if (!didPrintIntroRef.current) {
-                    printSplash(addStatic, columns);
+                    if (hasConversationMessages(loadedSession.completionMessages)) {
+                        setMeasuringTranscript(true);
+                    }
                     replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES);
                     didPrintIntroRef.current = true;
                     sessionSavedRef.current = true;
@@ -472,13 +549,16 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             clearTodos(newSession.id);
             newSession.completionMessages = initialCompletionMessages;
             setSession(newSession);
-            if (!didPrintIntroRef.current) {
-                printSplash(addStatic, columns);
-                didPrintIntroRef.current = true;
-            }
+            didPrintIntroRef.current = true;
         }
         setInitialized(true);
-    }, [dangerouslySkipPermissions, sessionId, addStatic, columns, rows]);
+    }, [dangerouslySkipPermissions, sessionId, addStatic]);
+    const handleSetupComplete = useCallback((nextConfig) => {
+        setError(null);
+        void initializeWithConfig(nextConfig).catch((err) => {
+            setError(`Initialization failed: ${err.message}`);
+        });
+    }, [initializeWithConfig]);
     useEffect(() => {
         if (!loading || !settings.animations) {
             setSpinnerFrame(0);
@@ -530,6 +610,13 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     useEffect(() => {
         remoteModelsRef.current = remoteModels;
     }, [remoteModels]);
+    // A delete confirmation belongs to the session picker only. Clear it as soon
+    // as any other picker (or no picker) is shown so y/n cannot leak into the
+    // model search box or the prompt.
+    useEffect(() => {
+        if (picker !== 'session')
+            setPendingSessionDelete(null);
+    }, [picker]);
     useEffect(() => {
         if (error) {
             addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.error, children: ["Error: ", error] }) }));
@@ -554,15 +641,14 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         }
         setTodos(getTodosForSession(id));
     }, [session?.id, completionMessages]);
-    // Alternate screen keeps the fixed input/footer on screen while the
-    // transcript scrolls inside its own viewport.
+    // The alternate screen is entered and cleared by cli.tsx *before* Ink's
+    // first render. Doing the raw \x1b[2J\x1b[H here (after commit) desyncs
+    // Ink's incremental cursor/line accounting: Ink assumes the cursor is at the
+    // bottom of the last frame, but the raw clear homes it to row 0, so later
+    // diffs paint rows at the wrong offsets (e.g. a duplicated composer row).
     useEffect(() => {
         if (!stdout)
             return;
-        stdout.write('\x1b[?1049h');
-        stdout.write(`\x1b]11;${theme.bg}\x07`);
-        stdout.write('\x1b[2J\x1b[H');
-        setScreenReady(true);
         return () => {
             stdout.write('\x1b[?1006l\x1b[?1000l');
             stdout.write('\x1b]111\x07');
@@ -615,6 +701,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         streamingText.length,
         helpMessage ? helpMessage.length : 0,
         pendingApproval ? 1 : 0,
+        pendingAsk ? 1 : 0,
+        keyPrompt ? 1 : 0,
         picker ?? '',
         settingsIndex !== null ? 1 : 0,
         initialized ? 1 : 0,
@@ -640,10 +728,13 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                     logger.info(`Log file: ${logger.getLogFilePath()}`);
                 }
             }
-            // Set global approval mode
+            // Set global approval mode. Apply the persisted setting on startup; the
+            // backend ORs the CLI skip flag, so a persisted 'manual' cannot cancel
+            // --dangerously-skip-permissions.
             if (dangerouslySkipPermissions) {
                 setDangerouslySkipPermissions(true);
             }
+            setApprovalMode(settings.approvalMode);
             // Register interactive approval handler
             setApprovalHandler(async (req) => {
                 return new Promise((resolve) => {
@@ -657,10 +748,16 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                     setPendingAsk({ request: req, resolve });
                 });
             });
-            await loadRuntimeConfig();
+            // First run: create the shared config folder, then let the inline setup
+            // flow choose a provider/model instead of failing with "no config".
+            try {
+                ensureUserConfigDirectory();
+            }
+            catch (err) {
+                logger.warn('Could not create the Bitacode config directory', { error: err.message });
+            }
             const loadedConfig = readConfig('active');
             if (!loadedConfig) {
-                setError('No config found. Run: bitacode configure');
                 setInitialized(true);
                 return;
             }
@@ -708,6 +805,10 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         color: variant.color,
         bold: true,
     }));
+    // The CLI skip flag forces yolo at runtime; show it that way everywhere.
+    const effectiveApprovalMode = dangerouslySkipPermissions
+        ? 'yolo'
+        : settings.approvalMode;
     const settingItems = [
         {
             id: 'animations',
@@ -719,11 +820,25 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             label: 'Mouse click thinking',
             description: settings.mouseClicks ? 'on' : 'off',
         },
+        {
+            id: 'approvalMode',
+            label: 'Approval mode',
+            description: effectiveApprovalMode,
+        },
     ];
     const toggleSetting = useCallback((index) => {
         const key = SETTING_KEYS[index];
         if (!key)
             return;
+        if (key === 'approvalMode') {
+            const current = APPROVAL_MODES.indexOf(settings.approvalMode);
+            const nextMode = APPROVAL_MODES[(current + 1) % APPROVAL_MODES.length];
+            const next = { ...settings, approvalMode: nextMode };
+            setSettings(next);
+            saveSettings(next);
+            setApprovalMode(nextMode);
+            return;
+        }
         const next = { ...settings, [key]: !settings[key] };
         setSettings(next);
         saveSettings(next);
@@ -917,7 +1032,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const startNewSession = useCallback(async () => {
         if (!config) {
             setError('Cannot start a new session: no provider/model is configured.');
-            return;
+            return false;
         }
         setError(null);
         setHelpMessage(null);
@@ -932,8 +1047,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         try {
             // Preserve the current conversation before wiping the screen. If this
             // fails, keep the existing session so no transcript is lost.
-            const hasConversation = completionMessages.some((message) => message.role !== 'system');
-            if (session && hasConversation) {
+            if (session && hasConversationMessages(completionMessages)) {
                 const finished = {
                     ...session,
                     completionMessages,
@@ -957,28 +1071,28 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             printedThreadErrorIdsRef.current = new Set();
             if (previousSessionId)
                 clearTodos(previousSessionId);
-            // Fresh canvas for the new session.
-            stdout?.write('\x1b[2J\x1b[H');
+            // Fresh canvas for the new session. Clearing the transcript state is
+            // enough: Ink's incremental renderer repaints only the changed rows.
+            // A raw \x1b[2J\x1b[H here would desync its cursor tracking and flicker.
             setStaticItems([]);
             setUserScroll(0);
-            printSplash(addStatic, columns);
-            addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: theme.dim, children: ["New session \u00B7 ", config.provider, " / ", config.model] }) }));
+            setMeasuringTranscript(false);
+            return true;
         }
         catch (err) {
             setError(`Failed to start a new session: ${err.message}`);
+            return false;
         }
     }, [
         config,
         session,
         completionMessages,
         variantId,
-        addStatic,
-        columns,
-        rows,
         resetLiveState,
         stdout,
     ]);
     const openSessionPicker = useCallback(async () => {
+        setPendingSessionDelete(null);
         setSessionsLoading(true);
         setSessionItems([]);
         try {
@@ -1006,6 +1120,31 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             setSessionsLoading(false);
         }
     }, [session?.id]);
+    const deleteSavedSession = useCallback(async (id, refreshPicker = false) => {
+        if (!id)
+            return;
+        setError(null);
+        try {
+            // Deleting the active session must first move to a fresh one; otherwise
+            // the next save would immediately recreate the file we just removed.
+            if (session?.id === id) {
+                const started = await startNewSession();
+                if (!started)
+                    return;
+            }
+            const removed = await deleteSession(id);
+            clearTodos(id);
+            if (!removed) {
+                setError(`Could not delete session "${id}".`);
+                return;
+            }
+            if (refreshPicker)
+                await openSessionPicker();
+        }
+        catch (err) {
+            setError(`Could not delete session: ${err.message}`);
+        }
+    }, [session?.id, startNewSession, openSessionPicker]);
     const switchSession = useCallback(async (id) => {
         if (!config) {
             setError('Cannot open a session: no provider/model is configured.');
@@ -1022,8 +1161,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 return;
             }
             // Preserve the current conversation before replacing it.
-            const hasConversation = completionMessages.some((message) => message.role !== 'system');
-            if (session && hasConversation) {
+            if (session && hasConversationMessages(completionMessages)) {
                 await saveSession({
                     ...session,
                     completionMessages,
@@ -1072,10 +1210,11 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             if (modelError) {
                 setError(`Session loaded, but its model is unavailable: ${modelError}`);
             }
-            stdout?.write('\x1b[2J\x1b[H');
             setStaticItems([]);
             setUserScroll(0);
-            printSplash(addStatic, columns);
+            if (hasConversationMessages(messages)) {
+                setMeasuringTranscript(true);
+            }
             replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES);
             didPrintIntroRef.current = true;
             sessionSavedRef.current = true;
@@ -1090,8 +1229,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         variantId,
         settings,
         addStatic,
-        columns,
-        rows,
         resetLiveState,
         persistActiveSelection,
         getModelPaletteInfo,
@@ -1127,13 +1264,21 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 }
                 return true;
             case '/help':
-                setHelpMessage(HELP_TEXT);
+                setHelpMessage(buildHelpText(effectiveApprovalMode));
                 return true;
             case '/new':
                 void startNewSession();
                 return true;
             case '/session':
-                if (parts[1]) {
+                if (parts[1]?.toLowerCase() === 'delete') {
+                    if (parts[2]) {
+                        void deleteSavedSession(parts[2]);
+                    }
+                    else {
+                        setError('Usage: /session delete <id>');
+                    }
+                }
+                else if (parts[1]) {
                     void switchSession(parts[1]);
                 }
                 else {
@@ -1176,10 +1321,12 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         allModelItems,
         providerItems,
         variantId,
+        effectiveApprovalMode,
         loadModels,
         startNewSession,
         switchSession,
         openSessionPicker,
+        deleteSavedSession,
     ]);
     const applyPicker = useCallback(() => {
         if (picker === 'model') {
@@ -1223,7 +1370,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             setPicker(null);
         }
         else if (picker === 'variant') {
-            const variant = VARIANTS[pickerIndex];
+            const variant = VARIANTS[clampIndex(pickerIndex, VARIANTS.length)];
             if (variant) {
                 setVariantId(variant.id);
                 const nextSettings = { ...settings, variant: variant.id };
@@ -1233,7 +1380,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             setPicker(null);
         }
         else if (picker === 'provider') {
-            const item = providerItems[pickerIndex];
+            const item = providerItems[clampIndex(pickerIndex, providerItems.length)];
             if (!item) {
                 setPicker(null);
                 return;
@@ -1258,7 +1405,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             beginProviderSwitch(item.id);
         }
         else if (picker === 'session') {
-            const item = sessionItems[pickerIndex];
+            const item = sessionItems[clampIndex(pickerIndex, sessionItems.length)];
             setPicker(null);
             setSessionItems([]);
             if (item)
@@ -1360,7 +1507,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         catch (err) {
             if (runId !== activeRunRef.current)
                 return;
-            setError(`Error: ${err.message}`);
+            setError(err.message);
         }
         finally {
             if (runId === activeRunRef.current) {
@@ -1380,14 +1527,20 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         }
     }, [handleSubmit]);
     const transcriptRows = staticItems.reduce((total, item) => total + (measuredHeights[item.id] ?? fallbackItemRows(item.node)), 0);
-    const maxUserScroll = maxScrollOffset(transcriptRows, viewportRows);
+    const unmeasuredItems = staticItems.filter((item) => measuredHeights[item.id] === undefined);
+    const restoringTranscript = measuringTranscript && staticItems.length > 0 && unmeasuredItems.length > 0;
+    // One row of the viewport is reserved for top breathing room so the first
+    // message never touches the screen edge. Clamp and slice against the SAME
+    // window, otherwise the oldest row is unreachable (max used the full viewport
+    // while the slice used viewport - pad).
+    const TOP_PAD = 1;
+    const windowRows = Math.max(1, viewportRows - TOP_PAD);
+    const maxUserScroll = maxScrollOffset(transcriptRows, windowRows);
     const effectiveUserScroll = clampScroll(userScroll, maxUserScroll);
     // Only the rows inside the viewport are rendered. Ink's negative marginTop
-    // over-scrolls and snaps, which made scrolling lag and skip rows.
-    // One row of the viewport is reserved for top breathing room so the first
-    // message never touches the screen edge.
-    const TOP_PAD = 1;
-    const rowWindow = visibleRowWindow(transcriptRows, Math.max(1, viewportRows - TOP_PAD), effectiveUserScroll);
+    // over-scrolls and snaps when used to scroll the whole view, so the window is
+    // sliced from measured rows; a margin is used only to clip one partial item.
+    const rowWindow = visibleRowWindow(transcriptRows, windowRows, effectiveUserScroll);
     // Map the row window onto measured items. Items below the viewport are
     // skipped entirely, so a long session stays cheap to render.
     const sizedItems = staticItems.map((item) => ({
@@ -1397,6 +1550,10 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const windowSlice = sliceItemsToWindow(sizedItems.map((entry) => ({ id: entry.item.id, rows: entry.rows })), rowWindow.first, rowWindow.last);
     const visibleIds = new Set(windowSlice.items.map((entry) => entry.id));
     const visibleItems = staticItems.filter((item) => visibleIds.has(item.id));
+    const visibleRowItems = visibleItems.map((item) => ({
+        id: item.id,
+        rows: measuredHeights[item.id] ?? fallbackItemRows(item.node),
+    }));
     const trimTop = windowSlice.trimTop;
     // Input handlers can fire faster than React re-renders (wheel bursts), so
     // keep the scroll position in a ref and clamp against the latest layout.
@@ -1435,6 +1592,9 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             exit();
             return;
         }
+        // The inline first-run setup owns input until a config is saved.
+        if (!config)
+            return;
         // API key prompt owns text input; only Esc (when idle) is handled here.
         if (keyPrompt) {
             if (key.escape && !keyPrompt.busy)
@@ -1464,10 +1624,30 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         if (picker) {
             if (isMouseReport(input))
                 return;
+            if (picker === 'session') {
+                if (pendingSessionDelete) {
+                    const answer = input.toLowerCase();
+                    if (answer === 'y') {
+                        const target = pendingSessionDelete;
+                        setPendingSessionDelete(null);
+                        void deleteSavedSession(target.id, true);
+                    }
+                    else if (answer === 'n' || key.escape) {
+                        setPendingSessionDelete(null);
+                    }
+                    return;
+                }
+                if (input.toLowerCase() === 'd') {
+                    const item = sessionItems[clampIndex(pickerIndex, sessionItems.length)];
+                    if (item)
+                        setPendingSessionDelete({ id: item.id, label: item.label });
+                    return;
+                }
+            }
             // The model picker doubles as a search box.
             if (picker === 'model') {
                 if (key.backspace || key.delete) {
-                    setModelSearch((prev) => prev.slice(0, -1));
+                    setModelSearch((prev) => Array.from(prev).slice(0, -1).join(''));
                     setPickerIndex(0);
                     return;
                 }
@@ -1515,6 +1695,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 setModelsLoading(false);
                 setSessionItems([]);
                 setSessionsLoading(false);
+                setPendingSessionDelete(null);
             }
             return;
         }
@@ -1527,16 +1708,114 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 return;
             }
             const press = getLeftMousePress(input);
-            const blockHeight = thinkingBlockHeight(thinkingText, thinkingExpanded, columns, rows);
-            if (press && isClickOnThinkingBlock(press.y, rows, blockHeight)) {
-                thinkingPinnedRef.current = true;
-                setThinkingExpanded((expanded) => !expanded);
+            if (press) {
+                // Transcript clicks toggle an archived thought/shell card. Clicks that
+                // land in transcript padding are swallowed instead of leaking into the
+                // live thinking block below.
+                if (press.y <= viewportRows) {
+                    const clickRow = press.y - 1;
+                    // Use the boxes Ink actually laid out. Measured heights can lag one
+                    // render behind a new or expanded card, and stale rows send clicks
+                    // to the wrong transcript item.
+                    const layoutItems = visibleItems.map((item) => {
+                        const node = entryNodesRef.current.get(item.id);
+                        return {
+                            id: item.id,
+                            top: node?.yogaNode?.getComputedTop?.(),
+                            height: node?.yogaNode?.getComputedHeight?.(),
+                        };
+                    });
+                    const layoutHit = layoutItems.find((item) => typeof item.top === 'number' &&
+                        typeof item.height === 'number' &&
+                        clickRow >= item.top &&
+                        clickRow < item.top + item.height);
+                    // The first item is clipped, not preceded by a blank spacer, so give
+                    // the fallback its reduced visible height and no trim offset.
+                    const hitItems = trimTop > 0 && visibleRowItems.length > 0
+                        ? [
+                            { ...visibleRowItems[0], rows: Math.max(0, visibleRowItems[0].rows - trimTop) },
+                            ...visibleRowItems.slice(1),
+                        ]
+                        : visibleRowItems;
+                    const clickedId = layoutHit?.id ?? itemAtViewportRow(hitItems, clickRow, TOP_PAD, 0);
+                    if (clickedId)
+                        toggleStaticItem(clickedId);
+                    return;
+                }
+                const blockHeight = thinkingBlockHeight(thinkingText, thinkingExpanded, columns, rows);
+                if (isClickOnThinkingBlock(press.y, rows, blockHeight)) {
+                    thinkingPinnedRef.current = true;
+                    setThinkingExpanded((expanded) => !expanded);
+                }
             }
             return;
         }
+        // Global shortcuts (ctrl or alt/option — Ink reports Alt as `key.meta`).
+        // This sits after the picker/settings/API-key/mouse handlers so a modified
+        // key can never be mistaken for a command while searching a picker or
+        // confirming approval. a/e/u/w are left to PromptInput's text editing.
+        const dismissible = !picker && settingsIndex === null && !keyPrompt && !pendingApproval && !pendingAsk;
+        if (dismissible) {
+            // Some terminals send ctrl+, / ctrl+/ as raw control bytes with no
+            // modifier flags; normalise them so both spellings work.
+            const ch = input === '\x1c' ? ',' : input === '\x1f' ? '/' : input;
+            if (key.ctrl || key.meta || ch !== input) {
+                const pageRows = Math.max(1, Math.floor(viewportRows / 2));
+                const toggleHelp = () => setHelpMessage((prev) => (prev ? null : buildHelpText(effectiveApprovalMode)));
+                switch (ch) {
+                    case 'n':
+                        void handleSlashCommand('/new');
+                        return;
+                    case 's':
+                        void openSessionPicker();
+                        return;
+                    case 'm':
+                        void handleSlashCommand('/model');
+                        return;
+                    case 'p':
+                        void handleSlashCommand('/provider');
+                        return;
+                    case 'v':
+                        void handleSlashCommand('/variant');
+                        return;
+                    case 'h':
+                        toggleHelp();
+                        return;
+                    case '/':
+                        toggleHelp();
+                        return;
+                    case ',':
+                        void handleSlashCommand('/settings');
+                        return;
+                    case 'q':
+                        void openSessionPicker();
+                        return;
+                    case 'k':
+                        setInputText('');
+                        setInputResetKey((prev) => prev + 1);
+                        return;
+                    case 'l':
+                        setStaticItems([]);
+                        setUserScroll(0);
+                        return;
+                    case 't':
+                        if (thinkingText) {
+                            thinkingPinnedRef.current = true;
+                            setThinkingExpanded((expanded) => !expanded);
+                        }
+                        return;
+                    case 'b':
+                        scrollBy(pageRows);
+                        return;
+                    case 'f':
+                        scrollBy(-pageRows);
+                        return;
+                }
+            }
+        }
         // Scroll the transcript without moving the input/footer. Arrows also work
         // when Termux sends them for touch swipes.
-        if (!picker && settingsIndex === null && !pendingApproval && !(inputText.startsWith('/') && commandItems.length > 0)) {
+        if (!picker && settingsIndex === null && !pendingApproval && !pendingAsk && !(inputText.startsWith('/') && commandItems.length > 0)) {
             const pageRows = Math.max(1, Math.floor(viewportRows / 2));
             if (key.pageUp || (key.ctrl && input === 'b')) {
                 scrollBy(pageRows);
@@ -1562,13 +1841,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 scrollBy(-(key.shift ? 3 : 1));
                 return;
             }
-        }
-        if (key.ctrl && input === 't') {
-            if (thinkingText) {
-                thinkingPinnedRef.current = true;
-                setThinkingExpanded((expanded) => !expanded);
-            }
-            return;
         }
         // Esc closes inline help.
         if (key.escape && helpMessage) {
@@ -1609,8 +1881,14 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         ? `${providerLabel} / ${remoteModelLabel ?? getModelDetails(config.provider, config.model)?.name ?? config.model}`
         : 'not configured';
     const folderName = basename(process.cwd());
+    const showSplash = initialized &&
+        config !== null &&
+        !loading &&
+        !isStreaming &&
+        !hasConversationMessages(completionMessages);
     // Responsive breakpoints live in utils/layout.ts so every panel agrees.
     const layout = resolveLayout(columns, rows);
+    const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
     const { paletteWindow, visibleTodos, gutter } = layout;
     const inputFocused = initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
     // Provider-driven only: the block appears when the model actually streams
@@ -1638,13 +1916,17 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         streaming: streamReserve,
     });
     const maxStreamRows = Math.max(1, area.transcriptRows);
-    if (!screenReady)
-        return null;
     // Rail geometry. `viewportRows` is measured from the real layout, so the
     // thumb lines up with what is actually on screen.
     const scrollbar = scrollbarGeometry(transcriptRows, viewportRows, effectiveUserScroll);
-    const railLines = scrollbarLines(scrollbar);
-    return (_jsxs(Box, { flexDirection: "column", height: frameHeight, children: [_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), trimTop > 0 && _jsx(Box, { height: trimTop, flexShrink: 0 }), visibleItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, item.id)))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] }), _jsxs(Box, { flexDirection: "column", flexShrink: 0, children: [helpMessage && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !pendingApproval && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), hasThinkingBlock && !pendingApproval && (_jsx(ThinkingBlock, { text: thinkingText, expanded: thinkingExpanded, active: thinkingActive, animate: settings.animations, frame: spinnerFrame, columns: columns, rows: rows, elapsedMs: thinkingElapsedMs })), isStreaming && (_jsx(Box, { paddingX: gutter, paddingBottom: 1, children: _jsxs(Text, { wrap: "wrap", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows)), _jsx(Text, { dimColor: true, children: "\u258D" })] }) })), threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`))), pendingAsk && !pendingApproval && (_jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: columns, onRespond: (response) => {
+    const railLines = restoringTranscript ? [] : scrollbarLines(scrollbar);
+    return (_jsxs(Box, { flexDirection: "column", height: frameHeight, children: [_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
+                                    // First item is partly above the viewport. Trim its top rows
+                                    // by shifting it up inside a clipped, fixed-height box. A
+                                    // blank spacer here shows empty rows and shoves the item's
+                                    // bottom off-screen. The wrapper is registered for clicks so
+                                    // the yoga lookup still sees the clipped geometry.
+                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] }), _jsxs(Box, { flexDirection: "column", flexShrink: 1, minHeight: 0, overflow: "hidden", children: [helpMessage && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && (_jsx(Box, { paddingX: 2, marginY: 1, children: _jsx(ConfigureComponent, { firstRun: true, onComplete: handleSetupComplete }) })), initialized && !pendingApproval && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), hasThinkingBlock && !pendingApproval && (_jsx(ThinkingBlock, { text: thinkingText, expanded: thinkingExpanded, active: thinkingActive, animate: settings.animations, frame: spinnerFrame, columns: columns, rows: rows, elapsedMs: thinkingElapsedMs })), isStreaming && (_jsx(Box, { paddingX: gutter, paddingBottom: 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, columns - gutter * 2)), _jsx(Text, { dimColor: true, children: "\u258D" })] }) })), threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`))), pendingAsk && !pendingApproval && (_jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: columns, onRespond: (response) => {
                             pendingAsk.resolve(response);
                             setPendingAsk(null);
                         } })), pendingApproval && (_jsx(ApprovalPrompt, { request: pendingApproval.request, onRespond: (response) => {
@@ -1656,5 +1938,9 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                                         ? `Loading models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
                                         : modelSearch.trim()
                                             ? `No models match "${modelSearch}".`
-                                            : modelNotice ?? 'No models available.' }) }))] })), picker === 'provider' && (_jsx(Palette, { title: "Select provider", items: providerItems, selected: pickerIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), picker === 'session' && (sessionItems.length > 0 ? (_jsx(Palette, { title: "Select session", items: sessionItems, selected: Math.min(pickerIndex, sessionItems.length - 1), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter resume \u00B7 esc cancel" })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: sessionsLoading ? theme.dim : theme.muted, children: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.' }) }))), picker === 'variant' && (_jsx(Palette, { title: "Select variant", items: variantItems, selected: pickerIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), settingsIndex !== null && (_jsx(Palette, { title: "Settings", items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter toggle \u00B7 esc close" })), !picker && !keyPrompt && settingsIndex === null && initialized && !pendingApproval && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && !pendingApproval && !pendingAsk && !keyPrompt && (_jsx(Box, { flexDirection: "column", alignItems: "center", children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: 1, paddingLeft: 1, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1 }), _jsx(Box, { flexGrow: 1, minWidth: 8, paddingRight: 2, children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: !config || picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: config ? 'Build anything…' : 'Run: bitacode configure' }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && !pendingApproval && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter }))] }));
+                                            : modelNotice ?? 'No models available.' }) }))] })), picker === 'provider' && (_jsx(Palette, { title: "Select provider", items: providerItems, selected: clampIndex(pickerIndex, providerItems.length), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), picker === 'session' && (sessionItems.length > 0 ? (_jsx(Palette, { title: pendingSessionDelete
+                            ? `Delete session "${pendingSessionDelete.label}"?`
+                            : 'Select session', items: sessionItems, selected: clampIndex(pickerIndex, sessionItems.length), maxVisible: paletteWindow, hint: pendingSessionDelete
+                            ? 'y delete permanently · n cancel'
+                            : '↑↓ select · enter resume · d delete · esc close' })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: sessionsLoading ? theme.dim : theme.muted, children: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.' }) }))), picker === 'variant' && (_jsx(Palette, { title: "Select variant", items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), settingsIndex !== null && (_jsx(Palette, { title: "Settings", items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter toggle \u00B7 esc close" })), !picker && !keyPrompt && settingsIndex === null && initialized && !pendingApproval && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && config && !pendingApproval && !pendingAsk && !keyPrompt && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && config && !pendingApproval && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter }))] }));
 };

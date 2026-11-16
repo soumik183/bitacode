@@ -18,7 +18,7 @@ import { bashTool, runBash } from './bash.js';
 import { todoReadTool, todoWriteTool, readTodos, writeTodos } from './todo.js';
 import { webfetchTool, webfetch } from './webfetch.js';
 import { askQuestionTool, askUser, normalizeAskRequest } from './ask.js';
-export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler } from '../utils/approval.js';
+export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
 export { setAskHandler, clearAskHandler, hasAskHandler } from './ask.js';
 // All tool definitions — passed to the LLM
 export const tools = [

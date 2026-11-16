@@ -1,8 +1,9 @@
 /**
  * File read-time tracking — staleness guard for edit_file.
  *
- * Ensures the model has read a file before editing it,
- * and that the file hasn't changed on disk since it was last read.
+ * Rejects an edit when a file changed on disk after this process read it.
+ * A resumed session has no in-memory read history, so edits there rely on
+ * old_string matching the current content instead.
  */
 import fs from 'node:fs';
 const readTimes = new Map(); // key: "sessionId:absolutePath" → epoch ms
@@ -13,17 +14,19 @@ export function recordRead(sessionId, absolutePath) {
     readTimes.set(`${sessionId}:${absolutePath}`, Date.now());
 }
 /**
- * Check that a file was previously read and hasn't changed on disk since.
+ * Check that a file hasn't changed on disk since this process last read it.
  * Returns an error string if the check fails, or null if all is well.
- * Use this instead of assertReadBefore so staleness errors surface as normal
- * tool return values rather than exceptions that get swallowed into a generic
- * "Error executing edit_file: ..." message.
+ * Files with no read record are allowed: the read may have happened in the
+ * previous process that owned this session.
  */
 export function checkReadBefore(sessionId, absolutePath) {
     const key = `${sessionId}:${absolutePath}`;
     const lastRead = readTimes.get(key);
     if (!lastRead) {
-        return `You must read '${absolutePath}' before editing it. Call read_file first.`;
+        // Resumed sessions start with an empty in-memory map. The edit still has
+        // to match the file's current content, so only reject edits we know are
+        // stale from an earlier read in this process.
+        return null;
     }
     try {
         const mtime = fs.statSync(absolutePath).mtimeMs;

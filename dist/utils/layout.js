@@ -14,7 +14,9 @@ export function resolveLayout(columns, rows) {
     // Composer: full width minus a breathing margin, with a sane cap so it does
     // not stretch absurdly on ultrawide terminals.
     const inputMax = size === 'wide' ? 110 : size === 'regular' ? 96 : cols - 2 * gutter;
-    const inputWidth = Math.max(16, Math.min(cols - 2 * gutter, inputMax));
+    const available = Math.max(1, cols - 2 * gutter);
+    // Never wider than the screen: a tiny terminal cannot afford the old 16-col floor.
+    const inputWidth = Math.max(1, Math.min(available, inputMax));
     // Pickers must always leave room for the composer and footer.
     const paletteWindow = Math.max(3, Math.min(size === 'compact' ? 4 : 7, lines - 12));
     // Todo panel must never eat the whole screen; keep at least 4 rows of
@@ -42,8 +44,27 @@ export function resolveLayout(columns, rows) {
  */
 export function frameRows(terminalRows) {
     const rows = Math.max(1, Math.floor(terminalRows));
-    // Below 4 rows there is no room to spare; the frame has to fill the screen.
-    return rows <= 4 ? rows : rows - 1;
+    // Stay below the terminal height even on tiny screens, otherwise Ink takes
+    // its full-screen erase path and the frame blinks on every update.
+    return rows > 1 ? rows - 1 : 1;
+}
+/**
+ * Columns available to the composer text itself.
+ *
+ * The outer composer reserves 1 (left padding) + 2 (accent bar) + 2 (inner
+ * right padding) columns, plus 2 more for the ↵ hint when it is shown.
+ */
+export function composerTextWidth(inputWidth, showSubmitHint) {
+    return Math.max(1, Math.floor(inputWidth) - 5 - (showSubmitHint ? 2 : 0));
+}
+/**
+ * Clamp a selection index into a list that may have just shrunk (for example
+ * after deleting a session). Returns 0 for an empty list.
+ */
+export function clampIndex(index, length) {
+    if (!Number.isFinite(index))
+        return 0;
+    return Math.max(0, Math.min(Math.floor(index), Math.max(0, length - 1)));
 }
 /**
  * Split the frame between the scrolling transcript and the fixed live area.

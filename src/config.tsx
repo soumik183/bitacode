@@ -93,6 +93,13 @@ export const getUserRuntimeConfigPath = () => {
   return path.join(getUserRuntimeConfigDirectory(), 'bitacode.jsonc');
 };
 
+/** Creates the shared config folder so first run never starts without it. */
+export const ensureUserConfigDirectory = (): string => {
+  const configDir = getUserRuntimeConfigDirectory();
+  ensureDirectory(configDir);
+  return configDir;
+};
+
 export const getProjectRuntimeConfigDirectory = (cwd = process.cwd()) => {
   return path.join(cwd, '.bitacode');
 };
@@ -443,6 +450,7 @@ interface ModelSelectionProps {
   onSelect?: (providerId: string, modelId: string) => void;
   setStep?: (step: number) => void;
   title?: string;
+  subtitle?: string;
 }
 export const ModelSelection: React.FC<ModelSelectionProps> = ({
   setSelectedProviderId,
@@ -450,6 +458,7 @@ export const ModelSelection: React.FC<ModelSelectionProps> = ({
   onSelect,
   setStep,
   title,
+  subtitle,
 }) => {
   const items = getAllProviders().flatMap((provider) =>
     provider.models.map((model) => ({
@@ -472,6 +481,7 @@ export const ModelSelection: React.FC<ModelSelectionProps> = ({
   return (
     <Box flexDirection="column">
       {title && <Text color={theme.text} bold>{title}</Text>}
+      {subtitle && <Text color={theme.muted}>{subtitle}</Text>}
       <Text>Select an AI Model:</Text>
       <Select options={items} onChange={handleSelect} />
     </Box>
@@ -559,8 +569,14 @@ export const ConfigResult: React.FC<ConfigResultProps> = ({ configWritten }) => 
   );
 };
 
-export const ConfigureComponent = () => {
-  const [step, setStep] = useState(0);
+interface ConfigureComponentProps {
+  onComplete?: (config: Config) => void;
+  /** First-run flow: save to the shared user config and skip target selection. */
+  firstRun?: boolean;
+}
+
+export const ConfigureComponent = ({ onComplete, firstRun = false }: ConfigureComponentProps = {}) => {
+  const [step, setStep] = useState(firstRun ? 2 : 0);
   const [target, setTarget] = useState<InitConfigTarget>('user');
   const [existingConfig, setExistingConfig] = useState<Config | null>(null);
   const [selectedProviderId, setSelectedProviderId] = useState('');
@@ -590,6 +606,8 @@ export const ConfigureComponent = () => {
           setSelectedProviderId={setSelectedProviderId}
           setSelectedModelId={setSelectedModelId}
           setStep={setStep}
+          title={firstRun ? 'Welcome to Bitacode' : undefined}
+          subtitle={firstRun ? `Saving to ${getUserRuntimeConfigPath()}` : undefined}
         />
       );
     case 3:
@@ -598,6 +616,7 @@ export const ConfigureComponent = () => {
           selectedProviderId={selectedProviderId}
           selectedModelId={selectedModelId}
           target={target}
+          onComplete={onComplete}
           setStep={setStep}
           setConfigWritten={setConfigWritten}
         />

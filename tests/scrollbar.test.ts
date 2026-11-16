@@ -58,3 +58,20 @@ test('offset is clamped to the scrollable range', () => {
   const zero = scrollbarGeometry(100, 20, 0);
   assert.deepEqual(negative, zero);
 });
+
+test('H5: the thumb never overflows the rail across the whole range', () => {
+  for (const offset of [0, 1, 20, 40, 60, 79, 80]) {
+    const geometry = scrollbarGeometry(100, 20, offset)!;
+    assert.ok(geometry.start >= 0, `negative start at ${offset}`);
+    assert.ok(geometry.start + geometry.thumb <= geometry.height, `overflow at ${offset}`);
+    assert.equal(scrollbarLines(geometry).length, geometry.height);
+  }
+});
+
+test('H5: non-finite offsets are clamped like the scroller', () => {
+  const bottom = scrollbarGeometry(100, 20, 0)!;
+  const top = scrollbarGeometry(100, 20, 80)!;
+  assert.deepEqual(scrollbarGeometry(100, 20, Number.NaN), bottom);
+  assert.deepEqual(scrollbarGeometry(100, 20, Number.NEGATIVE_INFINITY), bottom);
+  assert.deepEqual(scrollbarGeometry(100, 20, Number.POSITIVE_INFINITY), top);
+});

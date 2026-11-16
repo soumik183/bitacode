@@ -73,13 +73,27 @@ export function thinkingBlockHeight(
   rows: number
 ): number {
   const hasText = text.trim().length > 0;
-  // header + bottom margin
-  if (!expanded || !hasText) return 2;
-  const budget = previewRowBudget(rows);
-  const { shown } = clipToPreview(text, Math.max(1, columns - 6), budget, previewMaxChars(columns, rows));
-  const summaryRows = shown.length < text.trim().length ? 1 : 0;
-  // header + marginTop(1) + optional overflow note + marginBottom(1)
-  return 1 + 1 + summaryRows + 1;
+  // The component renders nothing at all without reasoning text.
+  if (!hasText) return 0;
+  // Collapsed: header + bottom margin.
+  if (!expanded) return 2;
+  const width = Math.max(1, columns - 6);
+  const { shown, hiddenChars } = clipToPreview(
+    text,
+    width,
+    previewRowBudget(rows),
+    previewMaxChars(columns, rows)
+  );
+  // Count the wrapped rows clipToPreview kept, plus its overflow note. The
+  // content rows were omitted before, so a long thought under-reserved up to
+  // `budget` rows and clicks missed the top of the expanded block.
+  const contentRows =
+    shown.split('\n').reduce(
+      (total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / width)),
+      0
+    ) + (hiddenChars > 0 ? 1 : 0);
+  // header + marginTop(1) + content + marginBottom(1)
+  return 1 + 1 + contentRows + 1;
 }
 
 /**

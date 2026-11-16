@@ -9,10 +9,13 @@
  *  - Per-operation (one-time)
  *  - Per-operation-type for the session (e.g., "approve all writes")
  *  - Globally via --dangerously-skip-permissions
+ *  - Automatically via the configured approval mode (auto / yolo)
  *
  * In the Ink UI, approvals are handled by emitting an event and waiting
  * for the UI to resolve it (instead of blocking on stdin with inquirer).
  */
+
+import type { ApprovalMode } from '../settings.js';
 
 export type ApprovalRequest = {
   id: string;
@@ -26,14 +29,30 @@ export type ApprovalRequest = {
 export type ApprovalResponse = 'approve_once' | 'approve_session' | 'reject';
 
 // Global state
+let approvalMode: ApprovalMode = 'manual';
+let cliSkipPermissions = false; // remembers the --dangerously-skip-permissions override
 let dangerouslySkipPermissions = false;
 const sessionApprovals = new Set<string>(); // stores approval keys scoped by session
 
 // Callback that the Ink UI provides to handle interactive approval
 let approvalHandler: ((req: ApprovalRequest) => Promise<ApprovalResponse>) | null = null;
 
+function syncSkipPermissions(): void {
+  dangerouslySkipPermissions = cliSkipPermissions || approvalMode === 'yolo';
+}
+
+export function setApprovalMode(mode: ApprovalMode): void {
+  approvalMode = mode;
+  syncSkipPermissions();
+}
+
+export function getApprovalMode(): ApprovalMode {
+  return approvalMode;
+}
+
 export function setDangerouslySkipPermissions(value: boolean): void {
-  dangerouslySkipPermissions = value;
+  cliSkipPermissions = value;
+  syncSkipPermissions();
 }
 
 export function isDangerouslySkipPermissions(): boolean {
@@ -62,12 +81,14 @@ function getApprovalScopeKey(req: ApprovalRequest): string {
  * Request approval for an operation. Returns true if approved.
  *
  * Check order:
- *  1. --dangerously-skip-permissions → auto-approve
+ *  1. auto / yolo mode (or --dangerously-skip-permissions) → auto-approve
  *  2. Session approval for this type → auto-approve
- *  3. Interactive prompt via the UI handler
+ *  3. Interactive prompt via the UI handler (manual mode only)
  *  4. No handler registered → reject (fail closed)
  */
 export async function requestApproval(req: ApprovalRequest): Promise<boolean> {
+  if (approvalMode === 'auto' || approvalMode === 'yolo') return true;
+
   if (dangerouslySkipPermissions) return true;
 
   const sessionKey = getApprovalScopeKey(req);
@@ -90,4 +111,13 @@ export async function requestApproval(req: ApprovalRequest): Promise<boolean> {
     default:
       return false;
   }
+}
+
+/** Reset all global approval state. Intended for isolated tests only. */
+export function resetApprovalStateForTests(): void {
+  approvalMode = 'manual';
+  cliSkipPermissions = false;
+  dangerouslySkipPermissions = false;
+  sessionApprovals.clear();
+  approvalHandler = null;
 }

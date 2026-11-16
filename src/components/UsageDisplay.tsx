@@ -77,7 +77,7 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
 
   return (
-    <Box flexDirection="row" justifyContent="space-between" paddingX={gutter} marginBottom={1}>
+    <Box flexDirection="row" justifyContent="space-between" paddingX={gutter} marginBottom={1} flexShrink={0}>
       <Box flexShrink={1} flexDirection="row">
         {busy ? (
           <>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import { LeftBar } from './LeftBar.js';
 import { PromptInput } from './PromptInput.js';
 import { theme } from '../theme.js';
@@ -20,6 +20,9 @@ export const ApiKeyPrompt: React.FC<ApiKeyPromptProps> = ({
   onSubmit,
 }) => {
   const [value, setValue] = useState('');
+  const { stdout } = useStdout();
+  // Leave room for the bar, the "› " prefix and the panel gutter.
+  const width = Math.max(8, (stdout?.columns || 80) - 8);
 
   return (
     <LeftBar color={theme.accent} marginTop={1} marginBottom={1}>
@@ -34,6 +37,7 @@ export const ApiKeyPrompt: React.FC<ApiKeyPromptProps> = ({
           isDisabled={busy}
           placeholder={busy ? 'Checking key…' : 'Paste API key…'}
           mask
+          width={width}
         />
       </Box>
       {error && <Text color={theme.error}>{error}</Text>}

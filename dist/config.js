@@ -66,6 +66,12 @@ export const getUserRuntimeConfigDirectory = () => {
 export const getUserRuntimeConfigPath = () => {
     return path.join(getUserRuntimeConfigDirectory(), 'bitacode.jsonc');
 };
+/** Creates the shared config folder so first run never starts without it. */
+export const ensureUserConfigDirectory = () => {
+    const configDir = getUserRuntimeConfigDirectory();
+    ensureDirectory(configDir);
+    return configDir;
+};
 export const getProjectRuntimeConfigDirectory = (cwd = process.cwd()) => {
     return path.join(cwd, '.bitacode');
 };
@@ -317,7 +323,7 @@ export const TargetSelection = ({ title, subtitle, onSelect, }) => {
                         { label: `Shared user config — ${getUserRuntimeConfigPath()}`, value: 'user' },
                     ], onChange: (value) => onSelect(value) }) })] }));
 };
-export const ModelSelection = ({ setSelectedProviderId, setSelectedModelId, onSelect, setStep, title, }) => {
+export const ModelSelection = ({ setSelectedProviderId, setSelectedModelId, onSelect, setStep, title, subtitle, }) => {
     const items = getAllProviders().flatMap((provider) => provider.models.map((model) => ({
         label: `${provider.name} - ${model.name}`,
         value: `${provider.id}:::${model.id}`,
@@ -333,7 +339,7 @@ export const ModelSelection = ({ setSelectedProviderId, setSelectedModelId, onSe
             setStep?.(3);
         }
     };
-    return (_jsxs(Box, { flexDirection: "column", children: [title && _jsx(Text, { color: theme.text, bold: true, children: title }), _jsx(Text, { children: "Select an AI Model:" }), _jsx(Select, { options: items, onChange: handleSelect })] }));
+    return (_jsxs(Box, { flexDirection: "column", children: [title && _jsx(Text, { color: theme.text, bold: true, children: title }), subtitle && _jsx(Text, { color: theme.muted, children: subtitle }), _jsx(Text, { children: "Select an AI Model:" }), _jsx(Select, { options: items, onChange: handleSelect })] }));
 };
 export const ApiKeyInput = ({ selectedProviderId, selectedModelId, target = 'user', title, showProviderHeaders = true, onComplete, setStep, setConfigWritten, }) => {
     const [errorMessage, setErrorMessage] = useState('');
@@ -363,8 +369,8 @@ export const ApiKeyInput = ({ selectedProviderId, selectedModelId, target = 'use
 export const ConfigResult = ({ configWritten }) => {
     return (_jsxs(Box, { flexDirection: "column", children: [configWritten ? (_jsx(Text, { color: theme.text, children: "Configuration saved successfully!" })) : (_jsx(Text, { color: theme.muted, children: "Configuration not changed." })), _jsx(Text, { children: "You can now run Bitacode." })] }));
 };
-export const ConfigureComponent = () => {
-    const [step, setStep] = useState(0);
+export const ConfigureComponent = ({ onComplete, firstRun = false } = {}) => {
+    const [step, setStep] = useState(firstRun ? 2 : 0);
     const [target, setTarget] = useState('user');
     const [existingConfig, setExistingConfig] = useState(null);
     const [selectedProviderId, setSelectedProviderId] = useState('');
@@ -382,9 +388,9 @@ export const ConfigureComponent = () => {
         case 1:
             return _jsx(ResetPrompt, { existingConfig: existingConfig, setStep: setStep, setConfigWritten: setConfigWritten });
         case 2:
-            return (_jsx(ModelSelection, { setSelectedProviderId: setSelectedProviderId, setSelectedModelId: setSelectedModelId, setStep: setStep }));
+            return (_jsx(ModelSelection, { setSelectedProviderId: setSelectedProviderId, setSelectedModelId: setSelectedModelId, setStep: setStep, title: firstRun ? 'Welcome to Bitacode' : undefined, subtitle: firstRun ? `Saving to ${getUserRuntimeConfigPath()}` : undefined }));
         case 3:
-            return (_jsx(ApiKeyInput, { selectedProviderId: selectedProviderId, selectedModelId: selectedModelId, target: target, setStep: setStep, setConfigWritten: setConfigWritten }));
+            return (_jsx(ApiKeyInput, { selectedProviderId: selectedProviderId, selectedModelId: selectedModelId, target: target, onComplete: onComplete, setStep: setStep, setConfigWritten: setConfigWritten }));
         case 4:
             return _jsx(ConfigResult, { configWritten: configWritten });
         default:
