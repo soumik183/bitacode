@@ -1,4 +1,4 @@
-dist
+# dist/ is committed so the CLI runs straight from a clone.
 node_modules
 .env
 .DS_Store

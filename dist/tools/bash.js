@@ -1,0 +1,253 @@
+/**
+ * bash tool — Execute shell commands with security controls.
+ *
+ * Three-tier security model:
+ *  1. Hard-blocked dangerous commands (cannot be overridden)
+ *  2. Auto-approved safe commands (read-only / info commands)
+ *  3. Everything else requires user approval
+ */
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+import { requestApproval } from '../utils/approval.js';
+import { logger } from '../utils/logger.js';
+import { getWorkingDirectory, validatePath } from '../utils/path-validation.js';
+export const bashTool = {
+    type: 'function',
+    function: {
+        name: 'bash',
+        description: 'Execute a shell command. Safe commands (ls, grep, git status, etc.) run automatically. ' +
+            'Other commands require user approval. Some dangerous commands are blocked entirely.',
+        parameters: {
+            type: 'object',
+            properties: {
+                command: { type: 'string', description: 'The shell command to execute.' },
+                timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000 (30s).' },
+            },
+            required: ['command'],
+        },
+    },
+};
+// Security: Hard-blocked commands — these CANNOT be run, even with --dangerously-skip-permissions
+// Naive approach: Allow any command with user approval
+// Risk: Some commands are too destructive even with approval (rm -rf /, mkfs)
+const DANGEROUS_PATTERNS = [
+    'chmod 777',
+    'dd if=',
+    'mkfs',
+    'fdisk',
+    'format c:',
+    '> /dev/sda', // Disk overwrite
+    'of=/dev/sda', // dd to disk
+    ':(){ :|:& };:', // Fork bomb
+];
+// Targets that delete the entire project / home / filesystem when combined with rm -rf.
+const CATASTROPHIC_RM_TARGETS = new Set(['/', '/*', '~', '~/*', '$home', '$home/*']);
+// Security: Allowlist approach for safe commands
+// Naive approach: Blocklist of dangerous patterns - easily bypassed
+// Bypass examples: 's\udo', '$(which sudo)', '/bin/rm', 'sh -c "rm -rf /"'
+// Fix: Allowlist - only these specific commands run without approval
+const SAFE_COMMANDS = [
+    'pwd', 'whoami', 'date', 'uname', 'uptime',
+    'git status', 'git log', 'git diff', 'git branch', 'git show', 'git remote -v',
+    'npm list', 'npm ls', 'yarn list',
+    'node --version', 'npm --version', 'python --version', 'python3 --version',
+    'which', 'type',
+];
+// Security: Stricter shell control pattern to catch bypass attempts
+// Naive approach: Simple regex misses many bypasses
+// Bypasses: Newlines, encoded chars, quoted operators, backticks
+const SHELL_CONTROL_PATTERN = /[;&|<>()`$\[\]{}!]/;
+// Commands that read files - require path validation
+const FILE_READING_COMMANDS = new Set(['cat', 'head', 'tail', 'grep', 'rg', 'find', 'awk', 'sed', 'sort', 'uniq', 'cut', 'wc', 'tree', 'file', 'dir', 'ls', 'echo']);
+function isDangerous(command) {
+    // Strip quotes and collapse whitespace so "rm -rf   '/'", "sudo" tricks, etc. still match.
+    const lower = command.toLowerCase().replace(/["']/g, '').replace(/\s+/g, ' ').trim();
+    // Privileged commands are only dangerous as the command word, not in an argument.
+    if (/(^|[;&|]\s*)(sudo|su)\b/.test(lower)) {
+        return true;
+    }
+    if (DANGEROUS_PATTERNS.some((p) => lower.includes(p))) {
+        return true;
+    }
+    // rm -rf / (and ~ or $HOME) in any flag order
+    if (/\brm\b/.test(lower)) {
+        const tokens = lower.split(' ');
+        const flags = tokens.filter((t) => t.startsWith('-')).join('');
+        const targets = tokens.filter((t) => !t.startsWith('-') && t !== 'rm');
+        const recursive = flags.includes('r') || flags.includes('recursive');
+        const force = flags.includes('f') || flags.includes('force');
+        if (recursive && force && targets.some((t) => CATASTROPHIC_RM_TARGETS.has(t))) {
+            return true;
+        }
+    }
+    return false;
+}
+function hasShellControlOperators(command) {
+    return SHELL_CONTROL_PATTERN.test(command);
+}
+function tokenizeCommand(command) {
+    const tokens = command.match(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+/g);
+    return tokens && tokens.length > 0 ? tokens : null;
+}
+function stripOuterQuotes(value) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        return value.slice(1, -1);
+    }
+    return value;
+}
+function looksLikePath(token) {
+    if (!token)
+        return false;
+    if (token === '.' || token === '..')
+        return true;
+    if (token.startsWith('/') || token.startsWith('./') || token.startsWith('../') || token.startsWith('~/')) {
+        return true;
+    }
+    return token.includes(path.sep) || /\.[A-Za-z0-9_-]+$/.test(token);
+}
+async function validateCommandPaths(tokens) {
+    for (let index = 1; index < tokens.length; index++) {
+        const token = stripOuterQuotes(tokens[index]);
+        if (!looksLikePath(token))
+            continue;
+        if (token.startsWith('~'))
+            return false;
+        try {
+            await validatePath(token);
+        }
+        catch {
+            return false;
+        }
+    }
+    return true;
+}
+async function isSafe(command) {
+    const trimmed = command.trim();
+    if (!trimmed || hasShellControlOperators(trimmed)) {
+        return false;
+    }
+    // Security: Reject commands with newlines (bypass technique)
+    if (trimmed.includes('\n') || trimmed.includes('\r')) {
+        return false;
+    }
+    // Security: Reject escape sequences that could hide shell operators
+    if (/\\[;&|<>()`$]/.test(trimmed)) {
+        return false;
+    }
+    const tokens = tokenizeCommand(trimmed);
+    if (!tokens) {
+        return false;
+    }
+    const firstWord = trimmed.split(/\s+/)[0];
+    // Security: File-reading commands need path validation
+    // They can read any file in working directory but not outside
+    const needsPathValidation = FILE_READING_COMMANDS.has(firstWord);
+    // Check against allowlist of safe commands
+    const matchedSafeCommand = SAFE_COMMANDS.some((safe) => {
+        if (safe.includes(' ')) {
+            return trimmed === safe || trimmed.startsWith(`${safe} `);
+        }
+        return firstWord === safe;
+    });
+    if (!matchedSafeCommand && !needsPathValidation) {
+        return false;
+    }
+    // Security: Always validate paths for file-reading commands
+    if (needsPathValidation) {
+        return validateCommandPaths(tokens);
+    }
+    return true;
+}
+export async function runBash(command, timeoutMs = 30_000, sessionId, abortSignal) {
+    if (typeof command !== 'string' || command.trim().length === 0) {
+        return 'Error: command is required.';
+    }
+    const requestedTimeout = Number(timeoutMs);
+    const effectiveTimeout = Number.isFinite(requestedTimeout)
+        ? Math.min(Math.max(requestedTimeout, 1000), 600_000)
+        : 30_000;
+    // Layer 1: hard block
+    if (isDangerous(command)) {
+        return `Error: Command blocked for safety. "${command}" contains a dangerous pattern that cannot be executed.`;
+    }
+    // Layer 2: safe commands skip approval
+    if (!(await isSafe(command))) {
+        // Layer 3: interactive approval
+        const approved = await requestApproval({
+            id: `bash-${Date.now()}`,
+            type: 'shell_command',
+            description: `Run command: ${command}`,
+            detail: `Working directory: ${getWorkingDirectory()}\nCommand: ${command}`,
+            sessionId,
+            sessionScopeKey: `shell:${command}`,
+        });
+        if (!approved) {
+            return `Command cancelled by user: ${command}`;
+        }
+    }
+    logger.debug(`Executing: ${command}`);
+    return new Promise((resolve) => {
+        let stdout = '';
+        let stderr = '';
+        let timedOut = false;
+        let aborted = false;
+        const child = spawn(command, [], {
+            shell: true,
+            cwd: process.cwd(),
+            env: { ...process.env },
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        child.stdout?.on('data', (data) => { stdout += data.toString(); });
+        child.stderr?.on('data', (data) => { stderr += data.toString(); });
+        const terminateChild = () => {
+            child.kill('SIGTERM');
+            setTimeout(() => child.kill('SIGKILL'), 2000);
+        };
+        const onAbort = () => {
+            aborted = true;
+            terminateChild();
+        };
+        if (abortSignal?.aborted) {
+            onAbort();
+        }
+        else {
+            abortSignal?.addEventListener('abort', onAbort, { once: true });
+        }
+        const timer = setTimeout(() => {
+            timedOut = true;
+            terminateChild();
+        }, effectiveTimeout);
+        child.on('close', (code) => {
+            clearTimeout(timer);
+            abortSignal?.removeEventListener('abort', onAbort);
+            if (aborted) {
+                resolve(`Command aborted by user.\nPartial stdout:\n${stdout.slice(0, 5000)}\nPartial stderr:\n${stderr.slice(0, 2000)}`);
+                return;
+            }
+            if (timedOut) {
+                resolve(`Command timed out after ${effectiveTimeout / 1000}s.\nPartial stdout:\n${stdout.slice(0, 5000)}\nPartial stderr:\n${stderr.slice(0, 2000)}`);
+                return;
+            }
+            // Truncate very long output
+            const maxLen = 50_000;
+            const truncatedStdout = stdout.length > maxLen
+                ? stdout.slice(0, maxLen) + `\n... (output truncated, ${stdout.length} chars total)`
+                : stdout;
+            if (code === 0) {
+                let output = truncatedStdout;
+                if (stderr.trim()) {
+                    output += `${output ? '\n' : ''}stderr:\n${stderr.slice(0, 5000)}`;
+                }
+                resolve(output || '(command completed successfully with no output)');
+            }
+            else {
+                resolve(`Command exited with code ${code}.\nstdout:\n${truncatedStdout}\nstderr:\n${stderr.slice(0, 5000)}`);
+            }
+        });
+        child.on('error', (err) => {
+            clearTimeout(timer);
+            abortSignal?.removeEventListener('abort', onAbort);
+            resolve(`Error executing command: ${err.message}`);
+        });
+    });
+}
