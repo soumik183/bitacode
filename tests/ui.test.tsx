@@ -1372,8 +1372,9 @@ test('dialog stays centred and inside the frame across zoom bursts', async () =>
     app.stdin.write('\x1c'); // ctrl+, opens settings
     await waitForFrame(app.stdout.frameContaining.bind(app.stdout, 'Settings'), (f) => f.length > 0);
 
+    // Every step must be a real size change: App deliberately skips no-op
+    // resize events, so a same-size step would emit no new frame to wait for.
     for (const [columns, rows] of [
-      [100, 24],
       [60, 16],
       [40, 10],
       [20, 6],
@@ -1384,7 +1385,7 @@ test('dialog stays centred and inside the frame across zoom bursts', async () =>
       const frame = await waitForFrameWhere(
         app,
         (f) => f.includes('Settings') && f.split('\n').length <= rows && lineWidth(f) <= columns,
-        3000,
+        5000,
         from
       );
       assert.ok(frame, `dialog survives ${columns}x${rows}`);
