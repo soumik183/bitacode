@@ -1,0 +1,125 @@
+name: Publish
+
+# Auto-publishes @bitacode-cli/cli to npm when a commit lands on main and the
+# version in package.json is not on the registry yet. Manual runs can do a
+# dry run (build + pack only).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and pack only, do not publish'
+        type: boolean
+        default: false
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  guard:
+    name: check version is new
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.check.outputs.publish }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already published; skipping."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$NAME@$VERSION is new; will publish."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: verify and pack
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+      - name: Confirm dist/ is committed and current
+        run: |
+          if [ -n "$(git status --porcelain dist)" ]; then
+            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
+            git status --porcelain dist
+            exit 1
+          fi
+      - name: Smoke test
+        run: |
+          node dist/cli.js --version
+          node dist/cli.js --help >/dev/null || true
+      - name: Pack tarball
+        run: npm pack --pack-destination .
+      - name: Dry-run install from the tarball
+        run: |
+          TARBALL=$(ls *.tgz | head -1)
+          mkdir -p /tmp/install-check && cd /tmp/install-check
+          npm init -y >/dev/null
+          npm install "$GITHUB_WORKSPACE/$TARBALL" --no-audit --no-fund
+          npx bitacode --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-package
+          path: '*.tgz'
+          retention-days: 7
+
+  publish:
+    name: publish to npm
+    needs: [guard, build]
+    if: needs.guard.outputs.publish == 'true' && inputs.dry_run != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+      - name: Publish
+        run: npm publish "$(ls *.tgz | head -1)" --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Tag and create a GitHub Release
+        run: |
+          VERSION="${{ needs.guard.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "v$VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Release notes
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.guard.outputs.version }}
+          generate_release_notes: true
+          name: v${{ needs.guard.outputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
