@@ -14,16 +14,25 @@ Ask it to build something and it will read your code, edit files, run commands, 
 ## Features
 
 - **Multi-provider chat** — OpenAI, Anthropic, Google Gemini, and OpenRouter via the OpenAI SDK
-- **Built-in tools** — Read, write, edit, list, find files by glob, search contents, run shell commands, manage todos, fetch web pages with `webfetch`, and ask you questions with `ask_user`
-- **Approval system** — Inline confirmation for file writes, file edits, and non-safe shell commands
+- **Tools** — File ops (read/write/edit/multi-edit/apply-patch/delete/rename/move/copy/mkdir/stat/diff), search (glob/grep/find_symbol/web_search/codesearch/search_docs/history), shell & background processes, git, todos, plans, sub-agents, and `ask_user`
+- **Approval modes** — `manual` (ask every time), `auto` (auto-approve), `yolo` (skip permission checks); change with `/settings`
+- **Rich terminal UI** — Colorful Markdown (headings, tables, nested lists, code), syntax highlighting, stable scrolling, scrollbar, and responsive layout that survives zoom
 - **Session persistence** — Conversations and TODO state are saved automatically and can be resumed with `--session`
 <!-- - **Dynamic extensions** — Load skills on demand and add external tools through MCP servers -->
-- **Sub-agents** — Delegate self-contained tasks to isolated child conversations
+- **Sub-agents** — Delegate tasks to isolated children, run them in parallel, and inspect their saved transcripts with `read_subagent`
 - **Usage tracking** — Live token, context, and estimated cost display in the TUI
 
 ## Quick Start
 
-Not yet published to npm. From a clone:
+Install from npm (the binary is `bitacode`):
+
+```bash
+npm install -g @bitacode-cli/cli
+# or, without installing:
+npx @bitacode-cli/cli
+```
+
+From a clone:
 
 ```bash
 git clone https://github.com/soumik183/bitacode.git
@@ -82,16 +91,18 @@ bitacode init --project --force
 - `/model` — Switch model
 - `/provider` — Switch API provider
 - `/variant` — Set reasoning variant
-- `/settings` — Toggle animations and mouse clicks
+- `/settings` — Toggle animations, mouse clicks, and approval mode (manual / auto / yolo)
 - `/quit` or `/exit` — Save and exit
 
-Other useful shortcuts:
+Other useful shortcuts (each works with **Ctrl** or **Alt**):
 
-- `Esc` — Abort the current in-flight completion, or close `/help`
-- `Ctrl+T` — Expand or collapse the thinking block
-- `PageUp` / `PageDown` — Scroll the transcript a page at a time
-- `↑` / `↓` — Scroll the transcript one row (`Shift` for three)
-- `Home` / `End` — Jump to the start or the newest output
+- `n` new session · `s` sessions · `m` model · `p` provider · `v` variant
+- `h` or `/` help · `,` settings · `q` sessions
+- `k` clear input · `l` clear transcript · `t` toggle thinking
+- `b` / `f` scroll a page up/down
+- **Text area**: `a` start · `e` end · `u` clear line · `w` delete word · `d` delete char · `k` delete to end
+- `PageUp` / `PageDown`, `↑` / `↓` (`Shift` for three), `Home` / `End` — scroll the transcript
+- `Esc` — Abort the current completion or close a prompt
 - `Ctrl+C` — Exit immediately
 
 The agent can pause and ask you a question with the `ask_user` tool. The prompt
@@ -132,7 +143,7 @@ npm install
 npm run build        # compile to dist/ (tracked - commit after building)
 npm run dev          # run from source with tsx
 npm run typecheck    # tsc --noEmit
-npm test             # 131 tests
+npm test             # 424 tests
 npm run lint         # eslint
 ```
 
@@ -141,22 +152,28 @@ CI runs all of the above on Node 20, 22, and 24, and fails if the committed
 
 ## Releasing
 
-Merging a PR into `main` builds and publishes the package automatically. The
-workflow checks the version is new, runs the full suite, packs the tarball,
-installs it into a clean directory to prove it works, then publishes.
+The package is published as `@bitacode-cli/cli` (binary: `bitacode`).
 
-It waits for approval first: the job uses the `npm-release` environment, so a
-required reviewer must approve each publish in the Actions tab. To configure it,
-go to Settings → Environments → `npm-release` and add reviewers.
+### Automatic (GitHub Actions)
+Pushing to `main` runs typecheck, tests, lint and build, packs the tarball,
+installs it in a clean directory to prove it works, then publishes to npm only
+if that version is not already on the registry. It also tags `vX.Y.Z` and
+creates a GitHub Release. Pushing a `v*` tag does the same via `release.yml`
+(with a duplicate-publish guard).
 
-Two prerequisites on the repository:
+The repo needs one secret: **`NPM_TOKEN`** — an npm token with publish rights
+to the `bitacode-cli` org. Manual runs of **Actions → Publish** support a
+`dry_run` that builds and packs without publishing.
 
-- `NPM_TOKEN` secret — an npm automation token with publish rights.
-- The `npm-release` environment with a required reviewer.
-
-To cut a new version, run **Actions → Publish → Run workflow** and choose the
-bump (`patch`/`minor`/`major`), or tick `dry_run` to build and pack without
-publishing.
+### From your terminal
+```bash
+npm run release:check    # typecheck + test + lint + build + smoke test
+npm run release:dry      # npm pack --dry-run (no publish)
+npm run release          # publish current version
+npm run release:patch    # npm version patch + publish (also :minor, :major)
+git push && git push --tags
+```
+`npm version` creates a commit and tag; `prepack` rebuilds `dist/` before publish.
 
 ## Contributing
 
