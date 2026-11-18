@@ -1,5 +1,5 @@
 {
-  "name": "@bitacode-cli/cli",
+  "name": "@bitacode-cli/bitacode",
   "version": "0.1.22",
   "type": "module",
   "files": [
