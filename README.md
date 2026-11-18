@@ -24,12 +24,22 @@ Ask it to build something and it will read your code, edit files, run commands, 
 
 ## Quick Start
 
-Install from npm (the binary is `bitacode`):
+Install from npm (the package and binary are both `bitacode`):
 
 ```bash
 npm install -g bitacode
 # or, without installing:
-npx bitacode
+npx bitacode@latest
+# or, as a project dependency:
+npm install bitacode
+```
+
+Update to the newest release from npm at any time:
+
+```bash
+bitacode update              # global install
+bitacode update --local      # current project
+bitacode update --check      # check only
 ```
 
 From a clone:
@@ -88,7 +98,9 @@ bitacode init --project --force
 - `/model` — Switch model
 - `/provider` — Switch API provider
 - `/variant` — Set reasoning variant
-- `/settings` — Toggle animations, mouse clicks, and approval mode (manual / auto / yolo)
+- `/settings` — Toggle animations, mouse clicks, theme and approval mode (manual / auto / yolo)
+- `/undo` — Undo the last file change
+- `/update` — Check npm and install the latest `bitacode` release (`/update --local` for this project)
 - `/quit` or `/exit` — Save and exit
 
 Other useful shortcuts (each works with **Ctrl** or **Alt**):
@@ -102,7 +114,7 @@ Other useful shortcuts (each works with **Ctrl** or **Alt**):
 - **Text area**: `a` start · `e` end · `u` clear line · `w` delete word · `d` delete char · `k` delete to end
 - `PageUp` / `PageDown`, `↑` / `↓` (`Shift` for three), `Home` / `End` — scroll the transcript
 - `Esc` — Abort the current completion or close a prompt
-- `Ctrl+C` — Exit immediately
+- `Ctrl+C` — Save the session and exit, printing a resume command
 
 The agent can pause and ask you a question with the `ask_user` tool. The prompt
 takes over the composer area: pick an option with `1`-`9` or `↑`/`↓` and press

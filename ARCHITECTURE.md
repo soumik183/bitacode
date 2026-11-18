@@ -437,7 +437,7 @@ These details are easy to miss but matter for an accurate mental model:
 - approved shell commands are powerful and not sandboxed
 - `validatePath()` requires the parent directory of a new file to already exist, even though `write_file` later calls `mkdir(..., recursive: true)`
 - `handleToolCall()` usually returns error strings instead of throwing, so many tool failures flow back to the model as normal tool results
-- `/quit` persists and shows a resume command, while `Ctrl-C` exits immediately
+- `/quit` and `Ctrl-C` both persist the session and show a resume command
 - `/help` appends a `system` message into history rather than rendering a temporary overlay
 - session resume replaces the first saved system prompt with a freshly generated one
 - some helper state exists without full UI surfacing yet, such as log buffering and session list/delete helpers
@@ -447,7 +447,7 @@ These details are easy to miss but matter for an accurate mental model:
 There are two main exit paths:
 
 - graceful quit via `/quit` or `/exit`, which saves session state and shows a resume command
-- immediate `Ctrl-C`, which exits without the same quit UX
+- `Ctrl-C`, which follows the same save-and-exit path and prints the resume command
 
 On component cleanup, `App`:
 
