@@ -71,6 +71,12 @@ jobs:
         run: |
           node dist/cli.js --version
           node dist/cli.js --help >/dev/null || true
+      - name: Deprecate the old scoped package name
+        # The published CLI is `bitacode`. The earlier @bitacode-cli/cli alias
+        # stays installed for existing users but warns them to switch.
+        run: npm deprecate @bitacode-cli/cli "Use bitacode instead" || echo "::warning::could not deprecate @bitacode-cli/cli"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Pack tarball
         run: npm pack --pack-destination .
       - name: Dry-run install from the tarball
