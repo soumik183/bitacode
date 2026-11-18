@@ -56,17 +56,10 @@ Runtime config lookup is simple:
 - if `<cwd>/.bitacode/bitacode.jsonc` exists, Bitacode uses it
 - otherwise it falls back to the shared user config at `~/.config/bitacode/bitacode.jsonc` on macOS/Linux and `~/AppData/Local/bitacode/bitacode.jsonc` on Windows
 
-You can also run setup directly. `bitacode configure` sets up **globally** (shared user config): if an API key is already in the environment it writes the config and exits immediately; otherwise it goes straight to provider → model → API key with no target question.
+You can also run setup directly. `bitacode configure` has no flags: it first creates the global config file (`~/.config/bitacode/bitacode.jsonc`), then — if an API key is in the environment — fills it in and exits; otherwise it opens a provider → model → API key picker that saves to the global config automatically.
 
 ```bash
 bitacode configure
-```
-
-Or configure a specific target non-interactively:
-
-```bash
-bitacode configure --project --provider openai --model gpt-5-mini
-bitacode configure --user --provider anthropic --model claude-sonnet-4-6
 ```
 
 To create a runtime config file for the current project or your shared user config, run:

@@ -19,7 +19,7 @@ import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import { formatInstalled, formatUpdateAvailable, formatUpdateNotice, formatUpdateUnavailable, formatUpToDate, } from './utils/cli-update-format.js';
-import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig, detectConfigFromEnvironment } from './config.js';
+import { ConfigureComponent, InitComponent, writeConfig, writeInitConfig, detectConfigFromEnvironment } from './config.js';
 // A rejected promise in a background fetch should be logged, not kill the TUI.
 process.on('unhandledRejection', (reason) => {
     logger.error('Unhandled promise rejection', {
@@ -69,52 +69,26 @@ program
     })
         .catch((error) => logger.debug('Update check failed', { error: String(error) }));
 });
-// Configure subcommand
+// Configure subcommand — no flags. Always global, always automatic.
 program
     .command('configure')
-    .description('Configure AI model and API key settings')
-    .option('--project', 'Write <cwd>/.bitacode/bitacode.jsonc')
-    .option('--user', 'Write the shared user bitacode.jsonc')
-    .option('--provider <id>', 'Provider id to configure')
-    .option('--model <id>', 'Model id to configure')
-    .option('--api-key <key>', 'Explicit API key to store in bitacode.jsonc')
-    .action((options) => {
-    if (options.project || options.user || options.provider || options.model || options.apiKey) {
-        if (options.project && options.user) {
-            console.error('Choose only one of --project or --user.');
-            process.exitCode = 1;
-            return;
-        }
-        if (!options.provider || !options.model) {
-            console.error('Non-interactive configure requires --provider and --model.');
-            process.exitCode = 1;
-            return;
-        }
-        const target = options.project ? 'project' : 'user';
-        const resultPath = writeConfig({
-            provider: options.provider,
-            model: options.model,
-            ...(typeof options.apiKey === 'string' && options.apiKey.trim() ? { apiKey: options.apiKey.trim() } : {}),
-        }, target);
-        console.log('Configured Bitacode:');
-        console.log(resultPath);
-        const selected = readConfig(target);
-        if (selected) {
-            console.log(`${selected.provider} / ${selected.model}`);
-        }
-        return;
-    }
-    // Automatic global setup: if an API key is already in the environment,
-    // write the shared user config and finish without any wizard.
+    .description('Set up Bitacode globally (provider, model, API key)')
+    .action(() => {
+    // Step 1: make sure the global config file exists before anything else.
+    const created = writeInitConfig('user');
+    const configPath = created.path;
+    // Step 2: if an API key is already in the environment, fill it in and done.
     const detected = detectConfigFromEnvironment();
     if (detected) {
-        const path = writeConfig(detected, 'user');
+        writeConfig(detected, 'user');
         console.log('Configured Bitacode (global):');
-        console.log(path);
+        console.log(configPath);
         console.log(`${detected.provider} / ${detected.model}`);
         return;
     }
-    // Otherwise go straight to provider → model → API key. No target question.
+    // Step 3: no key found — let the user pick a provider/model and enter a
+    // key. The wizard writes to the global config automatically on completion.
+    console.log(`Global config ready: ${configPath}`);
     render(_jsx(ConfigureComponent, {}), { maxFps: 60 });
 });
 program
