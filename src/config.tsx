@@ -73,6 +73,51 @@ export function resolveApiKey(config: Pick<Config, 'provider' | 'apiKey'>): stri
   return headersCarryAuth ? 'none' : null;
 }
 
+/**
+ * Best-effort first-run autodetection: pick the first provider whose API key is
+ * already in the environment so a configured shell skips the setup wizard.
+ */
+export function detectConfigFromEnvironment(): Config | null {
+  try {
+    const providers = getAllProviders();
+    // Aliases not covered by a provider's apiKeyEnvVar; their value must be
+    // copied into the config because resolveApiKey will not see them.
+    const commonEnvVars: Record<string, string[]> = {
+      google: ['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
+    };
+
+    for (const provider of providers) {
+      const envVars = [
+        ...(provider.apiKeyEnvVar ? [provider.apiKeyEnvVar] : []),
+        ...(commonEnvVars[provider.id] ?? []),
+      ];
+      for (const envVar of envVars) {
+        const value = process.env[envVar]?.trim();
+        if (!value) continue;
+        const model = provider.models[0];
+        if (!model) continue;
+        const resolvedFromEnv = envVar === provider.apiKeyEnvVar || envVar === 'BITACODE_API_KEY';
+        return {
+          provider: provider.id,
+          model: model.id,
+          ...(resolvedFromEnv ? {} : { apiKey: value }),
+        };
+      }
+    }
+
+    // Generic key only: it is ambiguous, so fall back to the first usable provider.
+    if (process.env.BITACODE_API_KEY?.trim()) {
+      for (const provider of providers) {
+        const model = provider.models[0];
+        if (model) return { provider: provider.id, model: model.id };
+      }
+    }
+  } catch {
+    // Detection is optional; never break startup for an odd environment.
+  }
+  return null;
+}
+
 export const getConfigDirectory = () => {
   const homeDir = os.homedir();
   if (process.platform === 'win32') {

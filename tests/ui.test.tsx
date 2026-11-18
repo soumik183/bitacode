@@ -9,7 +9,10 @@ import { Box, Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { render as renderInk } from 'ink';
 import { settle, waitForFrame } from './helpers/wait.js';
-import { App } from '../src/App.js';
+import { App, type AppProps } from '../src/App.js';
+import { getUserRuntimeConfigPath, readConfig } from '../src/config.js';
+import { getAllProviders } from '../src/providers/index.js';
+import { resetRuntimeConfigForTests } from '../src/runtime-config.js';
 import { getApprovalMode, setApprovalMode, requestApproval } from '../src/utils/approval.js';
 import { ThinkingBlock, clipToPreview, thinkingBlockHeight } from '../src/components/ThinkingBlock.js';
 import { ThinkingArchive, archivePreviewChars } from '../src/components/ThinkingArchive.js';
@@ -548,7 +551,7 @@ test('max scroll uses the rendered window so the oldest row stays reachable', ()
 // ─── Full-App UI tests (composer, settings, global shortcuts) ───
 // Home is redirected to a temp dir so config, settings and sessions are
 // isolated. Cwd is left alone: every store this touches lives under HOME.
-function renderApp() {
+function renderApp(props: AppProps = {}) {
   const originalHome = process.env.HOME;
   const originalApiKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-ui-'));
@@ -572,7 +575,7 @@ function renderApp() {
     })
   );
 
-  const instance = render(<App />);
+  const instance = render(<App {...props} />);
   return {
     ...instance,
     cleanupAll() {
@@ -736,6 +739,41 @@ test('replayed transcript frame orders user message, thought card, then answer',
   }
 });
 
+test('launching with no config shows the main screen and a setup hint, not a wizard', async () => {
+  const originalCwd = process.cwd();
+  const originalHome = process.env.HOME;
+  const originalKey = process.env.OPENAI_API_KEY;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-no-config-'));
+  process.env.HOME = home;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  delete process.env.GOOGLE_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.BITACODE_API_KEY;
+  fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.config', 'bitacode', 'bitacode.jsonc'), JSON.stringify({
+    providers: {}, mcp: { servers: {} },
+  }));
+  resetRuntimeConfigForTests();
+  process.chdir(home);
+
+  try {
+    const { lastFrame } = render(<App />);
+    const frame = await waitForFrame(lastFrame, (f) => f.includes('Build anything…'));
+    assert.match(frame, /No provider configured/, 'setup hint is visible');
+    assert.doesNotMatch(frame, /Choose where to configure/, 'no blocking wizard on launch');
+    assert.match(frame, /📁/, 'footer is visible');
+  } finally {
+    process.env.HOME = originalHome;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+    fs.rmSync(home, { recursive: true, force: true });
+    process.chdir(originalCwd);
+    resetRuntimeConfigForTests();
+  }
+});
+
 test('opening help never pushes the composer or footer off screen', async () => {
   const app = renderApp();
   try {
@@ -744,6 +782,37 @@ test('opening help never pushes the composer or footer off screen', async () => 
     const frame = await waitForFrame(app.lastFrame, (f) => f.includes('Keys (ctrl or alt)'));
     assert.match(frame, /Build anything…/, 'composer stays visible while help is open');
     assert.match(frame, /📁/, 'footer stays visible while help is open');
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('update notice renders once, keeps the composer/footer, and hides while help is open', async () => {
+  const app = renderApp({ updateNotice: 'Update available: v0.1.23 — run "bitacode update"' });
+  try {
+    const frame = plain(await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…')));
+    assert.equal(
+      (frame.match(/Update available/g) ?? []).length,
+      1,
+      `notice must appear exactly once:\n${frame}`
+    );
+    assert.match(frame, /v0\.1\.23/, 'notice message is shown');
+    assert.match(frame, /Build anything…/, 'composer stays visible with the notice');
+    assert.match(frame, /📁|ctx/, 'footer stays visible with the notice');
+
+    // Help takes over the live area; the notice must step aside.
+    app.stdin.write('\x1bh'); // Alt+h
+    const helpFrame = plain(await waitForFrame(app.lastFrame, (f) => f.includes('Keys (ctrl or alt)')));
+    assert.doesNotMatch(helpFrame, /Update available/, 'notice is hidden while help is open');
+    assert.match(helpFrame, /Build anything…/, 'composer stays visible with help open');
+
+    // Closing help brings the notice back.
+    app.stdin.write('\x1bh');
+    const closedFrame = plain(await waitForFrame(
+      app.lastFrame,
+      (f) => !f.includes('Keys (ctrl or alt)') && f.includes('Build anything…')
+    ));
+    assert.match(closedFrame, /Update available/, 'notice returns after help closes');
   } finally {
     app.cleanupAll();
   }
@@ -1339,5 +1408,62 @@ test('ask prompt keeps option labels and the recommended marker visible on narro
     assert.ok(/★|recommended/.test(frame), `recommended marker is missing at ${columns} columns`);
     ask.unmount();
     ask.cleanup();
+  }
+});
+
+const CONFIG_KEY_ENV_VARS = [
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'BITACODE_API_KEY',
+];
+
+test('first run auto-detects a provider from env and skips the setup wizard', async () => {
+  const originalHome = process.env.HOME;
+  const originalCwd = process.cwd();
+  const originalKeys = new Map(CONFIG_KEY_ENV_VARS.map((key) => [key, process.env[key]]));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-env-home-'));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-env-cwd-'));
+
+  process.env.HOME = home;
+  process.chdir(cwd);
+  for (const key of CONFIG_KEY_ENV_VARS) delete process.env[key];
+  process.env.OPENAI_API_KEY = 'env-detected-key';
+  fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'settings.json'),
+    JSON.stringify({ animations: false, mouseClicks: false, variant: 'none', approvalMode: 'manual' })
+  );
+  resetRuntimeConfigForTests();
+
+  let instance: ReturnType<typeof render> | undefined;
+  try {
+    instance = render(<App />);
+    const frame = await waitForFrame(instance.lastFrame, (f) => f.includes('Build anything…'));
+    assert.match(frame, /Build anything…/);
+    assert.doesNotMatch(frame, /Welcome to Bitacode/);
+    assert.doesNotMatch(frame, /Select an AI Model/);
+
+    const detected = readConfig('user');
+    const openai = getAllProviders().find((provider) => provider.id === 'openai')!;
+    assert.equal(detected?.provider, 'openai');
+    assert.equal(detected?.model, openai.models[0].id);
+  } finally {
+    instance?.unmount();
+    instance?.cleanup();
+    process.chdir(originalCwd);
+    process.env.HOME = originalHome;
+    for (const key of CONFIG_KEY_ENV_VARS) {
+      const original = originalKeys.get(key);
+      if (original === undefined) delete process.env[key];
+      else process.env[key] = original;
+    }
+    resetRuntimeConfigForTests();
+    setApprovalMode('manual');
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });

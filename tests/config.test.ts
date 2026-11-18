@@ -3,15 +3,81 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ensureUserConfigDirectory, getUserRuntimeConfigDirectory, getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeConfig, writeInitConfig, writeProviderApiKey } from '../src/config.js';
+import { detectConfigFromEnvironment, ensureUserConfigDirectory, getUserRuntimeConfigDirectory, getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeConfig, writeInitConfig, writeProviderApiKey } from '../src/config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig, resetRuntimeConfigForTests } from '../src/runtime-config.js';
+import { getAllProviders } from '../src/providers/index.js';
+
+const KEY_ENV_VARS = [
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'GOOGLE_GENERATIVE_AI_API_KEY',
+  'OPENROUTER_API_KEY',
+  'BITACODE_API_KEY',
+  'BITACODE_CUSTOM_HEADERS',
+];
+const originalKeyEnv = new Map(KEY_ENV_VARS.map((key) => [key, process.env[key]]));
 
 test.afterEach(() => {
-  delete process.env.OPENAI_API_KEY;
-  delete process.env.OPENROUTER_API_KEY;
-  delete process.env.BITACODE_API_KEY;
-  delete process.env.BITACODE_CUSTOM_HEADERS;
+  for (const key of KEY_ENV_VARS) {
+    const original = originalKeyEnv.get(key);
+    if (original === undefined) delete process.env[key];
+    else process.env[key] = original;
+  }
   resetRuntimeConfigForTests();
+});
+
+test('detectConfigFromEnvironment returns null when no key env var is set', () => {
+  for (const key of KEY_ENV_VARS) delete process.env[key];
+
+  assert.equal(detectConfigFromEnvironment(), null);
+});
+
+test('detectConfigFromEnvironment picks the provider and leaves its key in env', () => {
+  for (const key of KEY_ENV_VARS) delete process.env[key];
+  process.env.OPENAI_API_KEY = '  openai-secret  ';
+  const openai = getAllProviders().find((provider) => provider.id === 'openai')!;
+
+  assert.deepEqual(detectConfigFromEnvironment(), {
+    provider: 'openai',
+    model: openai.models[0].id,
+  });
+});
+
+test('detectConfigFromEnvironment copies alias keys the app cannot resolve from env', () => {
+  for (const key of KEY_ENV_VARS) delete process.env[key];
+  process.env.GOOGLE_API_KEY = 'google-secret';
+  const google = getAllProviders().find((provider) => provider.id === 'google')!;
+
+  assert.deepEqual(detectConfigFromEnvironment(), {
+    provider: 'google',
+    model: google.models[0].id,
+    apiKey: 'google-secret',
+  });
+});
+
+test('detectConfigFromEnvironment respects provider priority over the generic key', () => {
+  for (const key of KEY_ENV_VARS) delete process.env[key];
+  process.env.ANTHROPIC_API_KEY = 'anthropic-secret';
+  process.env.BITACODE_API_KEY = 'generic-secret';
+  const anthropic = getAllProviders().find((provider) => provider.id === 'anthropic')!;
+
+  assert.deepEqual(detectConfigFromEnvironment(), {
+    provider: 'anthropic',
+    model: anthropic.models[0].id,
+  });
+});
+
+test('detectConfigFromEnvironment falls back to the first provider for a generic key', () => {
+  for (const key of KEY_ENV_VARS) delete process.env[key];
+  process.env.BITACODE_API_KEY = 'generic-secret';
+  const first = getAllProviders()[0];
+
+  assert.deepEqual(detectConfigFromEnvironment(), {
+    provider: first.id,
+    model: first.models[0].id,
+  });
 });
 
 test('resolveApiKey prefers environment variable over config value', () => {

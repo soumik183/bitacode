@@ -80,7 +80,7 @@ import { loadSettings, saveSettings, type UiSettings, type ApprovalMode } from '
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
 import { OpenAI } from 'openai';
-import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, ConfigureComponent, type Config } from './config.js';
+import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, detectConfigFromEnvironment, writeConfig, type Config } from './config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
 import { getAllProviders, getProvider, getModelDetails, getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import {
@@ -211,6 +211,10 @@ const Splash: React.FC = () => (
     </Text>
   </Box>
 );
+
+// First-run guidance lives in the main screen, never in a blocking wizard.
+const SETUP_HINT = 'No provider configured — type /provider to choose one';
+const API_MISSING_HINT = 'API key missing — type /provider to select a provider and add a key.';
 
 function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assistant', text: string): void {
   const normalized = normalizeTranscriptText(text);
@@ -367,6 +371,8 @@ export interface AppProps {
   dangerouslySkipPermissions?: boolean;
   logLevel?: string;
   sessionId?: string;
+  /** Optional one-line update hint shown in the live area when idle. */
+  updateNotice?: string;
 }
 
 // ─── Help text derived from slash commands ───
@@ -452,6 +458,7 @@ export const App: React.FC<AppProps> = ({
   dangerouslySkipPermissions = false,
   logLevel,
   sessionId,
+  updateNotice,
 }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -466,6 +473,8 @@ export const App: React.FC<AppProps> = ({
   // take its full-screen path (`clearTerminal` + full repaint) on every frame,
   // which is the blinking seen while scrolling and streaming.
   const frameHeight = frameRows(rows);
+  // Keep the configure wizard inside the frame on short terminals (Select caps
+  // at five visible options, but the surrounding text still needs a bound).
 
   // ─── Static scrollback state ───
   // Each item is rendered once by <Static> and permanently flushed to scrollback.
@@ -597,6 +606,7 @@ export const App: React.FC<AppProps> = ({
     id: string;
     label: string;
   } | null>(null);
+  // Full provider -> model -> API key wizard, reopened from inside the TUI.
 
   // Approval state
   const [pendingAsk, setPendingAsk] = useState<{
@@ -798,16 +808,6 @@ export const App: React.FC<AppProps> = ({
     setInitialized(true);
   }, [dangerouslySkipPermissions, sessionId, addStatic, columns]);
 
-  const handleSetupComplete = useCallback(
-    (nextConfig: Config) => {
-      setError(null);
-      void initializeWithConfig(nextConfig).catch((err: any) => {
-        setError(`Initialization failed: ${err.message}`);
-      });
-    },
-    [initializeWithConfig]
-  );
-
   useEffect(() => {
     if (!loading || !settings.animations) {
       setSpinnerFrame(0);
@@ -981,8 +981,10 @@ export const App: React.FC<AppProps> = ({
     picker ?? '',
     settingsIndex !== null ? 1 : 0,
     initialized ? 1 : 0,
+    config ? 1 : 0,
     subAgentActivities.length,
     showSubAgentPanel ? 1 : 0,
+    updateNotice ? 1 : 0,
   ].join(':');
 
   useEffect(() => {
@@ -1039,7 +1041,18 @@ export const App: React.FC<AppProps> = ({
         logger.warn('Could not create the Bitacode config directory', { error: err.message });
       }
 
-      const loadedConfig = readConfig('active');
+      let loadedConfig = readConfig('active');
+      if (!loadedConfig) {
+        const detected = detectConfigFromEnvironment();
+        if (detected) {
+          try {
+            writeConfig(detected, 'user');
+          } catch (err: any) {
+            logger.warn('Could not persist environment-detected config', { error: err.message });
+          }
+          loadedConfig = detected;
+        }
+      }
       if (!loadedConfig) {
         setInitialized(true);
         return;
@@ -1159,6 +1172,19 @@ export const App: React.FC<AppProps> = ({
       }
     },
     []
+  );
+
+  // Picker/key-prompt path when there is no config yet: persist the selection
+  // and boot the client immediately, so setup never needs the wizard.
+  const finalizeFirstConfig = useCallback(
+    (providerId: string, modelId: string, modelInfo?: { name?: string; contextWindow?: number }) => {
+      persistActiveSelection(providerId, modelId, modelInfo);
+      setError(null);
+      void initializeWithConfig({ provider: providerId, model: modelId }).catch((err: any) => {
+        setError(`Initialization failed: ${err.message}`);
+      });
+    },
+    [initializeWithConfig, persistActiveSelection]
   );
 
   const getModelPaletteInfo = useCallback((providerId: string, modelId: string) => {
@@ -1306,6 +1332,21 @@ export const App: React.FC<AppProps> = ({
         return;
       }
 
+      // First run straight from /provider: a saved key is already a usable
+      // config, so boot into chat with the provider's default model.
+      if (!config) {
+        const firstModel = getProvider(prompt.providerId)?.models[0]?.id ?? result.items[0]?.id;
+        setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
+        setKeyPrompt(null);
+        if (firstModel) {
+          finalizeFirstConfig(prompt.providerId, firstModel, {
+            name: result.items[0]?.label,
+            contextWindow: result.items[0]?.contextWindow,
+          });
+        }
+        return;
+      }
+
       if (result.items.length > 0) {
         setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
       }
@@ -1321,7 +1362,7 @@ export const App: React.FC<AppProps> = ({
           : null
       );
     },
-    [keyPrompt]
+    [config, keyPrompt, finalizeFirstConfig]
   );
 
   // Clear per-turn UI state without touching the saved session or transcript.
@@ -1648,6 +1689,13 @@ export const App: React.FC<AppProps> = ({
         }
         return true;
       case '/model':
+        if (!config && !pendingProviderId) {
+          setPicker('provider');
+          setPickerIndex(0);
+          setModelNotice(null);
+          setModelSearch('');
+          return true;
+        }
         setPendingProviderId(null);
         setModelNotice(null);
         setModelSearch('');
@@ -1694,7 +1742,16 @@ export const App: React.FC<AppProps> = ({
   const applyPicker = useCallback(() => {
     if (picker === 'model') {
       const item = modelItems[selectedModelIndex];
-      if (item && config) {
+      if (item && !config) {
+        // First setup: selecting a model with no config creates it.
+        const providerId = pendingProviderId ?? modelProviderId;
+        if (providerId) {
+          finalizeFirstConfig(providerId, item.id, {
+            name: item.label,
+            contextWindow: item.contextWindow,
+          });
+        }
+      } else if (item && config) {
         const providerId = pendingProviderId ?? config.provider;
         const switchingProvider = providerId !== config.provider;
         const nextConfig: Config = {
@@ -1787,13 +1844,15 @@ export const App: React.FC<AppProps> = ({
     beginProviderSwitch,
     persistActiveSelection,
     switchSession,
+    finalizeFirstConfig,
+    modelProviderId,
   ]);
 
   const handleSubmit = useCallback(async (value: string) => {
     const trimmed = value.trim();
-    if (!trimmed || loading || !clientRef.current || !config) return;
+    if (!trimmed || loading) return;
 
-    // Handle slash commands — Enter runs the highlighted palette row.
+    // Slash commands work even before a provider is configured.
     if (trimmed.startsWith('/')) {
       const selected = commandItems[commandIndex]?.label ?? trimmed.split(/\s+/)[0];
       const handled = await handleSlashCommand(selected, trimmed);
@@ -1802,6 +1861,11 @@ export const App: React.FC<AppProps> = ({
         setInputResetKey((prev) => prev + 1);
         return;
       }
+    }
+
+    if (!clientRef.current || !config) {
+      setError(API_MISSING_HINT);
+      return;
     }
 
     setInputText('');
@@ -1988,9 +2052,6 @@ export const App: React.FC<AppProps> = ({
       exit();
       return;
     }
-
-    // The inline first-run setup owns input until a config is saved.
-    if (!config) return;
 
     // API key prompt owns text input; only Esc (when idle) is handled here.
     if (keyPrompt) {
@@ -2279,6 +2340,15 @@ export const App: React.FC<AppProps> = ({
   // Any interactive prompt owns the live area. Optional panels are hidden so
   // the critical prompt keeps its rows instead of being clipped at the bottom.
   const hasCriticalPrompt = pendingApproval !== null || pendingAsk !== null || keyPrompt !== null;
+  // The update hint is purely informational: hide it whenever a picker,
+  // settings, help or a critical prompt owns the live area so it never
+  // competes with UI that needs the user's attention.
+  const showUpdateNotice =
+    Boolean(updateNotice) &&
+    !hasCriticalPrompt &&
+    picker === null &&
+    settingsIndex === null &&
+    helpMessage === null;
   const showSplash =
     initialized &&
     config !== null &&
@@ -2291,7 +2361,7 @@ export const App: React.FC<AppProps> = ({
   const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
   const { paletteWindow, visibleTodos, gutter, dense } = layout;
   const inputFocused =
-    initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
+    initialized && picker === null && settingsIndex === null && keyPrompt === null;
 
   // Provider-driven only: the block appears when the model actually streams
   // reasoning, never just because a request is in flight. A busy agent with no
@@ -2423,6 +2493,14 @@ export const App: React.FC<AppProps> = ({
           rule that used to sit here is gone; the composer's own accent bar is
           the only border, so there is no double edge between chat and input. */}
       <Box flexDirection="column" flexGrow={hasCriticalPrompt ? 1 : 0} flexShrink={1} minHeight={0} overflow="hidden">
+        {showUpdateNotice && (
+          <Box height={1} flexShrink={0} paddingX={dense ? 0 : gutter} overflow="hidden">
+            <Text wrap="truncate-end">
+              <Text color={theme.info}>⬆ </Text>
+              <Text color={theme.muted}>{updateNotice}</Text>
+            </Text>
+          </Box>
+        )}
         {helpMessage && !dense && !hasCriticalPrompt && (
           <Box paddingX={2}>
             <LeftBar color={theme.muted} marginTop={1} marginBottom={1}>
@@ -2431,10 +2509,9 @@ export const App: React.FC<AppProps> = ({
           </Box>
         )}
         {!initialized && !error && <Text color={theme.dim}>Initializing...</Text>}
-
-        {initialized && !config && (
-          <Box paddingX={2} marginY={1}>
-            <ConfigureComponent firstRun onComplete={handleSetupComplete} />
+        {initialized && !config && !hasCriticalPrompt && (
+          <Box paddingX={gutter}>
+            <Text color={theme.info} wrap="truncate-end">{SETUP_HINT}</Text>
           </Box>
         )}
 
@@ -2600,7 +2677,7 @@ export const App: React.FC<AppProps> = ({
           left. The old full box drew a bright outline around every keystroke;
           a single edge keeps the focus cue without boxing the text in.
           The gaps above and inside give the input room to breathe. */}
-      {initialized && config && !pendingApproval && !pendingAsk && !keyPrompt && (
+      {initialized && !pendingApproval && !pendingAsk && !keyPrompt && (
         <Box flexDirection="column" alignItems="center" flexShrink={0}>
           <Box
             flexDirection="row"
@@ -2642,7 +2719,7 @@ export const App: React.FC<AppProps> = ({
 
       {/* Status: folder · model · variant · context — hidden while a modal
           prompt owns the screen so the prompt keeps every available row. */}
-      {initialized && config && !hasCriticalPrompt && (
+      {initialized && !hasCriticalPrompt && (
         <UsageDisplay
           usage={lastUsage ?? null}
           totalCost={totalCost}

@@ -47,7 +47,9 @@ npm run dev
 node dist/cli.js
 ```
 
-On first run, Bitacode creates the shared config folder and shows an inline setup flow where you pick a provider/model pair and enter an API key. The selection is saved to the shared user `bitacode.jsonc`; use `bitacode configure --project` if you want a project-local file instead.
+Running `bitacode` always opens the main screen immediately — there is no blocking setup step. If an API key is found in the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, or `BITACODE_API_KEY`), Bitacode automatically picks that provider and its first model. Otherwise you get a one-line hint and can set up from the main screen. The selection is saved to the shared user `bitacode.jsonc`; use `bitacode configure --project` if you want a project-local file instead.
+
+From the main screen, type `/provider` to choose a provider (you'll be prompted for an API key if none is set) and `/model` to pick a model. If no key is configured, sending a normal message shows a hint instead of failing silently.
 
 Runtime config lookup is simple:
 

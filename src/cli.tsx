@@ -18,6 +18,14 @@ import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { theme } from './theme.js';
 import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
+import { checkForUpdate, installUpdate } from './utils/version-check.js';
+import {
+  formatInstalled,
+  formatUpdateAvailable,
+  formatUpdateNotice,
+  formatUpdateUnavailable,
+  formatUpToDate,
+} from './utils/cli-update-format.js';
 import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig } from './config.js';
 
 // A rejected promise in a background fetch should be logged, not kill the TUI.
@@ -60,16 +68,31 @@ program
     process.stdout.write('\x1b[2J\x1b[H\x1b[?25l');
 
     // Default action - start the main app
-    render(
+    const appProps = {
+      dangerouslySkipPermissions: options.dangerouslySkipPermissions || false,
+      logLevel: options.logLevel,
+      sessionId: options.session,
+    };
+    const instance = render(
       <ErrorBoundary>
-        <App
-          dangerouslySkipPermissions={options.dangerouslySkipPermissions || false}
-          logLevel={options.logLevel}
-          sessionId={options.session}
-        />
+        <App {...appProps} />
       </ErrorBoundary>,
       { maxFps: 60 }
     );
+
+    // Best-effort notice: render first, then upgrade the UI only if a newer
+    // version is cached/available. Never block startup on the network check.
+    void checkForUpdate(packageJson.version)
+      .then((info) => {
+        if (info?.updateAvailable) {
+          instance.rerender(
+            <ErrorBoundary>
+              <App {...appProps} updateNotice={formatUpdateNotice(info.latest)} />
+            </ErrorBoundary>
+          );
+        }
+      })
+      .catch((error) => logger.debug('Update check failed', { error: String(error) }));
   });
 
 // Configure subcommand
@@ -144,6 +167,53 @@ program
     }
 
     render(<InitComponent />, { maxFps: 60 });
+  });
+
+// `help` mirrors `--help` for users who type it as a command. Commander's
+// implicit help command is disabled here because the root has an action, so
+// register one explicitly.
+program
+  .command('help')
+  .description('Display help for bitacode')
+  .action(() => {
+    program.outputHelp();
+  });
+
+program
+  .command('update')
+  .description('Check for and install Bitacode updates')
+  .option('--check', 'Only check for an update, do not install')
+  .option('--global', 'Install the update globally')
+  .option('--local', 'Install the update locally')
+  .action(async (options) => {
+    try {
+      const info = await checkForUpdate(packageJson.version, { force: true });
+      if (!info) {
+        console.log(formatUpdateUnavailable());
+        return;
+      }
+      if (!info.updateAvailable) {
+        console.log(formatUpToDate(info.current));
+        return;
+      }
+      if (options.check) {
+        console.log(formatUpdateAvailable(info.current, info.latest));
+        return;
+      }
+
+      const result = await installUpdate({
+        version: info.latest,
+        ...(options.global ? { global: true } : {}),
+        ...(options.local ? { global: false } : {}),
+      });
+      console.log(result.message);
+      if (result.success) {
+        console.log(formatInstalled(info.latest));
+      }
+    } catch (error) {
+      console.error('Update failed:', error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    }
   });
 
 program.parse(process.argv);

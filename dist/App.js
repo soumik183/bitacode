@@ -74,7 +74,7 @@ import { loadSettings, saveSettings } from './settings.js';
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
 import { OpenAI } from 'openai';
-import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, ConfigureComponent } from './config.js';
+import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, detectConfigFromEnvironment, writeConfig } from './config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
 import { getAllProviders, getProvider, getModelDetails, getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { runAgenticLoop, initializeMessages, } from './agentic-loop.js';
@@ -137,6 +137,9 @@ const SPLASH_LINES = [
     '█▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄',
 ];
 const Splash = () => (_jsx(Box, { flexDirection: "column", alignItems: "center", children: _jsx(Text, { color: theme.text, bold: true, children: SPLASH_LINES.join('\n') }) }));
+// First-run guidance lives in the main screen, never in a blocking wizard.
+const SETUP_HINT = 'No provider configured — type /provider to choose one';
+const API_MISSING_HINT = 'API key missing — type /provider to select a provider and add a key.';
 function printMessageToScrollback(addStatic, role, text) {
     const normalized = normalizeTranscriptText(text);
     if (!normalized) {
@@ -302,7 +305,7 @@ function buildClient(config, apiKeyOverride) {
     return new OpenAI(clientOptions);
 }
 // ─── Main App ───
-export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }) => {
+export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, updateNotice, }) => {
     const { exit } = useApp();
     const { stdout } = useStdout();
     // A zoom burst can briefly report 0/undefined/NaN dimensions; clamp once at
@@ -316,6 +319,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     // take its full-screen path (`clearTerminal` + full repaint) on every frame,
     // which is the blinking seen while scrolling and streaming.
     const frameHeight = frameRows(rows);
+    // Keep the configure wizard inside the frame on short terminals (Select caps
+    // at five visible options, but the surrounding text still needs a bound).
     // ─── Static scrollback state ───
     // Each item is rendered once by <Static> and permanently flushed to scrollback.
     // staticCounterRef generates unique IDs (s1, s2, s3...) for React keys.
@@ -439,6 +444,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const [sessionItems, setSessionItems] = useState([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [pendingSessionDelete, setPendingSessionDelete] = useState(null);
+    // Full provider -> model -> API key wizard, reopened from inside the TUI.
     // Approval state
     const [pendingAsk, setPendingAsk] = useState(null);
     const [pendingApproval, setPendingApproval] = useState(null);
@@ -603,12 +609,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         }
         setInitialized(true);
     }, [dangerouslySkipPermissions, sessionId, addStatic, columns]);
-    const handleSetupComplete = useCallback((nextConfig) => {
-        setError(null);
-        void initializeWithConfig(nextConfig).catch((err) => {
-            setError(`Initialization failed: ${err.message}`);
-        });
-    }, [initializeWithConfig]);
     useEffect(() => {
         if (!loading || !settings.animations) {
             setSpinnerFrame(0);
@@ -762,8 +762,10 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         picker ?? '',
         settingsIndex !== null ? 1 : 0,
         initialized ? 1 : 0,
+        config ? 1 : 0,
         subAgentActivities.length,
         showSubAgentPanel ? 1 : 0,
+        updateNotice ? 1 : 0,
     ].join(':');
     useEffect(() => {
         if (!viewportRef.current)
@@ -814,7 +816,19 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             catch (err) {
                 logger.warn('Could not create the Bitacode config directory', { error: err.message });
             }
-            const loadedConfig = readConfig('active');
+            let loadedConfig = readConfig('active');
+            if (!loadedConfig) {
+                const detected = detectConfigFromEnvironment();
+                if (detected) {
+                    try {
+                        writeConfig(detected, 'user');
+                    }
+                    catch (err) {
+                        logger.warn('Could not persist environment-detected config', { error: err.message });
+                    }
+                    loadedConfig = detected;
+                }
+            }
             if (!loadedConfig) {
                 setInitialized(true);
                 return;
@@ -910,6 +924,15 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             setError(`Selection applies to this session but could not be saved: ${err.message}`);
         }
     }, []);
+    // Picker/key-prompt path when there is no config yet: persist the selection
+    // and boot the client immediately, so setup never needs the wizard.
+    const finalizeFirstConfig = useCallback((providerId, modelId, modelInfo) => {
+        persistActiveSelection(providerId, modelId, modelInfo);
+        setError(null);
+        void initializeWithConfig({ provider: providerId, model: modelId }).catch((err) => {
+            setError(`Initialization failed: ${err.message}`);
+        });
+    }, [initializeWithConfig, persistActiveSelection]);
     const getModelPaletteInfo = useCallback((providerId, modelId) => {
         const remote = remoteModelsRef.current[providerId]?.find((item) => item.id === modelId);
         if (remote)
@@ -1035,6 +1058,20 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             });
             return;
         }
+        // First run straight from /provider: a saved key is already a usable
+        // config, so boot into chat with the provider's default model.
+        if (!config) {
+            const firstModel = getProvider(prompt.providerId)?.models[0]?.id ?? result.items[0]?.id;
+            setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
+            setKeyPrompt(null);
+            if (firstModel) {
+                finalizeFirstConfig(prompt.providerId, firstModel, {
+                    name: result.items[0]?.label,
+                    contextWindow: result.items[0]?.contextWindow,
+                });
+            }
+            return;
+        }
         if (result.items.length > 0) {
             setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
         }
@@ -1047,7 +1084,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         setModelNotice(result.error
             ? `Could not fetch models (${result.error}); using built-in list.`
             : null);
-    }, [keyPrompt]);
+    }, [config, keyPrompt, finalizeFirstConfig]);
     // Clear per-turn UI state without touching the saved session or transcript.
     const resetLiveState = useCallback(() => {
         setError(null);
@@ -1354,6 +1391,13 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 }
                 return true;
             case '/model':
+                if (!config && !pendingProviderId) {
+                    setPicker('provider');
+                    setPickerIndex(0);
+                    setModelNotice(null);
+                    setModelSearch('');
+                    return true;
+                }
                 setPendingProviderId(null);
                 setModelNotice(null);
                 setModelSearch('');
@@ -1399,7 +1443,17 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const applyPicker = useCallback(() => {
         if (picker === 'model') {
             const item = modelItems[selectedModelIndex];
-            if (item && config) {
+            if (item && !config) {
+                // First setup: selecting a model with no config creates it.
+                const providerId = pendingProviderId ?? modelProviderId;
+                if (providerId) {
+                    finalizeFirstConfig(providerId, item.id, {
+                        name: item.label,
+                        contextWindow: item.contextWindow,
+                    });
+                }
+            }
+            else if (item && config) {
                 const providerId = pendingProviderId ?? config.provider;
                 const switchingProvider = providerId !== config.provider;
                 const nextConfig = {
@@ -1492,12 +1546,14 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         beginProviderSwitch,
         persistActiveSelection,
         switchSession,
+        finalizeFirstConfig,
+        modelProviderId,
     ]);
     const handleSubmit = useCallback(async (value) => {
         const trimmed = value.trim();
-        if (!trimmed || loading || !clientRef.current || !config)
+        if (!trimmed || loading)
             return;
-        // Handle slash commands — Enter runs the highlighted palette row.
+        // Slash commands work even before a provider is configured.
         if (trimmed.startsWith('/')) {
             const selected = commandItems[commandIndex]?.label ?? trimmed.split(/\s+/)[0];
             const handled = await handleSlashCommand(selected, trimmed);
@@ -1506,6 +1562,10 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 setInputResetKey((prev) => prev + 1);
                 return;
             }
+        }
+        if (!clientRef.current || !config) {
+            setError(API_MISSING_HINT);
+            return;
         }
         setInputText('');
         setInputResetKey((prev) => prev + 1); // Force TextInput to remount and clear
@@ -1661,9 +1721,6 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             exit();
             return;
         }
-        // The inline first-run setup owns input until a config is saved.
-        if (!config)
-            return;
         // API key prompt owns text input; only Esc (when idle) is handled here.
         if (keyPrompt) {
             if (key.escape && !keyPrompt.busy)
@@ -1953,6 +2010,14 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     // Any interactive prompt owns the live area. Optional panels are hidden so
     // the critical prompt keeps its rows instead of being clipped at the bottom.
     const hasCriticalPrompt = pendingApproval !== null || pendingAsk !== null || keyPrompt !== null;
+    // The update hint is purely informational: hide it whenever a picker,
+    // settings, help or a critical prompt owns the live area so it never
+    // competes with UI that needs the user's attention.
+    const showUpdateNotice = Boolean(updateNotice) &&
+        !hasCriticalPrompt &&
+        picker === null &&
+        settingsIndex === null &&
+        helpMessage === null;
     const showSplash = initialized &&
         config !== null &&
         !loading &&
@@ -1963,7 +2028,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const layout = resolveLayout(columns, rows);
     const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
     const { paletteWindow, visibleTodos, gutter, dense } = layout;
-    const inputFocused = initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
+    const inputFocused = initialized && picker === null && settingsIndex === null && keyPrompt === null;
     // Provider-driven only: the block appears when the model actually streams
     // reasoning, never just because a request is in flight. A busy agent with no
     // reasoning used to render an empty "Thinking..." row that implied the model
@@ -2000,7 +2065,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                                     // blank spacer here shows empty rows and shoves the item's
                                     // bottom off-screen. The wrapper is registered for clicks so
                                     // the yoga lookup still sees the clipped geometry.
-                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: hasCriticalPrompt ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", children: [helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && (_jsx(Box, { paddingX: 2, marginY: 1, children: _jsx(ConfigureComponent, { firstRun: true, onComplete: handleSetupComplete }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), hasThinkingBlock && !hasCriticalPrompt && (_jsx(ThinkingBlock, { text: thinkingText, expanded: thinkingExpanded, active: thinkingActive, animate: settings.animations, frame: spinnerFrame, columns: columns, rows: rows, elapsedMs: thinkingElapsedMs })), isStreaming && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, columns - gutter * 2), columns - gutter * 2), _jsx(Text, { dimColor: true, children: "\u258D" })] }) })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`))), pendingAsk && !pendingApproval && (_jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: columns, compact: dense || rows <= 10, onRespond: (response) => {
+                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: hasCriticalPrompt ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), hasThinkingBlock && !hasCriticalPrompt && (_jsx(ThinkingBlock, { text: thinkingText, expanded: thinkingExpanded, active: thinkingActive, animate: settings.animations, frame: spinnerFrame, columns: columns, rows: rows, elapsedMs: thinkingElapsedMs })), isStreaming && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, columns - gutter * 2), columns - gutter * 2), _jsx(Text, { dimColor: true, children: "\u258D" })] }) })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`))), pendingAsk && !pendingApproval && (_jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: columns, compact: dense || rows <= 10, onRespond: (response) => {
                             pendingAsk.resolve(response);
                             setPendingAsk(null);
                         } })), pendingApproval && (_jsx(ApprovalPrompt, { request: pendingApproval.request, columns: columns, compact: dense || rows <= 10, onRespond: (response) => {
@@ -2016,5 +2081,5 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                             ? `Delete session "${pendingSessionDelete.label}"?`
                             : 'Select session', items: sessionItems, selected: clampIndex(pickerIndex, sessionItems.length), maxVisible: paletteWindow, hint: pendingSessionDelete
                             ? 'y delete permanently · n cancel'
-                            : '↑↓ select · enter resume · d delete · esc close' })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: sessionsLoading ? theme.dim : theme.muted, children: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.' }) }))), picker === 'variant' && (_jsx(Palette, { title: "Select variant", items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), settingsIndex !== null && (_jsx(Palette, { title: "Settings", items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter toggle \u00B7 esc close" })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && config && !pendingApproval && !pendingAsk && !keyPrompt && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && config && !hasCriticalPrompt && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense }))] }));
+                            : '↑↓ select · enter resume · d delete · esc close' })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: sessionsLoading ? theme.dim : theme.muted, children: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.' }) }))), picker === 'variant' && (_jsx(Palette, { title: "Select variant", items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), settingsIndex !== null && (_jsx(Palette, { title: "Settings", items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter toggle \u00B7 esc close" })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && !pendingApproval && !pendingAsk && !keyPrompt && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && !hasCriticalPrompt && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense }))] }));
 };
