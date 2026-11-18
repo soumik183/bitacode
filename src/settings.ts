@@ -17,6 +17,28 @@ function isApprovalMode(value: unknown): value is ApprovalMode {
   return value === 'manual' || value === 'auto' || value === 'yolo';
 }
 
+/** Bounds and default for the fraction of context that triggers compaction. */
+export const COMPACT_THRESHOLD_MIN = 0.5;
+export const COMPACT_THRESHOLD_MAX = 0.95;
+export const COMPACT_THRESHOLD_DEFAULT = 0.9;
+
+/** Status-line segments, in their canonical display order. */
+export const STATUS_LINE_ITEMS = ['folder', 'model', 'variant', 'cost', 'context', 'tool'] as const;
+export type StatusLineItem = (typeof STATUS_LINE_ITEMS)[number];
+
+function isCompactThreshold(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isFinite(value) &&
+    value >= COMPACT_THRESHOLD_MIN &&
+    value <= COMPACT_THRESHOLD_MAX
+  );
+}
+
+function isThemeName(value: unknown): value is 'dark' | 'light' | 'high-contrast' {
+  return value === 'dark' || value === 'light' || value === 'high-contrast';
+}
+
 export interface UiSettings {
   /** Animate spinners, shimmers and thinking dots. */
   animations: boolean;
@@ -31,6 +53,12 @@ export interface UiSettings {
   variant: string;
   /** Approval policy for write/edit/shell operations. */
   approvalMode: ApprovalMode;
+  /** Fraction of the context window (0.5–0.95) that triggers compaction. */
+  compactThreshold?: number;
+  /** Colour palette used by the UI. */
+  theme?: 'dark' | 'light' | 'high-contrast';
+  /** Segments shown in the status line, in display order. */
+  statusLine?: StatusLineItem[];
 }
 
 export const DEFAULT_SETTINGS: UiSettings = {
@@ -38,6 +66,9 @@ export const DEFAULT_SETTINGS: UiSettings = {
   mouseClicks: true,
   variant: DEFAULT_VARIANT,
   approvalMode: 'manual',
+  compactThreshold: COMPACT_THRESHOLD_DEFAULT,
+  theme: 'dark',
+  statusLine: [...STATUS_LINE_ITEMS],
 };
 
 function getSettingsPath(): string {
@@ -59,9 +90,16 @@ export function loadSettings(): UiSettings {
         ? (parsed.variant as string)
         : DEFAULT_VARIANT,
       approvalMode: isApprovalMode(parsed.approvalMode) ? parsed.approvalMode : 'manual',
+      compactThreshold: isCompactThreshold(parsed.compactThreshold)
+        ? parsed.compactThreshold
+        : COMPACT_THRESHOLD_DEFAULT,
+      theme: isThemeName(parsed.theme) ? parsed.theme : 'dark',
+      statusLine: Array.isArray(parsed.statusLine)
+        ? parsed.statusLine.filter((item) => STATUS_LINE_ITEMS.includes(item))
+        : [...STATUS_LINE_ITEMS],
     };
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return { ...DEFAULT_SETTINGS, statusLine: [...STATUS_LINE_ITEMS] };
   }
 }
 

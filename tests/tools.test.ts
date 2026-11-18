@@ -10,6 +10,8 @@ import { globFiles } from '../src/tools/glob.js';
 import { readTodos, writeTodos } from '../src/tools/todo.js';
 import {
   handleToolCall,
+  tools,
+  setPlanMode,
   registerDynamicHandler,
   registerDynamicTool,
   unregisterDynamicHandler,
@@ -354,6 +356,24 @@ test('handleToolCall strips NUL bytes from results', async () => {
   }
 });
 
+test('new tools are registered and dispatched', async () => {
+  const names = tools.map((tool) => tool.function.name);
+  for (const name of ['undo', 'read_image', 'go_to_definition', 'find_references', 'diagnostics']) {
+    assert.ok(names.includes(name), `missing tool ${name}`);
+  }
+
+  assert.match(await handleToolCall('undo', {}, { sessionId: `tools-test-empty-undo-${Date.now()}` }), /Nothing to undo/);
+  assert.match(
+    await handleToolCall('read_image', { file_path: 'notes.txt' }),
+    /unsupported image type/i,
+  );
+  const missingSymbol = `zzz_${Math.random().toString(36).slice(2)}_nope`;
+  assert.match(
+    await handleToolCall('find_references', { symbol: missingSymbol, directory_path: 'tests' }),
+    /No reference/,
+  );
+});
+
 test('getValidToolNames includes built-ins, dynamic tools and sub_agent but not aliases', () => {
   const name = 'tmp_registry_probe_tool';
   registerDynamicTool({
@@ -371,5 +391,15 @@ test('getValidToolNames includes built-ins, dynamic tools and sub_agent but not 
     assert.ok(!names.has('list'), 'aliases must not be advertised');
   } finally {
     unregisterDynamicTool(name);
+  }
+});
+
+test('plan mode blocks mutating tools at the dispatcher', async () => {
+  setPlanMode(true);
+  try {
+    const result = await handleToolCall('write_file', { file_path: '/tmp/plan-blocked', content: 'x' });
+    assert.match(result, /blocked in plan mode/);
+  } finally {
+    setPlanMode(false);
   }
 });

@@ -551,7 +551,7 @@ test('max scroll uses the rendered window so the oldest row stays reachable', ()
 // ─── Full-App UI tests (composer, settings, global shortcuts) ───
 // Home is redirected to a temp dir so config, settings and sessions are
 // isolated. Cwd is left alone: every store this touches lives under HOME.
-function renderApp(props: AppProps = {}) {
+function renderApp(props: AppProps = {}, beforeRender?: (home: string) => void) {
   const originalHome = process.env.HOME;
   const originalApiKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-ui-'));
@@ -574,6 +574,7 @@ function renderApp(props: AppProps = {}) {
       approvalMode: 'manual',
     })
   );
+  beforeRender?.(home);
 
   const instance = render(<App {...props} />);
   return {
@@ -588,6 +589,57 @@ function renderApp(props: AppProps = {}) {
       fs.rmSync(home, { recursive: true, force: true });
     },
   };
+}
+
+/** Ink-testing-library can drop a keystroke under parallel load: retry it. */
+async function pressUntil(
+  app: ReturnType<typeof renderApp>,
+  key: string,
+  predicate: (frame: string) => boolean,
+  timeoutMs = 5000
+): Promise<string> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const from = app.stdout.frames.length;
+    app.stdin.write(key);
+    const hit = await waitForFrameWhere(app, predicate, 600, from);
+    if (hit) return hit;
+  }
+  return '';
+}
+
+/** Type text into the composer and submit, retrying dropped keystrokes. */
+async function typeSubmit(app: ReturnType<typeof renderApp>, text: string): Promise<void> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    app.stdin.write('\x0b'); // ctrl+k clears the current draft
+    await settle(60);
+    const from = app.stdout.frames.length;
+    app.stdin.write(text);
+    await settle(120);
+    if (await waitForFrameWhere(app, (f) => f.includes(text), 600, from)) {
+      app.stdin.write('\r');
+      return;
+    }
+  }
+}
+
+/** Seed a resumable session in an isolated test HOME. */
+function seedSession(home: string, id: string, completionMessages: unknown[]): void {
+  const dir = path.join(home, '.local', 'share', 'bitacode', 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `${id}.json`),
+    JSON.stringify({
+      id,
+      title: 'ui test',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      model: 'gpt-4o-mini',
+      provider: 'openai',
+      todos: [],
+      completionMessages,
+    })
+  );
 }
 
 test('the composer placeholder appears exactly once in the frame', async () => {
@@ -1465,5 +1517,118 @@ test('first run auto-detects a provider from env and skips the setup wizard', as
     setApprovalMode('manual');
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// ─── New UI features (plan mode, retry, shell, search, collapse, images) ───
+test('tab toggles the PLAN MODE badge without stealing composer focus', async () => {
+  const app = renderApp();
+  try {
+    const idle = await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    assert.doesNotMatch(idle, /PLAN MODE/);
+    await settle(150); // let Ink finish wiring stdin after the first ready frame
+
+    const plan = await pressUntil(app, '\t', (f) => f.includes('PLAN MODE')); // Tab
+    assert.match(plan, /PLAN MODE/);
+    assert.match(plan, /Build anything…/, 'the composer stays visible in plan mode');
+
+    const build = await pressUntil(app, '\t', (f) => !f.includes('PLAN MODE'));
+    assert.ok(build, 'Tab toggles back to build mode');
+    assert.doesNotMatch(build, /PLAN MODE/);
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('ctrl+r retries the last submitted text and refills the composer', async () => {
+  const app = renderApp();
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    await settle(150);
+    await typeSubmit(app, 'RETRY-MARKER'); // starts a run that the retry aborts
+    await settle(80);
+
+    const frame = await pressUntil(app, '\x12', (f) => f.includes('Retrying: RETRY-MARKER'));
+    assert.match(frame, /RETRY-MARKER/, 'the last message is retried/refilled');
+    assert.match(frame, /Retrying:/, 'a brief retry hint is shown');
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('! <cmd> runs bash directly and shows the result in the transcript', async () => {
+  const app = renderApp();
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    await settle(150);
+    await typeSubmit(app, '! echo SHELL-MARKER');
+
+    const frame = await waitForFrameText(app, 'SHELL-MARKER', 5000);
+    assert.match(frame, /echo SHELL-MARKER/, 'the shell command card is shown');
+    assert.match(frame, /SHELL-MARKER/, 'the command output is shown');
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('/find filters the transcript and shows a match count', async () => {
+  const app = renderApp({ sessionId: 'find0001' }, (home) =>
+    seedSession(home, 'find0001', [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'FINDME-MARKER' },
+      { role: 'assistant', content: 'unrelated answer' },
+    ])
+  );
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('FINDME-MARKER'));
+    await settle(150);
+    await typeSubmit(app, '/find FINDME');
+
+    const frame = await waitForFrameText(app, 'match', 5000);
+    assert.match(frame, /1 match for "FINDME"/, 'exactly one match is reported');
+    assert.match(frame, /FINDME-MARKER/, 'the matching card stays visible');
+    assert.doesNotMatch(frame, /unrelated answer/, 'non-matching cards are filtered out');
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('ctrl+e collapses and expands all transcript cards', async () => {
+  const lines = Array.from({ length: 10 }, (_, i) => `COLLAPSE-LINE-${i}`);
+  const app = renderApp({ sessionId: 'collapse' }, (home) =>
+    seedSession(home, 'collapse', [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'answer', reasoning: lines.join('\n') },
+    ])
+  );
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('COLLAPSE-LINE-0'));
+    assert.doesNotMatch(app.lastFrame() ?? '', /COLLAPSE-LINE-9/, 'card starts collapsed');
+    await settle(150);
+
+    const expanded = await pressUntil(app, '\x05', (f) => f.includes('COLLAPSE-LINE-9')); // Ctrl+E
+    assert.match(expanded, /COLLAPSE-LINE-9/, 'all cards expand');
+
+    const collapsed = await pressUntil(app, '\x05', (f) => !f.includes('COLLAPSE-LINE-9'));
+    assert.ok(collapsed, 'all cards collapse again');
+    assert.doesNotMatch(collapsed, /COLLAPSE-LINE-9/);
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('/image with a fake path shows a clear error', async () => {
+  const app = renderApp();
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    await settle(150);
+    await typeSubmit(app, '/image /no/such/photo.png');
+
+    const frame = await waitForFrameText(app, 'Image error', 5000);
+    assert.match(frame, /Image error/);
+    assert.match(frame, /\/no\/such\/photo\.png/, 'the bad path is named in the error');
+  } finally {
+    app.cleanupAll();
   }
 });

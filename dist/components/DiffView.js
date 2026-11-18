@@ -21,11 +21,12 @@ function lineColor(line) {
  * Compact, colour-coded unified diff for edit_file/write_file results.
  * Green additions, red removals and file line numbers in a bordered card.
  */
-export const DiffView = ({ header, diff, filePath, operation, language: languageOverride }) => {
+export const DiffView = ({ header, diff, filePath, operation, language: languageOverride, maxRows }) => {
     const lines = annotateDiff(diff);
     const additions = lines.filter((line) => line.kind === 'add').length;
     const removals = lines.filter((line) => line.kind === 'remove').length;
-    const shown = lines.slice(0, MAX_VISIBLE_LINES);
+    const visibleLimit = Math.max(1, Math.min(MAX_VISIBLE_LINES, Math.floor(Number.isFinite(maxRows) ? maxRows : MAX_VISIBLE_LINES)));
+    const shown = lines.slice(0, visibleLimit);
     const hidden = lines.length - shown.length;
     const language = languageOverride ?? detectLanguage(filePath);
     // Highlight once per diff, not per render. Syntax colours sit on top of the

@@ -58,6 +58,7 @@ NOTES:
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Box, Text, useApp, useInput, useStdout, measureElement } from 'ink';
 import { basename } from 'node:path';
+import { spawn } from 'node:child_process';
 import { LeftBar } from './components/LeftBar.js';
 import { Palette, SLASH_COMMANDS, type PaletteItem } from './components/Palette.js';
 import { ApprovalPrompt } from './components/ApprovalPrompt.js';
@@ -65,6 +66,7 @@ import { AskPrompt } from './components/AskPrompt.js';
 import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
 import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
+import { DiffView } from './components/DiffView.js';
 import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.js';
 import { ThinkingArchive } from './components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
@@ -75,8 +77,14 @@ import {
   upsertSubAgentActivity,
   type SubAgentEventFields,
 } from './components/SubAgentActivity.js';
-import { theme } from './theme.js';
-import { loadSettings, saveSettings, type UiSettings, type ApprovalMode } from './settings.js';
+import { theme, getTheme, THEME_NAMES } from './theme.js';
+import {
+  loadSettings,
+  saveSettings,
+  STATUS_LINE_ITEMS,
+  type UiSettings,
+  type ApprovalMode,
+} from './settings.js';
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
 import { OpenAI } from 'openai';
@@ -96,6 +104,8 @@ import {
   clearApprovalHandler,
   setAskHandler,
   recordSubAgentStatus,
+  handleToolCall,
+  setPlanMode,
 } from './tools/index.js';
 import type { ApprovalRequest, ApprovalResponse } from './utils/approval.js';
 import type { AskRequest, AskResponse } from './tools/ask.js';
@@ -366,6 +376,99 @@ function clipToRows(text: string, maxRows: number, columns: number): string {
   return (kept.length > 0 ? kept : [lines[lines.length - 1] ?? '']).join('\n');
 }
 
+// Tools that can change files or system state. In plan mode their tool_call
+// events are shown as blocked instead of being forwarded to the transcript.
+const MUTATING_TOOLS = new Set([
+  'write_file', 'edit_file', 'apply_patch', 'multiedit', 'delete', 'rename',
+  'move', 'copy', 'mkdir', 'git_add', 'git_commit', 'git_stash', 'bash',
+  'start_process', 'write_process_stdin', 'stop_process', 'kill', 'watch',
+  'background',
+]);
+
+const PLAN_MODE_NOTE =
+  'PLAN MODE: Do not modify files or run state-changing tools. Output a plan only, with no tool calls.';
+
+/** Recover the displayable text of a transcript card for search / copy. */
+function nodeText(node: React.ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join(' ');
+  if (React.isValidElement(node)) {
+    return nodeText((node.props as { children?: React.ReactNode }).children);
+  }
+  return '';
+}
+
+/** A minimal, conservative "is this streamed text a diff?" check. */
+function looksLikeDiff(text: string): boolean {
+  const lines = text.split('\n').filter((line) => line.length > 0);
+  if (lines.length < 2) return false;
+  if (lines.some((line) => /^(@@|diff --git|--- |\+\+\+ )/.test(line))) return true;
+  const adds = lines.filter((line) => line.startsWith('+')).length;
+  const removes = lines.filter((line) => line.startsWith('-')).length;
+  return adds > 0 && removes > 0 && adds + removes >= 2;
+}
+
+/** Best-effort file path from a serialized tool-call argument object. */
+function extractPathFromArgs(args: string | undefined): string | undefined {
+  if (!args) return undefined;
+  let parsed: any;
+  try {
+    parsed = typeof args === 'string' ? JSON.parse(args) : args;
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  for (const key of ['file_path', 'path', 'filename', 'file', 'destination', 'source']) {
+    const value = parsed[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  if (Array.isArray(parsed.edits)) {
+    for (const edit of parsed.edits) {
+      if (typeof edit?.file_path === 'string' && edit.file_path.trim()) return edit.file_path.trim();
+    }
+  }
+  if (typeof parsed.patch === 'string') {
+    const match = parsed.patch.match(/^\+\+\+ b\/(.+)$/m);
+    if (match) return match[1].trim();
+  }
+  return undefined;
+}
+
+/** Best-effort clipboard write; never throws, returns after at most 2 s. */
+function copyToClipboard(text: string): Promise<void> {
+  return new Promise((resolve) => {
+    const { cmd, args } = process.platform === 'android'
+      ? { cmd: 'termux-clipboard-set', args: [] as string[] }
+      : process.platform === 'darwin'
+        ? { cmd: 'pbcopy', args: [] as string[] }
+        : process.platform === 'win32'
+          ? { cmd: 'clip', args: [] as string[] }
+          : { cmd: 'xclip', args: ['-selection', 'clipboard'] };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve();
+    };
+    try {
+      const child = spawn(cmd, args, { stdio: ['pipe', 'ignore', 'ignore'] });
+      timer = setTimeout(() => {
+        try { child.kill(); } catch { /* already gone */ }
+        finish();
+      }, 2000);
+      child.on('error', finish);
+      child.on('close', finish);
+      child.stdin.on('error', finish);
+      child.stdin.end(text);
+    } catch {
+      finish();
+    }
+  });
+}
+
 // ─── Props ───
 export interface AppProps {
   dangerouslySkipPermissions?: boolean;
@@ -392,12 +495,13 @@ function buildHelpText(approvalMode: ApprovalMode): string {
     'Keys (ctrl or alt):',
     '  n new · s sessions · m model · p provider · v variant',
     '  h help · k clear · l clear chat · t thinking · b/f scroll',
+    '  tab plan · ^r retry · ^e collapse · ^y copy · alt+↑ edit',
     '  , settings · / help · q sessions · esc close/cancel',
     `  Approval mode: ${approvalMode} (ctrl+, or alt+, to change)`,
   ].join('\n');
 }
 
-const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode'] as const;
+const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode', 'theme', 'statusLine'] as const;
 
 function buildClient(config: Config, apiKeyOverride?: string): OpenAI {
   const provider = getProvider(config.provider);
@@ -565,8 +669,54 @@ export const App: React.FC<AppProps> = ({
   const [threadErrors, setThreadErrors] = useState<InlineThreadError[]>([]);
   const [initialized, setInitialized] = useState(false);
 
+  // Build vs plan mode. Tab toggles it; plan mode discourages mutations in the
+  // prompt and blocks mutating tool calls from reaching the transcript.
+  const [mode, setMode] = useState<'build' | 'plan'>('build');
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+  // Enforce the mode at the tool dispatcher, below the approval layer, so
+  // auto/yolo cannot mutate files while planning.
+  useEffect(() => {
+    setPlanMode(mode === 'plan');
+    return () => setPlanMode(false);
+  }, [mode]);
+  // Live one-line hint/toast (retry, copy, background task completion, …).
+  const [toast, setToast] = useState<string | null>(null);
+  const toastActiveRef = useRef(false);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastToastAtRef = useRef(0);
+  // /find filters scrollback by the text extracted from each card.
+  const [searchQuery, setSearchQuery] = useState<string | null>(null);
+  // Last submitted user text, used by Ctrl+R (retry) and Alt+Up (edit).
+  const lastSubmitRef = useRef<string | null>(null);
+  // Pending image data URL from /image, attached to the next user message.
+  const pendingImageRef = useRef<{ path: string; dataUrl: string } | null>(null);
+  // Most recent tool call, used to enrich approval details with a file path.
+  const lastToolCallRef = useRef<{ name: string; args?: string } | null>(null);
+  // Tool-call ids swallowed in plan mode, so their results are hidden too.
+  const blockedToolIdsRef = useRef<Set<string>>(new Set());
+
+  const showToast = useCallback((text: string, throttleMs = 1200) => {
+    const now = Date.now();
+    if (throttleMs > 0 && toastActiveRef.current && now - lastToastAtRef.current < throttleMs) return;
+    toastActiveRef.current = true;
+    lastToastAtRef.current = now;
+    setToast(text);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      toastActiveRef.current = false;
+      setToast(null);
+    }, 2500);
+  }, []);
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, []);
+
   // User-facing preferences + live reasoning/todo state
   const [settings, setSettings] = useState<UiSettings>(loadSettings);
+  // Every component imports the same mutable `theme` palette object, so
+  // retheming in place is the smallest way to apply a choice across the UI.
+  Object.assign(theme, getTheme(settings.theme));
   const [settingsIndex, setSettingsIndex] = useState<number | null>(null);
   const [thinkingText, setThinkingText] = useState('');
   // Expansion is driven by the provider: reasoning opens the block, and it
@@ -591,7 +741,7 @@ export const App: React.FC<AppProps> = ({
 
   // Palette state: slash-command list, provider/model/variant pickers
   const [commandIndex, setCommandIndex] = useState(0);
-  const [picker, setPicker] = useState<'model' | 'variant' | 'provider' | 'session' | null>(null);
+  const [picker, setPicker] = useState<'model' | 'variant' | 'provider' | 'session' | 'statusLine' | null>(null);
   const [pickerIndex, setPickerIndex] = useState(0);
   const [variantId, setVariantId] = useState(settings.variant);
   const [remoteModels, setRemoteModels] = useState<Record<string, PaletteItem[]>>({});
@@ -683,6 +833,32 @@ export const App: React.FC<AppProps> = ({
   // (the hook is shared and intentionally unaware of this UI-only state).
   const handleAgentEventWithSubAgents = useCallback(
     (event: AgentEvent) => {
+      // Plan mode: hide mutating calls and their results from the transcript.
+      if (mode === 'plan' && event.type === 'tool_call' && event.toolCall) {
+        if (MUTATING_TOOLS.has(event.toolCall.name)) {
+          blockedToolIdsRef.current.add(event.toolCall.id);
+          setActiveTool(null);
+          addStatic(
+            <Box paddingX={2} marginBottom={1}>
+              <Text color={theme.error}>{`⛔ Blocked in plan mode: ${event.toolCall.name}`}</Text>
+            </Box>
+          );
+          return;
+        }
+      }
+      if (
+        event.type === 'tool_result' &&
+        event.toolCall &&
+        blockedToolIdsRef.current.has(event.toolCall.id)
+      ) {
+        blockedToolIdsRef.current.delete(event.toolCall.id);
+        return;
+      }
+
+      if (event.type === 'tool_call' && event.toolCall) {
+        lastToolCallRef.current = { name: event.toolCall.name, args: event.toolCall.args };
+      }
+
       if (event.type === 'sub_agent_iteration') {
         const fields = event as AgentEvent & SubAgentEventFields;
         if (fields.subAgentId) {
@@ -696,10 +872,17 @@ export const App: React.FC<AppProps> = ({
             fields.subAgentStatus ?? 'start'
           );
         }
+        if (fields.subAgentStatus === 'done' || fields.subAgentTool?.status === 'done') {
+          const label = fields.subAgentLabel || fields.subAgentTask || 'Sub-agent';
+          showToast(`✓ ${label} finished`);
+        }
+      }
+      if (event.type === 'tool_result' && event.toolCall?.name === 'start_process') {
+        showToast('Background process started');
       }
       handleAgentEvent(event);
     },
-    [handleAgentEvent]
+    [handleAgentEvent, mode, addStatic, showToast]
   );
 
   // Finished children linger briefly, then fold away so the panel does not
@@ -985,6 +1168,9 @@ export const App: React.FC<AppProps> = ({
     subAgentActivities.length,
     showSubAgentPanel ? 1 : 0,
     updateNotice ? 1 : 0,
+    mode,
+    toast?.length ?? 0,
+    searchQuery?.length ?? 0,
   ].join(':');
 
   useEffect(() => {
@@ -1018,8 +1204,10 @@ export const App: React.FC<AppProps> = ({
       }
       setApprovalMode(settings.approvalMode);
 
-      // Register interactive approval handler
+      // Register interactive approval handler. In plan mode mutating requests
+      // are rejected outright, so the tool never touches the file system.
       setApprovalHandler(async (req: ApprovalRequest): Promise<ApprovalResponse> => {
+        if (modeRef.current === 'plan') return 'reject';
         return new Promise((resolve) => {
           setPendingApproval({ request: req, resolve });
         });
@@ -1135,6 +1323,16 @@ export const App: React.FC<AppProps> = ({
       label: 'Approval mode',
       description: effectiveApprovalMode,
     },
+    {
+      id: 'theme',
+      label: 'Theme',
+      description: settings.theme ?? 'dark',
+    },
+    {
+      id: 'statusLine',
+      label: 'Status line',
+      description: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length} shown`,
+    },
   ];
 
   const toggleSetting = useCallback(
@@ -1150,12 +1348,34 @@ export const App: React.FC<AppProps> = ({
         setApprovalMode(nextMode);
         return;
       }
+      if (key === 'theme') {
+        const current = (THEME_NAMES as readonly string[]).indexOf(settings.theme ?? 'dark');
+        const nextName = THEME_NAMES[(current + 1) % THEME_NAMES.length]!;
+        const next = { ...settings, theme: nextName };
+        setSettings(next);
+        saveSettings(next);
+        showToast(`Theme: ${nextName}`);
+        return;
+      }
+      if (key === 'statusLine') {
+        // Segment toggling happens in a dedicated palette row-by-row picker.
+        setSettingsIndex(null);
+        setPicker('statusLine');
+        setPickerIndex(0);
+        return;
+      }
       const next = { ...settings, [key]: !settings[key] };
       setSettings(next);
       saveSettings(next);
     },
-    [settings]
+    [settings, showToast]
   );
+
+  const statusLineItems: PaletteItem[] = STATUS_LINE_ITEMS.map((id) => ({
+    id,
+    label: id,
+    description: (settings.statusLine ?? STATUS_LINE_ITEMS).includes(id) ? 'on' : 'off',
+  }));
 
   const persistActiveSelection = useCallback(
     (
@@ -1386,6 +1606,7 @@ export const App: React.FC<AppProps> = ({
     setLastUsage(null);
     setTotalCost(0);
     setInputText('');
+    setSearchQuery(null);
     setInputResetKey((prev) => prev + 1);
     setPicker(null);
     setSettingsIndex(null);
@@ -1404,6 +1625,8 @@ export const App: React.FC<AppProps> = ({
       hasFlushedAnyLine: false,
       lastUiUpdate: 0,
     };
+    blockedToolIdsRef.current.clear();
+    pendingImageRef.current = null;
     sessionSavedRef.current = false;
   }, []);
 
@@ -1637,6 +1860,22 @@ export const App: React.FC<AppProps> = ({
     ]
   );
 
+  /** Run `! <cmd>` directly through the bash tool, without involving the model. */
+  const runShellCommand = useCallback(async (command: string) => {
+    setError(null);
+    showToast(`$ ${command}`, 0);
+    try {
+      const result = await handleToolCall(
+        'bash',
+        { command },
+        { sessionId: session?.id, abortSignal: abortControllerRef.current?.signal }
+      );
+      addToolResultView(addStatic, 'bash', JSON.stringify({ command }), result);
+    } catch (err: any) {
+      setError(`Shell command failed: ${err?.message ?? String(err)}`);
+    }
+  }, [session?.id, addStatic, showToast]);
+
   const handleSlashCommand = useCallback(async (cmd: string, raw = cmd): Promise<boolean> => {
     const parts = raw.trim().split(/\s+/);
     const command = cmd.toLowerCase();
@@ -1720,6 +1959,65 @@ export const App: React.FC<AppProps> = ({
         setHelpMessage(null);
         setSettingsIndex(0);
         return true;
+      case '/find': {
+        const query = parts.slice(1).join(' ').trim();
+        if (!query) {
+          setError('Usage: /find <text>');
+        } else {
+          setHelpMessage(null);
+          setSearchQuery(query);
+          setUserScroll(0);
+          showToast(`Search: ${query}`, 0);
+        }
+        return true;
+      }
+      case '/image': {
+        const imagePath = parts.slice(1).join(' ').trim();
+        if (!imagePath) {
+          setError('Usage: /image <path>');
+          return true;
+        }
+        setError(null);
+        try {
+          const result = await handleToolCall(
+            'read_image',
+            { file_path: imagePath },
+            { sessionId: session?.id }
+          );
+          if (/^Error\b/i.test(result.trim())) {
+            addStatic(
+              <Box paddingX={2} marginBottom={1}>
+                <Text color={theme.error}>{`Image error: ${result.trim()}`}</Text>
+              </Box>
+            );
+          } else {
+            const dataUrl = result.match(/data:[^\s]+/)?.[0] ?? '';
+            pendingImageRef.current = { path: imagePath, dataUrl };
+            addStatic(
+              <Box paddingX={2} marginBottom={1}>
+                <Text color={theme.success}>{`Image attached: ${imagePath}`}</Text>
+              </Box>
+            );
+          }
+        } catch (err: any) {
+          addStatic(
+            <Box paddingX={2} marginBottom={1}>
+              <Text color={theme.error}>{`Image error: ${err?.message ?? String(err)}`}</Text>
+            </Box>
+          );
+        }
+        return true;
+      }
+      case '/undo': {
+        setError(null);
+        try {
+          const result = await handleToolCall('undo', {}, { sessionId: session?.id });
+          addToolResultView(addStatic, 'undo', {}, result);
+        } catch (err: any) {
+          setError(`Undo failed: ${err?.message ?? String(err)}`);
+        }
+        return true;
+      }
       default:
         return false;
     }
@@ -1737,9 +2035,25 @@ export const App: React.FC<AppProps> = ({
     switchSession,
     openSessionPicker,
     deleteSavedSession,
+    session?.id,
+    addStatic,
+    showToast,
   ]);
 
   const applyPicker = useCallback(() => {
+    if (picker === 'statusLine') {
+      const id = STATUS_LINE_ITEMS[clampIndex(pickerIndex, STATUS_LINE_ITEMS.length)];
+      if (id) {
+        const current = settings.statusLine ?? [...STATUS_LINE_ITEMS];
+        const nextList = STATUS_LINE_ITEMS.filter((item) =>
+          item === id ? !current.includes(item) : current.includes(item)
+        );
+        const next = { ...settings, statusLine: nextList };
+        setSettings(next);
+        saveSettings(next);
+      }
+      return; // stay open so several segments can be toggled in one visit
+    }
     if (picker === 'model') {
       const item = modelItems[selectedModelIndex];
       if (item && !config) {
@@ -1848,17 +2162,34 @@ export const App: React.FC<AppProps> = ({
     modelProviderId,
   ]);
 
-  const handleSubmit = useCallback(async (value: string) => {
+  const handleSubmit = useCallback(async (value: string, force = false, keepInput = false) => {
     const trimmed = value.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || (loading && !force)) return;
+
+    // Shell escape: `! ls` runs locally and never reaches the model.
+    if (trimmed.startsWith('! ')) {
+      const command = trimmed.slice(2).trim();
+      if (!keepInput) {
+        setInputText('');
+        setInputResetKey((prev) => prev + 1);
+      }
+      if (!command) {
+        setError('Usage: ! <command>');
+        return;
+      }
+      await runShellCommand(command);
+      return;
+    }
 
     // Slash commands work even before a provider is configured.
     if (trimmed.startsWith('/')) {
       const selected = commandItems[commandIndex]?.label ?? trimmed.split(/\s+/)[0];
       const handled = await handleSlashCommand(selected, trimmed);
       if (handled) {
-        setInputText('');
-        setInputResetKey((prev) => prev + 1);
+        if (!keepInput) {
+          setInputText('');
+          setInputResetKey((prev) => prev + 1);
+        }
         return;
       }
     }
@@ -1868,9 +2199,12 @@ export const App: React.FC<AppProps> = ({
       return;
     }
 
-    setInputText('');
-    setInputResetKey((prev) => prev + 1); // Force TextInput to remount and clear
+    if (!keepInput) {
+      setInputText('');
+      setInputResetKey((prev) => prev + 1); // Force TextInput to remount and clear
+    }
     sessionSavedRef.current = false;
+    setSearchQuery(null);
     setLoading(true);
     setIsStreaming(false);
     setStreamingText('');
@@ -1892,10 +2226,24 @@ export const App: React.FC<AppProps> = ({
     const runId = activeRunRef.current;
 
     // Print the user message directly to scrollback so it is selectable/copyable.
-    // We still push it into completionMessages for session saving.
-    const userMessage: Message = { role: 'user', content: trimmed };
+    // We still push it into completionMessages for session saving. In plan mode
+    // the model gets an explicit instruction it does not see in the transcript.
+    const userText = mode === 'plan' ? `${PLAN_MODE_NOTE}\n\n${trimmed}` : trimmed;
+    const userMessage: Message = { role: 'user', content: userText };
+    // A /image attachment rides along as a separate user message note.
+    const image = pendingImageRef.current;
+    const imageMessage: Message | null = image
+      ? { role: 'user', content: `[Attached image: ${image.path}] ${image.dataUrl}` }
+      : null;
+    pendingImageRef.current = null;
+    const nextMessages = imageMessage
+      ? [...completionMessages, userMessage, imageMessage]
+      : [...completionMessages, userMessage];
     printMessageToScrollback(addStatic, 'user', trimmed);
-    setCompletionMessages((prev) => [...prev, userMessage]);
+    setCompletionMessages((prev) =>
+      imageMessage ? [...prev, userMessage, imageMessage] : [...prev, userMessage]
+    );
+    lastSubmitRef.current = trimmed;
 
     // Reset assistant message tracker (streamed indices were reset above)
     assistantMessageRef.current = null;
@@ -1917,7 +2265,7 @@ export const App: React.FC<AppProps> = ({
       const updatedMessages = await runAgenticLoop(
         clientRef.current,
         config.model,
-        [...completionMessages, userMessage],
+        nextMessages,
         trimmed,
         handleAgentEventWithSubAgents,
         {
@@ -1925,6 +2273,7 @@ export const App: React.FC<AppProps> = ({
           abortSignal: abortControllerRef.current.signal,
           sessionId: session?.id,
           requestDefaults,
+          compactThreshold: settings.compactThreshold,
         }
       );
 
@@ -1955,14 +2304,14 @@ export const App: React.FC<AppProps> = ({
         setLoading(false);
       }
     }
-  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents]);
+  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand]);
 
   // Any command path can reject; never let that become an unhandled rejection
   // that kills the TUI after a turn.
   const submitSafely = useCallback(
-    async (value: string) => {
+    async (value: string, force = false, keepInput = false) => {
       try {
-        await handleSubmit(value);
+        await handleSubmit(value, force, keepInput);
       } catch (err: any) {
         setError(`Request failed: ${err.message}`);
         setLoading(false);
@@ -1971,7 +2320,13 @@ export const App: React.FC<AppProps> = ({
     [handleSubmit]
   );
 
-  const transcriptRows = staticItems.reduce(
+  // /find filters the scrollback view without deleting history.
+  const searchMatches = searchQuery
+    ? staticItems.filter((item) =>
+        nodeText(item.node).toLowerCase().includes(searchQuery.toLowerCase())
+      )
+    : staticItems;
+  const transcriptRows = searchMatches.reduce(
     (total, item) => total + (measuredHeights[item.id] ?? fallbackItemRows(item.node)),
     0
   );
@@ -1992,7 +2347,7 @@ export const App: React.FC<AppProps> = ({
   const rowWindow = visibleRowWindow(transcriptRows, windowRows, effectiveUserScroll);
   // Map the row window onto measured items. Items below the viewport are
   // skipped entirely, so a long session stays cheap to render.
-  const sizedItems = staticItems.map((item) => ({
+  const sizedItems = searchMatches.map((item) => ({
     item,
     rows: measuredHeights[item.id] ?? fallbackItemRows(item.node),
   }));
@@ -2002,7 +2357,7 @@ export const App: React.FC<AppProps> = ({
     rowWindow.last
   );
   const visibleIds = new Set(windowSlice.items.map((entry) => entry.id));
-  const visibleItems = staticItems.filter((item) => visibleIds.has(item.id));
+  const visibleItems = searchMatches.filter((item) => visibleIds.has(item.id));
   const visibleRowItems = visibleItems.map((item) => ({
     id: item.id,
     rows: measuredHeights[item.id] ?? fallbackItemRows(item.node),
@@ -2131,7 +2486,9 @@ export const App: React.FC<AppProps> = ({
           ? modelItems.length
           : picker === 'session'
             ? sessionItems.length
-            : variantItems.length;
+            : picker === 'statusLine'
+              ? STATUS_LINE_ITEMS.length
+              : variantItems.length;
       if (count > 0) {
         if (key.upArrow) {
           setPickerIndex((index) => (index - 1 + count) % count);
@@ -2147,6 +2504,9 @@ export const App: React.FC<AppProps> = ({
         return;
       }
       if (key.escape) {
+        if (picker === 'statusLine') {
+          setSettingsIndex(SETTING_KEYS.indexOf('statusLine'));
+        }
         modelFetchSeqRef.current += 1;
         setPicker(null);
         setPendingProviderId(null);
@@ -2222,6 +2582,25 @@ export const App: React.FC<AppProps> = ({
     const dismissible =
       !picker && settingsIndex === null && !keyPrompt && !pendingApproval && !pendingAsk;
     if (dismissible) {
+      // Tab switches build <-> plan mode. PromptInput ignores Tab, so focus and
+      // composition are unaffected.
+      if (key.tab) {
+        const next = mode === 'build' ? 'plan' : 'build';
+        setMode(next);
+        showToast(next === 'plan' ? 'PLAN MODE — no file changes' : 'BUILD MODE', 0);
+        return;
+      }
+      // Copy the last visible transcript card. Never throws when xclip/pbcopy/
+      // termux-clipboard-set is unavailable.
+      if ((key.ctrl && input === 'y') || (key.meta && input === 'c')) {
+        const card = visibleItems[visibleItems.length - 1];
+        const text = card ? nodeText(card.node) : '';
+        if (text) {
+          void copyToClipboard(text);
+          showToast('Copied message', 0);
+        }
+        return;
+      }
       // Some terminals send ctrl+, / ctrl+/ as raw control bytes with no
       // modifier flags; normalise them so both spellings work.
       const ch = input === '\x1c' ? ',' : input === '\x1f' ? '/' : input;
@@ -2230,6 +2609,37 @@ export const App: React.FC<AppProps> = ({
         const toggleHelp = () =>
           setHelpMessage((prev) => (prev ? null : buildHelpText(effectiveApprovalMode)));
         switch (ch) {
+          case 'r': {
+            // Ctrl+R regenerates: abort the in-flight turn, then re-submit the
+            // last user text. The text is left in the composer for editing.
+            const last = lastSubmitRef.current;
+            if (!last) return;
+            abortControllerRef.current?.abort();
+            abortControllerRef.current = null;
+            activeRunRef.current += 1;
+            setLoading(false);
+            setIsStreaming(false);
+            setStreamingText('');
+            setActiveTool(null);
+            setInputText(last);
+            setInputResetKey((prev) => prev + 1);
+            showToast(`Retrying: ${last.slice(0, 60)}`, 0);
+            void submitSafely(last, true, true);
+            return;
+          }
+          case 'e': {
+            // Ctrl+E collapses all expandable cards (or expands them all).
+            const anyExpanded = staticItems.some((item) => item.toggle && item.expanded);
+            setStaticItems((prev) =>
+              prev.map((item) => {
+                if (!item.toggle) return item;
+                const expanded = !anyExpanded;
+                return { ...item, expanded, node: expanded ? item.toggle.expanded : item.toggle.collapsed };
+              })
+            );
+            showToast(anyExpanded ? 'Collapsed all cards' : 'Expanded all cards', 0);
+            return;
+          }
           case 'n': void handleSlashCommand('/new'); return;
           case 's': void openSessionPicker(); return;
           case 'm': void handleSlashCommand('/model'); return;
@@ -2263,6 +2673,23 @@ export const App: React.FC<AppProps> = ({
       }
     }
 
+    // Ctrl/Alt+Up loads the last user message into the composer for editing.
+    if (
+      !picker && settingsIndex === null && !pendingApproval && !pendingAsk &&
+      key.upArrow && (key.ctrl || key.meta)
+    ) {
+      const lastUser = [...completionMessages]
+        .reverse()
+        .find((message) => message.role === 'user' && typeof message.content === 'string');
+      if (lastUser && typeof lastUser.content === 'string') {
+        const text = lastUser.content.replace(PLAN_MODE_NOTE, '').replace(/^\[Attached image:[^\]]*\]\s*\S+\s*/, '').trim();
+        setInputText(text);
+        setInputResetKey((prev) => prev + 1);
+        showToast('Loaded last message — edit and press Enter', 0);
+      }
+      return;
+    }
+
     // Scroll the transcript without moving the input/footer. Arrows also work
     // when Termux sends them for touch swipes.
     if (!picker && settingsIndex === null && !pendingApproval && !pendingAsk && !(inputText.startsWith('/') && commandItems.length > 0)) {
@@ -2291,6 +2718,13 @@ export const App: React.FC<AppProps> = ({
         scrollBy(-(key.shift ? 3 : 1));
         return;
       }
+    }
+
+    // Esc clears an active /find transcript filter.
+    if (key.escape && searchQuery) {
+      setSearchQuery(null);
+      setUserScroll(0);
+      return;
     }
 
     // Esc closes inline help.
@@ -2346,6 +2780,7 @@ export const App: React.FC<AppProps> = ({
   const showUpdateNotice =
     Boolean(updateNotice) &&
     !hasCriticalPrompt &&
+    !toast &&
     picker === null &&
     settingsIndex === null &&
     helpMessage === null;
@@ -2355,6 +2790,7 @@ export const App: React.FC<AppProps> = ({
     !loading &&
     !isStreaming &&
     rows >= 8 &&
+    staticItems.length === 0 &&
     !hasConversationMessages(completionMessages);
   // Responsive breakpoints live in utils/layout.ts so every panel agrees.
   const layout = resolveLayout(columns, rows);
@@ -2501,6 +2937,26 @@ export const App: React.FC<AppProps> = ({
             </Text>
           </Box>
         )}
+        {mode === 'plan' && !hasCriticalPrompt && (
+          <Box height={1} flexShrink={0} paddingX={dense ? 0 : gutter} overflow="hidden">
+            <Text color={theme.info} bold wrap="truncate-end">
+              {`PLAN MODE`}
+              <Text color={theme.dim}>{` · Tab for build · no file changes`}</Text>
+            </Text>
+          </Box>
+        )}
+        {searchQuery !== null && !hasCriticalPrompt && (
+          <Box height={1} flexShrink={0} paddingX={dense ? 0 : gutter} overflow="hidden">
+            <Text color={theme.accent} wrap="truncate-end">
+              {`${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear`}
+            </Text>
+          </Box>
+        )}
+        {toast && !hasCriticalPrompt && !searchQuery && (
+          <Box height={1} flexShrink={0} paddingX={dense ? 0 : gutter} overflow="hidden">
+            <Text color={theme.success} wrap="truncate-end">{toast}</Text>
+          </Box>
+        )}
         {helpMessage && !dense && !hasCriticalPrompt && (
           <Box paddingX={2}>
             <LeftBar color={theme.muted} marginTop={1} marginBottom={1}>
@@ -2536,7 +2992,13 @@ export const App: React.FC<AppProps> = ({
           />
         )}
 
-        {isStreaming && !hasCriticalPrompt && (
+        {isStreaming && !hasCriticalPrompt && looksLikeDiff(streamingText) ? (
+          <DiffView
+            header="Streaming diff"
+            diff={clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns)}
+            maxRows={Math.max(2, maxStreamRows - 3)}
+          />
+        ) : isStreaming && !hasCriticalPrompt ? (
           <Box paddingX={gutter} paddingBottom={dense ? 0 : 1}>
             <Text wrap="truncate-end">
               {renderFormattedText(
@@ -2546,7 +3008,7 @@ export const App: React.FC<AppProps> = ({
               <Text dimColor>▍</Text>
             </Text>
           </Box>
-        )}
+        ) : null}
 
         {!hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (
           <Box key={`thread-error-${threadError.id}`} paddingX={2}>
@@ -2570,10 +3032,19 @@ export const App: React.FC<AppProps> = ({
           />
         )}
 
-        {/* Approval prompt */}
+        {/* Approval prompt. Enrich the detail with the target file path when the
+            most recent tool call carries one (manual review before writing). */}
         {pendingApproval && (
           <ApprovalPrompt
-            request={pendingApproval.request}
+            request={(() => {
+              const request = pendingApproval.request;
+              const path = extractPathFromArgs(lastToolCallRef.current?.args);
+              if (!path || request.detail?.includes(path)) return request;
+              return {
+                ...request,
+                detail: [request.detail, `File: ${path}`].filter(Boolean).join('\n'),
+              };
+            })()}
             columns={columns}
             compact={dense || rows <= 10}
             onRespond={(response) => {
@@ -2665,6 +3136,9 @@ export const App: React.FC<AppProps> = ({
         {picker === 'variant' && (
           <Palette title="Select variant" items={variantItems} selected={clampIndex(pickerIndex, variantItems.length)} maxVisible={paletteWindow} hint="↑↓ select · enter use · esc cancel" />
         )}
+        {picker === 'statusLine' && (
+          <Palette title="Status line segments" items={statusLineItems} selected={clampIndex(pickerIndex, statusLineItems.length)} maxVisible={paletteWindow} hint="↑↓ select · enter toggle · esc back" />
+        )}
         {settingsIndex !== null && (
           <Palette title="Settings" items={settingItems} selected={settingsIndex} maxVisible={paletteWindow} hint="↑↓ select · enter toggle · esc close" />
         )}
@@ -2733,6 +3207,7 @@ export const App: React.FC<AppProps> = ({
           compact={!layout.showFullFooter}
           gutter={gutter}
           dense={dense}
+          segments={settings.statusLine ?? STATUS_LINE_ITEMS}
         />
       )}
     </Box>

@@ -21,7 +21,7 @@ import { getAllTools } from './tools/index.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { subAgentTool } from './sub-agent.js';
 import { getContextInfo, } from './utils/cost-tracker.js';
-import { compactIfNeeded } from './utils/compactor.js';
+import { compactIfNeeded, getCompactThreshold } from './utils/compactor.js';
 import { logger } from './utils/logger.js';
 import { processStream } from './agentic-loop/stream.js';
 import { executeToolCalls } from './agentic-loop/executor.js';
@@ -125,8 +125,10 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
         // the array in place with the compacted structure.
         if (pricing) {
             const contextInfo = getContextInfo(updatedMessages, pricing);
-            if (contextInfo.needsCompaction) {
-                const compacted = await compactIfNeeded(client, model, updatedMessages, pricing.contextWindow, requestDefaults, sessionId);
+            // `needsCompaction` uses the built-in 90% gate; also honor a user-set
+            // threshold so a lower setting can trigger compaction early.
+            if (contextInfo.needsCompaction || contextInfo.utilizationPercentage >= getCompactThreshold(options.compactThreshold)) {
+                const compacted = await compactIfNeeded(client, model, updatedMessages, pricing.contextWindow, requestDefaults, sessionId, options.compactThreshold);
                 // Replace messages in-place with compacted version
                 updatedMessages.length = 0;
                 updatedMessages.push(...compacted);

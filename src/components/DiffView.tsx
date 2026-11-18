@@ -12,6 +12,8 @@ export interface DiffViewProps {
   operation?: 'Edited' | 'Wrote';
   /** Override syntax language; inferred from filePath by default. */
   language?: HighlightLanguage | string;
+  /** Hard cap on rendered diff rows (used by the live streaming preview). */
+  maxRows?: number;
 }
 
 const MAX_VISIBLE_LINES = 24;
@@ -28,11 +30,12 @@ function lineColor(line: DiffLine): string {
  * Compact, colour-coded unified diff for edit_file/write_file results.
  * Green additions, red removals and file line numbers in a bordered card.
  */
-export const DiffView: React.FC<DiffViewProps> = ({ header, diff, filePath, operation, language: languageOverride }) => {
+export const DiffView: React.FC<DiffViewProps> = ({ header, diff, filePath, operation, language: languageOverride, maxRows }) => {
   const lines = annotateDiff(diff);
   const additions = lines.filter((line) => line.kind === 'add').length;
   const removals = lines.filter((line) => line.kind === 'remove').length;
-  const shown = lines.slice(0, MAX_VISIBLE_LINES);
+  const visibleLimit = Math.max(1, Math.min(MAX_VISIBLE_LINES, Math.floor(Number.isFinite(maxRows) ? maxRows! : MAX_VISIBLE_LINES)));
+  const shown = lines.slice(0, visibleLimit);
   const hidden = lines.length - shown.length;
   const language = languageOverride ?? detectLanguage(filePath);
   // Highlight once per diff, not per render. Syntax colours sit on top of the

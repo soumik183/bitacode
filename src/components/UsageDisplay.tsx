@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../theme.js';
+import { STATUS_LINE_ITEMS, type StatusLineItem } from '../settings.js';
 
 export interface UsageDisplayProps {
   usage: { inputTokens: number; outputTokens: number; cost: number; contextPercent: number } | null;
@@ -17,6 +18,8 @@ export interface UsageDisplayProps {
   gutter?: number;
   /** Short terminals drop the bottom margin so the footer always fits. */
   dense?: boolean;
+  /** Which status segments to show; defaults to all. */
+  segments?: readonly StatusLineItem[];
 }
 
 // Bouncing equaliser: shifts one bar per frame so it reads as AI activity.
@@ -76,13 +79,30 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   compact = false,
   gutter = 2,
   dense = false,
+  segments = STATUS_LINE_ITEMS,
 }) => {
   const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
+  const show = (segment: StatusLineItem) => segments.includes(segment);
+  // One combined row per side keeps the footer a single line; a segment is
+  // joined only when it is enabled so hidden items leave no stray separators.
+  const rightParts: React.ReactNode[] = [];
+  if (show('model')) rightParts.push(<Text key="model" color={theme.muted}>{modelLabel}</Text>);
+  if (!compact && show('variant')) {
+    rightParts.push(<Text key="variant-sep" color={theme.dim}> · </Text>);
+    rightParts.push(<Text key="variant" color={variantColor}>{variantLabel}</Text>);
+  }
+  if (show('context')) {
+    if (rightParts.length > 0) rightParts.push(<Text key="ctx-sep" color={theme.dim}> · </Text>);
+    rightParts.push(<Text key="ctx" color={theme.dim}>{`ctx ${context}`}</Text>);
+  }
+  if (!compact && show('cost') && totalCost > 0) {
+    rightParts.push(<Text key="cost" color={theme.dim}>{` · $${totalCost.toFixed(2)}`}</Text>);
+  }
 
   return (
     <Box flexDirection="row" justifyContent="space-between" paddingX={gutter} marginBottom={dense ? 0 : 1} flexShrink={0}>
       <Box flexShrink={1} minWidth={0} overflow="hidden" flexDirection="row">
-        {busy ? (
+        {show('tool') && busy ? (
           <>
             {wave(frame)
               .split('')
@@ -98,24 +118,14 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
               </>
             )}
           </>
-        ) : (
+        ) : show('folder') ? (
           <Text color={theme.dim} wrap="truncate-end">
             {`📁 ${folder}`}
           </Text>
-        )}
+        ) : null}
       </Box>
       <Box flexShrink={1} minWidth={0}>
-        <Text wrap="truncate-end">
-          <Text color={theme.muted}>{modelLabel}</Text>
-          {!compact && (
-            <>
-              <Text color={theme.dim}> · </Text>
-              <Text color={variantColor}>{variantLabel}</Text>
-            </>
-          )}
-          <Text color={theme.dim}> · ctx {context}</Text>
-          {!compact && totalCost > 0 && <Text color={theme.dim}> · ${totalCost.toFixed(2)}</Text>}
-        </Text>
+        <Text wrap="truncate-end">{rightParts}</Text>
       </Box>
     </Box>
   );

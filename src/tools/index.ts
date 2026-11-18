@@ -62,6 +62,13 @@ import { taskResultTool, taskResult } from './task-result.js';
 import { notifyTool, notify } from './notify.js';
 import { progressTool, progress } from './progress.js';
 import { openUrlTool, openUrl } from './open-url.js';
+import { undoTool, undo } from './undo.js';
+import { readImageTool, readImage } from './image-input.js';
+import {
+  goToDefinitionTool, goToDefinition,
+  findReferencesTool, findReferences,
+  diagnosticsTool, diagnostics,
+} from './lsp.js';
 
 export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
 export type { ApprovalMode } from '../settings.js';
@@ -134,6 +141,11 @@ export const tools = [
   notifyTool,
   progressTool,
   openUrlTool,
+  undoTool,
+  readImageTool,
+  goToDefinitionTool,
+  findReferencesTool,
+  diagnosticsTool,
 ];
 
 export type DynamicTool = {
@@ -286,6 +298,12 @@ const TOOL_ARGS: Record<string, ArgSpec[]> = {
   parallel: [{ canonical: 'calls', aliases: [], required: true }],
   notify: [{ canonical: 'message', aliases: [], required: true }],
   progress: [{ canonical: 'percent', aliases: [], required: true }],
+  // New tools
+  undo: [{ canonical: 'id', aliases: [] }],
+  read_image: [S.filePath],
+  go_to_definition: [{ canonical: 'symbol', aliases: [], required: true }, S.directory],
+  find_references: [{ canonical: 'symbol', aliases: [], required: true }, S.directory],
+  diagnostics: [S.directory],
   // Aliases — same specs as the canonical tool they delegate to.
   grep: [S.searchTerm, S.directory],
   search_text: [S.searchTerm, S.directory],
@@ -351,7 +369,22 @@ function suggestToolNames(toolName: string, candidates: string[], limit = 3): st
     .map((entry) => entry.name);
 }
 
+// Plan mode is enforced here, below the approval layer, so `auto`/`yolo`
+// cannot accidentally mutate files while the user is planning.
+let planMode = false;
+export function setPlanMode(value: boolean): void { planMode = value; }
+export function isPlanMode(): boolean { return planMode; }
+const MUTATING_TOOLS = new Set([
+  'write_file', 'edit_file', 'apply_patch', 'multiedit', 'delete', 'rename', 'move',
+  'copy', 'mkdir', 'git_add', 'git_commit', 'git_stash', 'undo', 'bash', 'shell',
+  'terminal', 'run', 'start_process', 'background', 'kill', 'stop_process', 'watch',
+  'sub_agent',
+]);
+
 export async function handleToolCall(toolName: string, args: any, context: ToolCallContext = {}): Promise<string> {
+  if (planMode && MUTATING_TOOLS.has(toolName)) {
+    return `Error: ${toolName} is blocked in plan mode. Press Tab to switch to build mode.`;
+  }
   if (args == null) {
     args = {};
   } else if (typeof args !== 'object' || Array.isArray(args)) {
@@ -488,6 +521,18 @@ async function dispatchToolCall(toolName: string, rawArgs: any, context: ToolCal
       return await progress(args);
     case 'open_url':
       return await openUrl(args);
+
+    // ── Undo, images & LSP-ish navigation ──
+    case 'undo':
+      return await undo(args.id, context.sessionId);
+    case 'read_image':
+      return await readImage(args.file_path);
+    case 'go_to_definition':
+      return await goToDefinition(args.symbol, args.directory_path);
+    case 'find_references':
+      return await findReferences(args.symbol, args.directory_path);
+    case 'diagnostics':
+      return await diagnostics(args.directory_path);
 
     // ── Aliases for common tool names (same implementation, friendly names) ──
     // Args are normalized above, so alias-style keys arrive under canonical names.

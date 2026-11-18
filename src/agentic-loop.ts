@@ -26,7 +26,7 @@ import {
   getContextInfo,
   type ModelPricing,
 } from './utils/cost-tracker.js';
-import { compactIfNeeded } from './utils/compactor.js';
+import { compactIfNeeded, getCompactThreshold } from './utils/compactor.js';
 import { logger } from './utils/logger.js';
 import { processStream } from './agentic-loop/stream.js';
 import { executeToolCalls, type ToolExecutionContext } from './agentic-loop/executor.js';
@@ -74,6 +74,8 @@ export interface AgenticLoopOptions {
   requestDefaults?: Record<string, unknown>;
   /** Optional wall-clock budget in ms. 0/undefined = disabled (preserves legacy behavior). */
   timeoutMs?: number;
+  /** Context-utilization ratio (0.5–0.95) at which to compact. */
+  compactThreshold?: number;
 }
 
 function emitAbortAndFinish(handler: AgentEventHandler): void {
@@ -197,14 +199,17 @@ export async function runAgenticLoop(
     // the array in place with the compacted structure.
     if (pricing) {
       const contextInfo = getContextInfo(updatedMessages, pricing);
-      if (contextInfo.needsCompaction) {
+      // `needsCompaction` uses the built-in 90% gate; also honor a user-set
+      // threshold so a lower setting can trigger compaction early.
+      if (contextInfo.needsCompaction || contextInfo.utilizationPercentage >= getCompactThreshold(options.compactThreshold)) {
         const compacted = await compactIfNeeded(
           client,
           model,
           updatedMessages,
           pricing.contextWindow,
           requestDefaults,
-          sessionId
+          sessionId,
+          options.compactThreshold
         );
         // Replace messages in-place with compacted version
         updatedMessages.length = 0;

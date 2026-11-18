@@ -83,6 +83,8 @@ bitacode init --project --force
 - `/help` — Show available slash commands
 - `/new` — Start a fresh session
 - `/session` — Resume a saved session (`/session <id>` also works); press `d` in the picker to delete one, or use `/session delete <id>`
+- `/find <text>` — Search the transcript; `Esc` clears
+- `/image <path>` — Attach a screenshot/image for the agent to inspect
 - `/model` — Switch model
 - `/provider` — Switch API provider
 - `/variant` — Set reasoning variant
@@ -94,6 +96,8 @@ Other useful shortcuts (each works with **Ctrl** or **Alt**):
 - `n` new session · `s` sessions · `m` model · `p` provider · `v` variant
 - `h` or `/` help · `,` settings · `q` sessions
 - `k` clear input · `l` clear transcript · `t` toggle thinking
+- `Tab` toggle plan/build mode · `Ctrl+R` retry · `Ctrl+E` collapse/expand all cards
+- `Ctrl+Y` copy card · `Ctrl+↑` edit last message · `! <cmd>` run a shell command
 - `b` / `f` scroll a page up/down
 - **Text area**: `a` start · `e` end · `u` clear line · `w` delete word · `d` delete char · `k` delete to end
 - `PageUp` / `PageDown`, `↑` / `↓` (`Shift` for three), `Home` / `End` — scroll the transcript

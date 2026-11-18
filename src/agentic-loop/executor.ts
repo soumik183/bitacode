@@ -9,9 +9,10 @@
  */
 
 import type { AgentEventHandler, ToolCallEvent } from '../agentic-loop.js';
-import { handleToolCall, truncateToolResult } from '../tools/index.js';
+import { handleToolCall, truncateToolResult, isPlanMode } from '../tools/index.js';
 import { runSubAgent, type SubAgentProgressHandler } from '../sub-agent.js';
 import { logger } from '../utils/logger.js';
+import { createCheckpoint } from '../utils/checkpoint.js';
 
 /**
  * Context for tool execution, passed through from the main loop.
@@ -36,6 +37,56 @@ interface CallOutcome {
   content?: string;
   result?: string;
   aborted?: boolean;
+}
+
+/** Tools whose effects should be snapshotted before they run. */
+const CHECKPOINT_TOOLS = new Set([
+  'write_file', 'edit_file', 'apply_patch', 'multiedit',
+  'delete', 'rename', 'move', 'copy',
+  'git_add', 'git_commit', 'git_stash',
+]);
+
+/** Best-effort extraction of the file paths a mutating tool is about to touch. */
+function checkpointPaths(name: string, args: any): string[] {
+  const paths: string[] = [];
+  const add = (value: unknown) => {
+    if (typeof value === 'string' && value.trim()) paths.push(value);
+  };
+
+  switch (name) {
+    case 'write_file':
+    case 'edit_file':
+    case 'delete':
+      add(args.file_path ?? args.path);
+      break;
+    case 'apply_patch':
+      if (typeof args.patch === 'string') {
+        for (const match of args.patch.matchAll(/^(?:\+\+\+ b\/|--- a\/)(.+)$/gm)) {
+          add(match[1].trim().split('\t')[0]);
+        }
+      }
+      break;
+    case 'multiedit':
+      if (Array.isArray(args.edits)) {
+        for (const edit of args.edits) {
+          if (edit && typeof edit === 'object') add(edit.file_path ?? edit.path);
+        }
+      }
+      break;
+    case 'rename':
+    case 'move':
+    case 'copy':
+      add(args.source);
+      add(args.destination);
+      break;
+    case 'git_add':
+      if (Array.isArray(args.paths)) args.paths.forEach(add);
+      break;
+    default:
+      // git_commit and git_stash have no file arguments to snapshot.
+      break;
+  }
+  return [...new Set(paths)];
 }
 
 /** Safe name/args strings for events, even for a malformed model-provided call. */
@@ -98,7 +149,19 @@ export async function executeToolCalls(
       const args = JSON.parse(argsStr);
       let result: string;
 
+      // Snapshot before mutating tools run; failure here must never block them.
+      if (CHECKPOINT_TOOLS.has(name)) {
+        try {
+          await createCheckpoint(checkpointPaths(name, args), sessionId, name);
+        } catch {
+          // Best-effort: checkpointing is not allowed to fail the tool call.
+        }
+      }
+
       // Handle sub-agent tool specially
+      if (isPlanMode() && name === 'sub_agent') {
+        throw new Error('sub_agent is blocked in plan mode. Press Tab to switch to build mode.');
+      }
       if (name === 'sub_agent') {
         // Single `task` or parallel `tasks` (both are validated by runSubAgent).
         const taskArg: string | string[] = Array.isArray(args.tasks)

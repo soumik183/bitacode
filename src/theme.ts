@@ -19,3 +19,63 @@ export const theme = {
   success: '#4ade80',
   info: '#60a5fa',
 } as const;
+
+/** Every palette exposes exactly the colour keys the dark theme defines. */
+export type Theme = { [K in keyof typeof theme]: string };
+
+export const THEME_NAMES = ['dark', 'light', 'high-contrast'] as const;
+export type ThemeName = (typeof THEME_NAMES)[number];
+
+/** Dark, optimised for typical dark terminals (the historical palette). */
+const dark: Theme = theme;
+
+/** Light, with dark foregrounds so text stays readable on white. */
+const light: Theme = {
+  bg: '#ffffff',
+  surface: '#f3f4f6',
+  surfaceAlt: '#e5e7eb',
+  border: '#cbd5e1',
+  borderFocus: '#1d4ed8',
+  text: '#111827',
+  userText: '#0b3d91',
+  userBorder: '#1d4ed8',
+  placeholder: '#6b7280',
+  muted: '#4b5563',
+  dim: '#6b7280',
+  error: '#b91c1c',
+  accent: '#1d4ed8',
+  success: '#15803d',
+  info: '#1d4ed8',
+};
+
+/** Pure black/white with bright accents for maximum terminal contrast. */
+const highContrast: Theme = {
+  bg: '#000000',
+  surface: '#000000',
+  surfaceAlt: '#000000',
+  border: '#ffffff',
+  borderFocus: '#ffff00',
+  text: '#ffffff',
+  userText: '#ffff00',
+  userBorder: '#ffff00',
+  placeholder: '#ffff00',
+  muted: '#ffffff',
+  dim: '#ffffff',
+  error: '#ff5555',
+  accent: '#00ffff',
+  success: '#00ff00',
+  info: '#00ffff',
+};
+
+export const themes: Record<ThemeName, Theme> = {
+  dark,
+  light,
+  'high-contrast': highContrast,
+};
+
+/** Resolve a settings value to a palette; unknown/missing names fall back to dark. */
+export function getTheme(name?: string): Theme {
+  return typeof name === 'string' && (THEME_NAMES as readonly string[]).includes(name)
+    ? themes[name as ThemeName]
+    : themes.dark;
+}

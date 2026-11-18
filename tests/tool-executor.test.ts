@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
 import { executeToolCalls, type ToolExecutionContext } from '../src/agentic-loop/executor.js';
 import type { AgentEvent } from '../src/agentic-loop.js';
 import { registerDynamicHandler, unregisterDynamicHandler } from '../src/tools/index.js';
+import { setDangerouslySkipPermissions } from '../src/utils/approval.js';
+import { clearCheckpoints, listCheckpoints } from '../src/utils/checkpoint.js';
 
 function makeContext(overrides: Partial<ToolExecutionContext> = {}): ToolExecutionContext {
   return {
@@ -152,6 +156,36 @@ test('abort after one call injects stubs for the remaining pending ids', async (
     assert.equal(events.filter((e) => e.type === 'tool_result' && e.toolCall?.status === 'error').length, 0);
   } finally {
     unregisterDynamicHandler(handlerName);
+  }
+});
+
+test('mutating tool calls are checkpointed before they run', async () => {
+  const sessionId = `executor-cp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const dir = path.join(process.cwd(), 'tests', 'tmp-executor-checkpoint');
+  const file = path.join(dir, `${sessionId}.txt`);
+  const rel = path.relative(process.cwd(), file);
+
+  setDangerouslySkipPermissions(true);
+  try {
+    const messages: any[] = [];
+    const { onEvent } = collectEvents();
+    const calls = [
+      { id: 'cp-1', type: 'function', function: { name: 'write_file', arguments: JSON.stringify({ file_path: rel, content: 'hello' }) } },
+    ];
+
+    const result = await executeToolCalls(calls, messages, onEvent, makeContext({ sessionId }));
+
+    assert.deepEqual(result, { completed: true, shouldAbort: false });
+    const checkpoints = await listCheckpoints(sessionId);
+    assert.equal(checkpoints.length, 1);
+    assert.equal(checkpoints[0].path, rel);
+    assert.equal(checkpoints[0].content, null);
+    assert.equal(checkpoints[0].tool, 'write_file');
+    assert.equal(await fsp.readFile(file, 'utf8'), 'hello');
+  } finally {
+    setDangerouslySkipPermissions(false);
+    await clearCheckpoints(sessionId);
+    await fsp.rm(dir, { recursive: true, force: true });
   }
 });
 

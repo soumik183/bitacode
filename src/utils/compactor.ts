@@ -1,8 +1,8 @@
 /**
  * Conversation compaction.
  *
- * When the conversation approaches the context window limit (≥ 90%),
- * the compactor summarises the older messages using the LLM and replaces
+ * When the conversation approaches the context window limit (a configurable
+ * fraction, 90% by default), the compactor summarises older messages and replaces
  * them with a compact summary. The most recent messages are kept
  * verbatim so the agent doesn't lose immediate context.
  */
@@ -11,8 +11,21 @@ import type OpenAI from 'openai';
 import { estimateConversationTokens } from './cost-tracker.js';
 import { logger } from './logger.js';
 import { getTodosForSession, type TodoItem } from '../tools/todo.js';
+import {
+  COMPACT_THRESHOLD_DEFAULT,
+  COMPACT_THRESHOLD_MAX,
+  COMPACT_THRESHOLD_MIN,
+} from '../settings.js';
 
 const RECENT_MESSAGES_TO_KEEP = 5;
+
+/** Clamp a user-supplied compaction threshold to the supported range. */
+export function getCompactThreshold(threshold?: number): number {
+  if (typeof threshold !== 'number' || !Number.isFinite(threshold)) {
+    return COMPACT_THRESHOLD_DEFAULT;
+  }
+  return Math.min(COMPACT_THRESHOLD_MAX, Math.max(COMPACT_THRESHOLD_MIN, threshold));
+}
 
 function isProtectedSkillMessage(message: OpenAI.Chat.Completions.ChatCompletionMessageParam): boolean {
   return message.role === 'tool' && typeof message.content === 'string' && message.content.includes('<skill_content ');
@@ -42,12 +55,14 @@ export async function compactIfNeeded(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
   contextWindow: number,
   requestDefaults: Record<string, unknown> = {},
-  sessionId?: string
+  sessionId?: string,
+  threshold?: number
 ): Promise<OpenAI.Chat.Completions.ChatCompletionMessageParam[]> {
   const currentTokens = estimateConversationTokens(messages);
-  const utilisation = (currentTokens / contextWindow) * 100;
-  if (utilisation < 90) return messages;
+  const ratio = currentTokens / contextWindow;
+  if (ratio < getCompactThreshold(threshold)) return messages;
 
+  const utilisation = ratio * 100;
   logger.info(`Compacting conversation (${utilisation.toFixed(1)}% of context window used)`);
 
   try {

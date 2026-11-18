@@ -11,11 +11,29 @@ import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
 function isApprovalMode(value) {
     return value === 'manual' || value === 'auto' || value === 'yolo';
 }
+/** Bounds and default for the fraction of context that triggers compaction. */
+export const COMPACT_THRESHOLD_MIN = 0.5;
+export const COMPACT_THRESHOLD_MAX = 0.95;
+export const COMPACT_THRESHOLD_DEFAULT = 0.9;
+/** Status-line segments, in their canonical display order. */
+export const STATUS_LINE_ITEMS = ['folder', 'model', 'variant', 'cost', 'context', 'tool'];
+function isCompactThreshold(value) {
+    return (typeof value === 'number' &&
+        Number.isFinite(value) &&
+        value >= COMPACT_THRESHOLD_MIN &&
+        value <= COMPACT_THRESHOLD_MAX);
+}
+function isThemeName(value) {
+    return value === 'dark' || value === 'light' || value === 'high-contrast';
+}
 export const DEFAULT_SETTINGS = {
     animations: true,
     mouseClicks: true,
     variant: DEFAULT_VARIANT,
     approvalMode: 'manual',
+    compactThreshold: COMPACT_THRESHOLD_DEFAULT,
+    theme: 'dark',
+    statusLine: [...STATUS_LINE_ITEMS],
 };
 function getSettingsPath() {
     const home = os.homedir();
@@ -34,10 +52,17 @@ export function loadSettings() {
                 ? parsed.variant
                 : DEFAULT_VARIANT,
             approvalMode: isApprovalMode(parsed.approvalMode) ? parsed.approvalMode : 'manual',
+            compactThreshold: isCompactThreshold(parsed.compactThreshold)
+                ? parsed.compactThreshold
+                : COMPACT_THRESHOLD_DEFAULT,
+            theme: isThemeName(parsed.theme) ? parsed.theme : 'dark',
+            statusLine: Array.isArray(parsed.statusLine)
+                ? parsed.statusLine.filter((item) => STATUS_LINE_ITEMS.includes(item))
+                : [...STATUS_LINE_ITEMS],
         };
     }
     catch {
-        return { ...DEFAULT_SETTINGS };
+        return { ...DEFAULT_SETTINGS, statusLine: [...STATUS_LINE_ITEMS] };
     }
 }
 export function saveSettings(settings) {

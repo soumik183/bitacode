@@ -1,6 +1,7 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { theme } from '../theme.js';
+import { STATUS_LINE_ITEMS } from '../settings.js';
 // Bouncing equaliser: shifts one bar per frame so it reads as AI activity.
 const WAVE = '▁▂▃▄▅▆▇█▇▆▅▄▃▂▁';
 const WAVE_WIDTH = 10;
@@ -34,9 +35,27 @@ const Shimmer = ({ text, frame }) => {
  * Footer under the prompt: folder on the left — swapped for a live activity
  * wave while the agent works — and model · variant · context on the right.
  */
-export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, }) => {
+export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, segments = STATUS_LINE_ITEMS, }) => {
     const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
-    return (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: busy ? (_jsxs(_Fragment, { children: [wave(frame)
+    const show = (segment) => segments.includes(segment);
+    // One combined row per side keeps the footer a single line; a segment is
+    // joined only when it is enabled so hidden items leave no stray separators.
+    const rightParts = [];
+    if (show('model'))
+        rightParts.push(_jsx(Text, { color: theme.muted, children: modelLabel }, "model"));
+    if (!compact && show('variant')) {
+        rightParts.push(_jsx(Text, { color: theme.dim, children: " \u00B7 " }, "variant-sep"));
+        rightParts.push(_jsx(Text, { color: variantColor, children: variantLabel }, "variant"));
+    }
+    if (show('context')) {
+        if (rightParts.length > 0)
+            rightParts.push(_jsx(Text, { color: theme.dim, children: " \u00B7 " }, "ctx-sep"));
+        rightParts.push(_jsx(Text, { color: theme.dim, children: `ctx ${context}` }, "ctx"));
+    }
+    if (!compact && show('cost') && totalCost > 0) {
+        rightParts.push(_jsx(Text, { color: theme.dim, children: ` · $${totalCost.toFixed(2)}` }, "cost"));
+    }
+    return (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: show('tool') && busy ? (_jsxs(_Fragment, { children: [wave(frame)
                             .split('')
-                            .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] }))] })) : (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: modelLabel }), !compact && (_jsxs(_Fragment, { children: [_jsx(Text, { color: theme.dim, children: " \u00B7 " }), _jsx(Text, { color: variantColor, children: variantLabel })] })), _jsxs(Text, { color: theme.dim, children: [" \u00B7 ctx ", context] }), !compact && totalCost > 0 && _jsxs(Text, { color: theme.dim, children: [" \u00B7 $", totalCost.toFixed(2)] })] }) })] }));
+                            .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] }))] })) : show('folder') ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) : null }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsx(Text, { wrap: "truncate-end", children: rightParts }) })] }));
 };
