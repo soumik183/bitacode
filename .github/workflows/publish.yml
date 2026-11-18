@@ -1,8 +1,8 @@
 name: Publish
 
-# Auto-publishes bitacode to npm when a commit lands on main and the
-# version in package.json is not on the registry yet. Manual runs can do a
-# dry run (build + pack only).
+# Every push to main publishes `bitacode` to npm. If package.json's version is
+# already on the registry, the build job bumps the patch version in the
+# tarball so each push ships a fresh release. Manual runs can do a dry run.
 
 on:
   push:
@@ -24,32 +24,37 @@ permissions:
 
 jobs:
   guard:
-    name: check version is new
+    name: prepare publish
+    # Use `[skip publish]` in a commit message for non-release changes.
+    if: ${{ !contains(github.event.head_commit.message, '[skip publish]') }}
     runs-on: ubuntu-latest
     outputs:
       publish: ${{ steps.check.outputs.publish }}
-      version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
       - id: check
-        run: |
-          NAME=$(node -p "require('./package.json').name")
-          VERSION=$(node -p "require('./package.json').version")
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-            echo "$NAME@$VERSION is already published; skipping."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "$NAME@$VERSION is new; will publish."
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "publish=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: verify and pack
     needs: guard
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+      - name: Ensure an unpublished version for this push
+        id: version
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm; bumping patch for this push."
+            npm version patch --no-git-tag-version >/dev/null
+            VERSION=$(node -p "require('./package.json').version")
+          else
+            echo "$NAME@$VERSION is new; publishing as-is."
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7
         with:
           node-version: '22'
@@ -114,11 +119,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Tag and create a GitHub Release
         run: |
-          VERSION="${{ needs.guard.outputs.version }}"
+          VERSION="${{ needs.build.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # A tag may already exist (e.g. republishing after a rename). That
-          # is fine — the npm version guard already decided what to publish.
+          # The build job picked an unpublished version; an existing tag is
+          # harmless and simply skipped.
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
             echo "Tag v$VERSION already exists; skipping tag creation."
           else
@@ -130,8 +135,8 @@ jobs:
       - name: Release notes
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.guard.outputs.version }}
+          tag_name: v${{ needs.build.outputs.version }}
           generate_release_notes: true
-          name: v${{ needs.guard.outputs.version }}
+          name: v${{ needs.build.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
