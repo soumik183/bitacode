@@ -10,6 +10,7 @@
 import type OpenAI from 'openai';
 import { estimateConversationTokens } from './cost-tracker.js';
 import { logger } from './logger.js';
+import { sanitizeMessagesForProvider } from './message-sanitize.js';
 import { getTodosForSession, type TodoItem } from '../tools/todo.js';
 import {
   COMPACT_THRESHOLD_DEFAULT,
@@ -111,7 +112,7 @@ async function compactConversation(
   const response = await client.chat.completions.create({
     ...requestDefaults,
     model,
-    messages: compressionMessages,
+    messages: sanitizeMessagesForProvider(compressionMessages),
     max_tokens: 2000,
     temperature: 0.1,
   });

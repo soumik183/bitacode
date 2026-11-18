@@ -2408,6 +2408,10 @@ export const App: React.FC<AppProps> = ({
       return;
     }
 
+    // An approval owns the keyboard: Select handles arrows/enter and the prompt
+    // handles 1/2/3/Esc. Nothing below may scroll, submit or abort underneath it.
+    if (pendingApproval) return;
+
     // API key prompt owns text input; only Esc (when idle) is handled here.
     if (keyPrompt) {
       if (key.escape && !keyPrompt.busy) setKeyPrompt(null);
@@ -2831,8 +2835,11 @@ export const App: React.FC<AppProps> = ({
   const scrollbar = scrollbarGeometry(transcriptRows, viewportRows, effectiveUserScroll);
   const railLines = restoringTranscript ? [] : scrollbarLines(scrollbar);
 
+  // A critical modal owns the full frame so all options stay visible on tiny
+  // terminals. This can trigger Ink's full-repaint path while navigating,
+  // which is an acceptable tradeoff for a modal that is not streaming.
   return (
-    <Box flexDirection="column" height={frameHeight}>
+    <Box flexDirection="column" height={hasCriticalPrompt ? rows : frameHeight}>
       {/* Scrollable transcript viewport; the input and footer below stay fixed.
           A modal prompt removes it entirely so the prompt keeps every row. */}
       {!hasCriticalPrompt && (
@@ -2928,7 +2935,15 @@ export const App: React.FC<AppProps> = ({
       {/* Live area: only these few rows re-render while typing. The horizontal
           rule that used to sit here is gone; the composer's own accent bar is
           the only border, so there is no double edge between chat and input. */}
-      <Box flexDirection="column" flexGrow={hasCriticalPrompt ? 1 : 0} flexShrink={1} minHeight={0} overflow="hidden">
+      {/* A modal replaces the composer, so it sits bottom-aligned in the full-height live region. */}
+      <Box
+        flexDirection="column"
+        flexGrow={hasCriticalPrompt ? 1 : 0}
+        flexShrink={1}
+        minHeight={0}
+        overflow="hidden"
+        justifyContent={hasCriticalPrompt ? 'flex-end' : undefined}
+      >
         {showUpdateNotice && (
           <Box height={1} flexShrink={0} paddingX={dense ? 0 : gutter} overflow="hidden">
             <Text wrap="truncate-end">
@@ -3047,6 +3062,7 @@ export const App: React.FC<AppProps> = ({
             })()}
             columns={columns}
             compact={dense || rows <= 10}
+            rows={rows}
             onRespond={(response) => {
               pendingApproval.resolve(response);
               setPendingApproval(null);

@@ -26,6 +26,7 @@ import { logger } from './utils/logger.js';
 import { processStream } from './agentic-loop/stream.js';
 import { executeToolCalls } from './agentic-loop/executor.js';
 import { handleApiError } from './agentic-loop/errors.js';
+import { sanitizeMessagesForProvider } from './utils/message-sanitize.js';
 function emitAbortAndFinish(handler) {
     handler({ type: 'done' });
 }
@@ -152,14 +153,8 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
             const stream = await client.chat.completions.create({
                 ...requestDefaults,
                 model,
-                // `reasoning` is a UI-only field kept for session replay. Providers
-                // reject unknown assistant fields, so never send it back.
-                messages: updatedMessages.map((message) => {
-                    if (message?.role !== 'assistant' || !message.reasoning)
-                        return message;
-                    const { reasoning: _reasoning, ...rest } = message;
-                    return rest;
-                }),
+                // Strip UI-only fields (reasoning, bitacode* metadata) before sending.
+                messages: sanitizeMessagesForProvider(updatedMessages),
                 tools: allTools,
                 tool_choice: 'auto',
                 stream: true,

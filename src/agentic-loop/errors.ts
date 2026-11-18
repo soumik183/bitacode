@@ -9,6 +9,7 @@ import type { Message, AgentEventHandler } from '../agentic-loop.js';
 import type { ModelPricing } from '../utils/cost-tracker.js';
 import { compactIfNeeded } from '../utils/compactor.js';
 import { logger } from '../utils/logger.js';
+import { sanitizeMessagesForProvider } from '../utils/message-sanitize.js';
 
 // Retry state tracked across loop iterations.
 export interface RetryState {
@@ -17,6 +18,7 @@ export interface RetryState {
   truncateCount: number;
   continueCount: number;
   retriggerCount: number; // For AI stopping after tool call
+  sanitizeCount?: number; // Last-resort UI-field/malformed-message cleanup
 }
 
 const LIMITS = {
@@ -24,6 +26,7 @@ const LIMITS = {
   MAX_CONTEXT: 2,
   MAX_TRUNCATE: 5,
   MAX_CONTINUE: 1,
+  MAX_SANITIZE: 1,
 };
 
 // Providers and proxies disagree on status codes, so classify by message too.
@@ -206,7 +209,7 @@ export async function handleApiError(
 
   // Generic 400 errors - try repair/truncate/continue
   if (status === 400) {
-    return await handle400Error(messages, validToolNames, retryState, onEvent);
+    return await handle400Error(messages, validToolNames, retryState, onEvent, shortErrorReason(errMsg));
   }
 
   // Non-retryable - short, user-facing messages; never leak raw response bodies.
@@ -226,38 +229,22 @@ export async function handleApiError(
   };
 }
 
-// Handle 400 errors: repair JSON → remove orphaned → truncate → continue.
+// Handle 400 errors: repair tool calls → remove orphaned → truncate → continue → sanitize.
 async function handle400Error(
   messages: Message[],
   validToolNames: Set<string>,
   retryState: RetryState,
-  onEvent: AgentEventHandler
+  onEvent: AgentEventHandler,
+  reason: string
 ): Promise<ErrorHandlerResult> {
-  // 1. Try JSON repairs on tool arguments
-  // Models sometimes emit invalid escape sequences in tool args (e.g., \| from grep regex)
-  // which cause JSON.parse to fail. These persist across requests unless repaired.
+  // 1. Repair tool-call structure and arguments.
+  // Models emit invalid escapes (\| from grep regex), unquoted arguments,
+  // duplicate ids and empty assistant messages — all rejected until fixed.
   if (retryState.repairCount < LIMITS.MAX_REPAIR) {
-    let repaired = false;
-
-    for (const msg of messages) {
-      const msgAny = msg as any;
-      if (msg.role === 'assistant' && Array.isArray(msgAny.tool_calls)) {
-        for (const tc of msgAny.tool_calls) {
-          const args = tc.function?.arguments;
-          if (args && typeof args === 'string') {
-            const fixed = repairInvalidEscapes(args);
-            if (fixed !== args) {
-              tc.function.arguments = fixed;
-              repaired = true;
-            }
-          }
-        }
-      }
-    }
-
+    const repaired = repairMessagesFor400(messages);
     if (repaired) {
       retryState.repairCount++;
-      logger.warn('400 response: repaired invalid JSON escapes');
+      logger.warn('400 response: repaired tool calls and message structure');
       return { handled: true, shouldAbort: false, silentRetry: true };
     }
   }
@@ -302,19 +289,157 @@ async function handle400Error(
     return { handled: true, shouldAbort: false, silentRetry: true };
   }
 
-  // All strategies exhausted
+  // 5. Final defense: strip UI-only fields and structurally invalid messages.
+  // The sanitizer returns the original array by identity when it changes nothing.
+  if ((retryState.sanitizeCount ?? 0) < LIMITS.MAX_SANITIZE) {
+    const sanitized = sanitizeMessagesForProvider(messages);
+    if (sanitized !== messages) {
+      retryState.sanitizeCount = (retryState.sanitizeCount ?? 0) + 1;
+      messages.length = 0;
+      messages.push(...sanitized);
+      logger.warn('400 response: removed provider-unsafe message fields');
+      onEvent({ type: 'error', error: 'Retrying with sanitized messages...', transient: true });
+      return { handled: true, shouldAbort: false, silentRetry: true };
+    }
+  }
+
+  // All strategies exhausted — keep the phrase tests rely on, but tell the
+  // user what the provider actually complained about (redacted, one line).
   return {
     handled: false,
     shouldAbort: false,
     silentRetry: false,
-    errorMessage: 'Could not recover from error. Try /clear to start fresh.',
+    errorMessage: `Could not recover: ${reason}. Try /new or check the model config.`,
   };
+}
+
+// Repair tool calls and message structure that providers reject on sight.
+function repairMessagesFor400(messages: Message[]): boolean {
+  let repaired = false;
+
+  for (const msg of messages) {
+    const msgAny = msg as any;
+    if (msg.role !== 'assistant' || !Array.isArray(msgAny.tool_calls)) continue;
+
+    // Drop malformed calls and duplicate ids (keep the first).
+    const seen = new Set<string>();
+    const kept = msgAny.tool_calls.filter((tc: any) => {
+      if (!tc || typeof tc !== 'object') {
+        repaired = true;
+        return false;
+      }
+      const id = tc.id;
+      if (typeof id === 'string' && id.length > 0) {
+        if (seen.has(id)) {
+          repaired = true;
+          return false;
+        }
+        seen.add(id);
+      }
+      if (!tc.function || typeof tc.function.name !== 'string' || !tc.function.name) {
+        repaired = true;
+        return false;
+      }
+      return true;
+    });
+    if (kept.length !== msgAny.tool_calls.length) {
+      msgAny.tool_calls = kept;
+    }
+
+    for (const tc of kept) {
+      const args = tc.function?.arguments;
+      if (typeof args !== 'string') {
+        tc.function.arguments = '{}';
+        repaired = true;
+        continue;
+      }
+      const fixed = repairToolArguments(args);
+      if (fixed !== args) {
+        tc.function.arguments = fixed;
+        repaired = true;
+      }
+    }
+  }
+
+  // Keep only the first result per tool_call_id; duplicates break providers.
+  const resultIds = new Set<string>();
+  const deduped: Message[] = [];
+  for (const msg of messages) {
+    const msgAny = msg as any;
+    if (msg.role === 'tool' && typeof msgAny.tool_call_id === 'string') {
+      if (resultIds.has(msgAny.tool_call_id)) {
+        repaired = true;
+        continue;
+      }
+      resultIds.add(msgAny.tool_call_id);
+    }
+    deduped.push(msg);
+  }
+  if (deduped.length !== messages.length) {
+    messages.length = 0;
+    messages.push(...deduped);
+  }
+
+  // An assistant message with no text and no tool calls is invalid history.
+  const nonEmpty = messages.filter((msg) => {
+    const msgAny = msg as any;
+    if (msg.role !== 'assistant') return true;
+    const hasContent =
+      (typeof msgAny.content === 'string' && msgAny.content.trim().length > 0) ||
+      (Array.isArray(msgAny.content) && msgAny.content.length > 0);
+    const hasCalls = Array.isArray(msgAny.tool_calls) && msgAny.tool_calls.length > 0;
+    if (!hasContent && !hasCalls) {
+      repaired = true;
+      return false;
+    }
+    return true;
+  });
+  if (nonEmpty.length !== messages.length) {
+    messages.length = 0;
+    messages.push(...nonEmpty);
+  }
+
+  return repaired;
 }
 
 // Repair invalid JSON escape sequences.
 // Models sometimes emit \| \! \- etc. (e.g. grep regex args).
 function repairInvalidEscapes(value: string): string {
   return value.replace(/\\([^"/bfnrtu])/g, '\\\\$1');
+}
+
+function isJson(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Make tool arguments a valid JSON string: fix escapes, then quote bare
+// scalars, then fall back to '{}' rather than sending malformed JSON.
+function repairToolArguments(args: string): string {
+  if (isJson(args)) return args;
+  const escaped = repairInvalidEscapes(args);
+  if (isJson(escaped)) return escaped;
+
+  const trimmed = escaped.trim();
+  if (trimmed && !/^[[{"]/.test(trimmed) && !/^(true|false|null|-?\d+(?:\.\d+)?)$/.test(trimmed)) {
+    const quoted = JSON.stringify(trimmed);
+    if (isJson(quoted)) return quoted;
+  }
+  return '{}';
+}
+
+// One-line, secret-free reason for the final "could not recover" message.
+function shortErrorReason(errMsg: unknown): string {
+  const text = typeof errMsg === 'string' ? errMsg.replace(/\s+/g, ' ').trim() : '';
+  if (!text) return 'unknown 400 error';
+  const redacted = text
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, '[redacted]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]{6,}/gi, 'Bearer [redacted]');
+  return redacted.length > 120 ? `${redacted.slice(0, 120)}…` : redacted;
 }
 
 // Remove orphaned tool result messages that don't have a matching tool_call_id.

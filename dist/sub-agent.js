@@ -15,6 +15,7 @@ import { logger } from './utils/logger.js';
 import { clearTodos } from './tools/todo.js';
 import { calculateCost } from './utils/cost-tracker.js';
 import { saveSubAgentRun } from './utils/subagent-store.js';
+import { sanitizeMessagesForProvider } from './utils/message-sanitize.js';
 /** Default concurrent children for a `tasks` fan-out. */
 const FANOUT_CAP = 3;
 /** Hard ceiling for the fan-out concurrency cap. */
@@ -187,7 +188,7 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
                 const stream = await client.chat.completions.create({
                     ...requestDefaults,
                     model,
-                    messages,
+                    messages: sanitizeMessagesForProvider(messages),
                     tools: getAllTools(),
                     tool_choice: 'auto',
                     stream: true,

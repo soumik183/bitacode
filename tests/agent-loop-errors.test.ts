@@ -176,6 +176,89 @@ test('400 removes hallucinated tool calls and their results, keeping valid ones'
   assert.ok(messages.some((m) => m.role === 'user'), 'user message must survive');
 });
 
+test('400 with an invalid assistant field is repaired by the final sanitizer strategy', async () => {
+  const messages: any[] = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer', reasoning: 'bad field', bitacodeTrace: 'x' },
+  ];
+  const state = freshState();
+  // Exhaust the earlier truncate/continue strategies so the final one runs.
+  state.truncateCount = 5;
+  state.continueCount = 1;
+
+  const result = await handleApiError(
+    { status: 400, message: "Extra inputs are not permitted: 'reasoning'" },
+    messages,
+    new Set(),
+    undefined,
+    state,
+    1,
+    noEvent
+  );
+
+  assert.equal(result.handled, true);
+  assert.equal(result.silentRetry, true);
+  assert.ok(!('reasoning' in messages[2]), 'reasoning must be stripped');
+  assert.ok(!('bitacodeTrace' in messages[2]), 'bitacode* fields must be stripped');
+  assert.equal(messages[2].content, 'answer');
+});
+
+test('400 repairs duplicate tool results and unquoted tool arguments', async () => {
+  const messages: any[] = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'do it' },
+    { role: 'assistant', content: '', tool_calls: [
+      { id: 'c1', type: 'function', function: { name: 'bash', arguments: 'oops\\|here' } },
+    ] },
+    { role: 'tool', tool_call_id: 'c1', content: 'first' },
+    { role: 'tool', tool_call_id: 'c1', content: 'duplicate' },
+  ];
+
+  const result = await handleApiError(
+    { status: 400, message: 'bad tool arguments' },
+    messages,
+    new Set(['bash']),
+    undefined,
+    freshState(),
+    1,
+    noEvent
+  );
+
+  assert.equal(result.handled, true);
+  assert.equal(messages.filter((m) => m.role === 'tool').length, 1);
+  const args = messages[2].tool_calls[0].function.arguments;
+  assert.doesNotThrow(() => JSON.parse(args), 'tool arguments must become valid JSON');
+});
+
+test('400 fallback error includes the redacted provider reason and actionable next steps', async () => {
+  const messages: any[] = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer' },
+  ];
+  const state = freshState();
+  state.truncateCount = 5;
+  state.continueCount = 1;
+  state.sanitizeCount = 1;
+
+  const result = await handleApiError(
+    { status: 400, message: 'bad field sk-secret-value' },
+    messages,
+    new Set(),
+    undefined,
+    state,
+    1,
+    noEvent
+  );
+
+  assert.equal(result.handled, false);
+  assert.match(result.errorMessage || '', /Could not recover:/);
+  assert.match(result.errorMessage || '', /bad field/);
+  assert.match(result.errorMessage || '', /\/new|model config/);
+  assert.doesNotMatch(result.errorMessage || '', /sk-secret-value/);
+});
+
 test('401 returns a helpful, non-retryable authentication message', async () => {
   const result = await handleApiError(
     { status: 401, message: 'Incorrect API key provided: sk-secret-value' },

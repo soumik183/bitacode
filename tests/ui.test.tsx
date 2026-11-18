@@ -1197,14 +1197,23 @@ class SizedStdout extends EventEmitter {
 
 class SizedStdin extends EventEmitter {
   isTTY = true;
+  private data: string | null = null;
   setEncoding() {}
   setRawMode() {}
   resume() {}
   pause() {}
   ref() {}
   unref() {}
-  read() { return null; }
-  write = (_data: string) => {};
+  read() {
+    const value = this.data;
+    this.data = null;
+    return value;
+  }
+  // Mimic ink-testing-library so keys reach Ink's useInput handlers.
+  write = (data: string) => {
+    this.data = data;
+    this.emit('readable');
+  };
 }
 
 class SizedStderr extends EventEmitter {
@@ -1245,9 +1254,10 @@ function setupSizedHome() {
 function renderAppSized(columns: number, rows: number) {
   const restoreHome = setupSizedHome();
   const stdout = new SizedStdout(columns, rows);
+  const stdin = new SizedStdin();
   const instance = renderInk(<App />, {
     stdout: stdout as any,
-    stdin: new SizedStdin() as any,
+    stdin: stdin as any,
     stderr: new SizedStderr() as any,
     debug: true,
     patchConsole: false,
@@ -1260,6 +1270,7 @@ function renderAppSized(columns: number, rows: number) {
   };
   return {
     stdout,
+    stdin,
     instance,
     resize,
     cleanup() {
@@ -1340,28 +1351,110 @@ test('transient 0/NaN resize values keep the last valid dimensions', async () =>
   }
 });
 
-test('an approval prompt stays visible and fits a small terminal frame', async () => {
+for (const [columns, rows] of [
+  [40, 10],
+  [30, 8],
+  [20, 6],
+] as const) {
+  test(`approval prompt shows its header, all options and hint at ${columns}x${rows}`, async () => {
+    const app = renderAppSized(columns, rows);
+    try {
+      await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+      // Trigger the UI-owned handler; the promise is resolved by selecting below.
+      void requestApproval({
+        type: 'bash',
+        description: 'Run a shell command',
+        detail: `echo ${'x'.repeat(300)}`,
+        sessionId: `approval-${columns}x${rows}`,
+      } as any);
+      const frame = await waitForFrame(
+        app.stdout.frameContaining.bind(app.stdout, 'Approval Required'),
+        (f) => f.length > 0
+      );
+      assert.ok(frame.length > 0, 'approval prompt never rendered');
+      assert.match(frame, /Approval Required/, 'header is visible');
+      assert.match(frame, /Run a shell|echo/, 'description/detail is visible (truncated)');
+      assert.match(frame, /Approve once/, 'first option is not clipped away');
+      assert.match(frame, /Approve session/, 'session option is readable on narrow screens');
+      assert.match(frame, /Reject/, 'last option is not clipped away');
+      assert.match(frame, /enter/, 'hint is visible');
+      assert.doesNotMatch(frame, new RegExp(`x{50}`), 'detail is truncated to fit');
+      assert.ok(
+        frame.split('\n').length <= rows,
+        `frame grew to ${frame.split('\n').length} rows on a ${rows}-row terminal`
+      );
+      assert.ok(
+        lineWidth(frame) <= columns,
+        `a line is ${lineWidth(frame)} columns wide on a ${columns}-column terminal`
+      );
+      // Bottom-aligned modal: the hint is the last painted row, like the composer.
+      const painted = frame.split('\n').filter((line) => line.trim().length > 0);
+      assert.match(painted[painted.length - 1] ?? '', /enter/, 'prompt sits at the composer position');
+    } finally {
+      app.cleanup();
+    }
+  });
+}
+
+test('approving resolves once and clears the prompt', async () => {
   const app = renderAppSized(30, 8);
+  let resolveCount = 0;
   try {
     await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
-    // Trigger the UI-owned approval handler; do not await (it resolves on input).
-    void requestApproval({
+    const pending = requestApproval({
       type: 'bash',
       description: 'Run a shell command',
-      sessionId: 'zoom-approval-test',
-    } as any);
-    const frame = await waitForFrame(
-      app.stdout.frameContaining.bind(app.stdout, 'Approval Required'),
-      (f) => f.length > 0
-    );
-    assert.ok(frame.length > 0, 'approval prompt never rendered');
-    assert.match(frame, /Approval Required/);
-    assert.match(frame, /Approve once/, 'the options are not clipped away');
-    assert.ok(frame.split('\n').length <= 7, `frame grew to ${frame.split('\n').length} rows`);
-    assert.ok(lineWidth(frame) <= 30, `a line is ${lineWidth(frame)} columns wide`);
+      sessionId: 'approval-resolve-once',
+    } as any).then((value) => {
+      resolveCount += 1;
+      return value;
+    });
+    await waitForFrame(app.stdout.frameContaining.bind(app.stdout, 'Approval Required'), (f) => f.length > 0);
+
+    // Since the modal owns the keyboard, '1' selects Approve once immediately.
+    app.stdin.write('1');
+    const result = await Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('approval never resolved')), 4000)),
+    ]);
+    assert.equal(result, true, 'requestApproval resolves to approved');
+    assert.equal(resolveCount, 1, 'the response settles exactly once');
+
+    const deadline = Date.now() + 4000;
+    let cleared = '';
+    while (Date.now() < deadline) {
+      const frame = plain(app.stdout.frames[app.stdout.frames.length - 1] ?? '');
+      if (frame.includes('┃') && !frame.includes('Approval Required')) {
+        cleared = frame;
+        break;
+      }
+      await settle(20);
+    }
+    assert.match(cleared, /Build anything…/, 'the composer is back after approval');
+    assert.doesNotMatch(cleared, /Approval Required/, 'the prompt is gone');
   } finally {
     app.cleanup();
   }
+});
+
+test('approval prompt settles only once when number keys and Enter collide', async () => {
+  let responses = 0;
+  const { stdin } = render(
+    <ApprovalPrompt
+      request={{ type: 'bash', description: 'Run a shell command' } as any}
+      columns={40}
+      rows={10}
+      onRespond={() => { responses += 1; }}
+    />
+  );
+  await settle(50);
+  stdin.write('1');
+  await settle(50);
+  stdin.write('\r');
+  await settle(50);
+  stdin.write('2');
+  await settle(80);
+  assert.equal(responses, 1, 'onRespond is called once for the whole interaction');
 });
 
 test('critical prompts stay inside a narrow terminal', () => {

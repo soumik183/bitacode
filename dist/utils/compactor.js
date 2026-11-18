@@ -8,6 +8,7 @@
  */
 import { estimateConversationTokens } from './cost-tracker.js';
 import { logger } from './logger.js';
+import { sanitizeMessagesForProvider } from './message-sanitize.js';
 import { getTodosForSession } from '../tools/todo.js';
 import { COMPACT_THRESHOLD_DEFAULT, COMPACT_THRESHOLD_MAX, COMPACT_THRESHOLD_MIN, } from '../settings.js';
 const RECENT_MESSAGES_TO_KEEP = 5;
@@ -81,7 +82,7 @@ async function compactConversation(client, model, messages, requestDefaults, ses
     const response = await client.chat.completions.create({
         ...requestDefaults,
         model,
-        messages: compressionMessages,
+        messages: sanitizeMessagesForProvider(compressionMessages),
         max_tokens: 2000,
         temperature: 0.1,
     });

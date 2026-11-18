@@ -14,6 +14,7 @@ import { chmodSync } from 'node:fs';
 import type OpenAI from 'openai';
 import { clearTodos, type TodoItem } from './tools/todo.js';
 import { logger } from './utils/logger.js';
+import { isUiOnlyMessageField } from './utils/message-sanitize.js';
 
 const SESSION_DIR_MODE = 0o700;
 const SESSION_FILE_MODE = 0o600;
@@ -114,11 +115,25 @@ export function ensureSystemPromptAtTop(
   ];
 }
 
+/** Copy a persisted message without UI-only keys, optionally keeping reasoning. */
+function stripSessionUiFields(message: any, keepReasoning: boolean): any {
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(message)) {
+    if (key === 'reasoning') {
+      if (keepReasoning) clean[key] = value;
+      continue;
+    }
+    if (isUiOnlyMessageField(key)) continue;
+    clean[key] = value;
+  }
+  return clean;
+}
+
 /**
  * Repair histories that older builds or interrupted turns may leave invalid:
- * an assistant tool call without a result, an orphaned tool result, or an
- * empty assistant message. Providers reject all three, which used to make a
- * resumed session fail every request.
+ * an assistant tool call without a result, an orphaned tool result, an
+ * empty assistant message, or UI-only fields. Providers reject all of these,
+ * which used to make a resumed session fail every request.
  */
 export function sanitizeCompletionMessages(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
@@ -139,16 +154,27 @@ export function sanitizeCompletionMessages(
       const hasContent =
         (typeof content === 'string' && content.trim().length > 0) ||
         (Array.isArray(content) && content.length > 0);
-      const toolCalls = Array.isArray(message.tool_calls)
-        ? message.tool_calls.filter(
-            (call: any) =>
-              call &&
-              typeof call.id === 'string' &&
-              call.id.length > 0 &&
-              call.function &&
-              typeof call.function.name === 'string'
-          )
-        : [];
+      const seenCallIds = new Set<string>();
+      const toolCalls = (Array.isArray(message.tool_calls) ? message.tool_calls : [])
+        .filter(
+          (call: any) =>
+            call &&
+            typeof call === 'object' &&
+            typeof call.id === 'string' &&
+            call.id.length > 0 &&
+            call.function &&
+            typeof call.function === 'object' &&
+            typeof call.function.name === 'string' &&
+            call.function.name.length > 0
+        )
+        .map((call: any) => {
+          if (seenCallIds.has(call.id)) return null;
+          seenCallIds.add(call.id);
+          return typeof call.function.arguments === 'string'
+            ? call
+            : { ...call, function: { ...call.function, arguments: '{}' } };
+        })
+        .filter(Boolean);
 
       // Reasoning is a UI-only field, but it must survive save/load so a
       // resumed session can replay the thought above its answer.
@@ -159,14 +185,19 @@ export function sanitizeCompletionMessages(
       if (toolCalls.length === 0) {
         // An empty assistant message is not valid history.
         if (hasContent) {
-          const { tool_calls: _ignored, reasoning: _savedReasoning, ...rest } = message;
+          const rest = stripSessionUiFields(message, true);
+          delete rest.tool_calls;
           sanitized.push({ ...rest, ...reasoning } as OpenAI.Chat.Completions.ChatCompletionMessageParam);
         }
         index++;
         continue;
       }
 
-      sanitized.push({ ...message, ...reasoning, tool_calls: toolCalls });
+      sanitized.push({
+        ...stripSessionUiFields(message, true),
+        ...reasoning,
+        tool_calls: toolCalls,
+      } as OpenAI.Chat.Completions.ChatCompletionMessageParam);
       index++;
 
       const answered = new Set<string>();
@@ -180,9 +211,9 @@ export function sanitizeCompletionMessages(
         ) {
           answered.add(id);
           sanitized.push({
-            ...toolMessage,
+            ...stripSessionUiFields(toolMessage, false),
             content: typeof toolMessage.content === 'string' ? toolMessage.content : String(toolMessage.content ?? ''),
-          });
+          } as OpenAI.Chat.Completions.ChatCompletionMessageParam);
         }
         index++;
       }
@@ -203,7 +234,7 @@ export function sanitizeCompletionMessages(
 
     // A tool result outside an assistant tool_calls group is orphaned.
     if (message.role !== 'tool') {
-      sanitized.push(message);
+      sanitized.push(stripSessionUiFields(message, false) as OpenAI.Chat.Completions.ChatCompletionMessageParam);
     }
     index++;
   }

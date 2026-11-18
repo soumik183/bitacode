@@ -64,6 +64,53 @@ test('sanitizeCompletionMessages keeps reasoning on tool-call assistant messages
   assert.equal(result[1]?.role, 'tool');
 });
 
+test('loaded sessions drop UI-only message fields but keep reasoning for replay', async () => {
+  const session = createSession('model', 'provider');
+  session.completionMessages = [
+    { role: 'system', content: 'sys', bitacodeFoo: 'bar' } as any,
+    { role: 'user', content: 'question', subAgentActivities: [{ id: 'a' }] } as any,
+    {
+      role: 'assistant',
+      content: 'answer',
+      reasoning: 'thought to replay',
+      bitacodeTrace: 'x',
+    } as any,
+  ];
+  await saveSession(session);
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  const messages = loaded!.completionMessages as any[];
+  assert.ok(messages.every((m) => !('subAgentActivities' in m) && !Object.keys(m).some((k) => /^bitacode/i.test(k))));
+  assert.equal(messages[2].reasoning, 'thought to replay');
+  assert.equal(messages[2].content, 'answer');
+});
+
+test('sanitizeCompletionMessages validates tool_call structures and dedupes ids', () => {
+  const result = sanitizeCompletionMessages([
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'go' },
+    {
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        { id: 'c1', type: 'function', function: { name: 'bash' } },
+        { id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } },
+        { id: '', type: 'function', function: { name: 'bash', arguments: '{}' } },
+        { id: 'c2', type: 'function', function: { name: '', arguments: '{}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+  ] as any);
+
+  const assistant = result[2] as any;
+  assert.equal(assistant.tool_calls.length, 1);
+  assert.equal(assistant.tool_calls[0].id, 'c1');
+  assert.equal(assistant.tool_calls[0].function.arguments, '{}');
+  assert.equal(result[3].role, 'tool');
+  assert.equal((result[3] as any).tool_call_id, 'c1');
+});
+
 test('ensureSystemPromptAtTop prepends a system prompt when missing', () => {
   const messages = [
     { role: 'user', content: 'Hello' },
