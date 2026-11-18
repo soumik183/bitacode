@@ -23,11 +23,58 @@ export const theme = {
 /** Every palette exposes exactly the colour keys the dark theme defines. */
 export type Theme = { [K in keyof typeof theme]: string };
 
-export const THEME_NAMES = ['dark', 'light', 'high-contrast'] as const;
+export const THEME_NAMES = ['black', 'sand', 'dark', 'light', 'high-contrast'] as const;
 export type ThemeName = (typeof THEME_NAMES)[number];
+
+/**
+ * Premium black — the default palette. Near-black canvas, warm gold accents
+ * and soft ivory ink; quiet enough for long sessions but distinct from the
+ * old flat-dark palette (which stays available as `dark`).
+ */
+const black: Theme = {
+  bg: '#050505',
+  surface: '#111111',
+  surfaceAlt: '#1a1a1a',
+  border: '#33302b',
+  borderFocus: '#c9a227',
+  text: '#f2efe9',
+  userText: '#ffffff',
+  userBorder: '#c9a227',
+  placeholder: '#7d756a',
+  muted: '#a8a29a',
+  dim: '#726c63',
+  error: '#ff6b6b',
+  accent: '#d4af37',
+  success: '#7bc47f',
+  info: '#c9a227',
+};
 
 /** Dark, optimised for typical dark terminals (the historical palette). */
 const dark: Theme = theme;
+
+/**
+ * Warm sand — the default palette. A paper-light canvas with thin brown
+ * borders and muted ink, so dialogs and chat read like a notebook page
+ * instead of a black terminal. Kept deliberately low-saturation so syntax
+ * colours never fight the chrome.
+ */
+const sand: Theme = {
+  bg: '#faf5ed',
+  surface: '#f4ebdd',
+  surfaceAlt: '#ecdfcc',
+  border: '#dcc6a8',
+  borderFocus: '#a9764a',
+  text: '#3a2e25',
+  userText: '#5a4635',
+  userBorder: '#b98d63',
+  placeholder: '#8f7a66',
+  muted: '#6d5b4b',
+  dim: '#8a7663',
+  error: '#a4452e',
+  accent: '#a9764a',
+  success: '#5d7a4a',
+  info: '#8a6a4a',
+};
 
 /** Light, with dark foregrounds so text stays readable on white. */
 const light: Theme = {
@@ -68,14 +115,20 @@ const highContrast: Theme = {
 };
 
 export const themes: Record<ThemeName, Theme> = {
+  black,
+  sand,
   dark,
   light,
   'high-contrast': highContrast,
 };
 
-/** Resolve a settings value to a palette; unknown/missing names fall back to dark. */
+/**
+ * Resolve a settings value to a palette. Unknown/missing names fall back to
+ * premium black (the product default); explicit names still resolve exactly
+ * as before.
+ */
 export function getTheme(name?: string): Theme {
   return typeof name === 'string' && (THEME_NAMES as readonly string[]).includes(name)
     ? themes[name as ThemeName]
-    : themes.dark;
+    : themes.black;
 }

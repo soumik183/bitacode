@@ -24,7 +24,7 @@ function isCompactThreshold(value) {
         value <= COMPACT_THRESHOLD_MAX);
 }
 function isThemeName(value) {
-    return value === 'dark' || value === 'light' || value === 'high-contrast';
+    return value === 'black' || value === 'sand' || value === 'dark' || value === 'light' || value === 'high-contrast';
 }
 export const DEFAULT_SETTINGS = {
     animations: true,
@@ -32,7 +32,7 @@ export const DEFAULT_SETTINGS = {
     variant: DEFAULT_VARIANT,
     approvalMode: 'manual',
     compactThreshold: COMPACT_THRESHOLD_DEFAULT,
-    theme: 'dark',
+    theme: 'black',
     statusLine: [...STATUS_LINE_ITEMS],
 };
 function getSettingsPath() {
@@ -55,7 +55,7 @@ export function loadSettings() {
             compactThreshold: isCompactThreshold(parsed.compactThreshold)
                 ? parsed.compactThreshold
                 : COMPACT_THRESHOLD_DEFAULT,
-            theme: isThemeName(parsed.theme) ? parsed.theme : 'dark',
+            theme: isThemeName(parsed.theme) ? parsed.theme : DEFAULT_SETTINGS.theme,
             statusLine: Array.isArray(parsed.statusLine)
                 ? parsed.statusLine.filter((item) => STATUS_LINE_ITEMS.includes(item))
                 : [...STATUS_LINE_ITEMS],

@@ -23,7 +23,7 @@ function fit(text, max) {
  * Interactive approval prompt. Select owns arrows/enter; this component owns
  * the 1/2/3 and Esc shortcuts. App ignores every key while approval is pending.
  */
-export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 24, onRespond, }) => {
+export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 24, embedded = false, onRespond, }) => {
     // A digit and Enter can arrive in one burst; settle at most once per prompt.
     const settledRef = useRef(false);
     const respond = useCallback((response) => {
@@ -37,7 +37,7 @@ export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 
     const showNumbers = cols >= 28;
     // LeftBar gutter (2) + Select pointer/padding (2) + the "1. " number prefix.
     const labelWidth = Math.max(1, cols - 4 - (showNumbers ? 3 : 0));
-    const showHint = height >= 5;
+    const showHint = !embedded && height >= 5;
     // Header + three options + hint are fixed; the remainder is the detail budget.
     const detailRows = Math.max(0, Math.min(compact ? 1 : 2, height - 1 - OPTIONS.length - (showHint ? 1 : 0)));
     const detailWidth = Math.max(1, cols - 2);
@@ -69,7 +69,7 @@ export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 
         if (key.escape)
             respond('reject');
     });
-    return (_jsx(LeftBar, { color: theme.accent, children: _jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: showHint ? 'Approval Required' : `Approval Required · ${hint}` }), shownDetail.map((line, index) => (_jsx(Text, { color: index === 0 ? theme.muted : theme.dim, wrap: "truncate-end", children: line }, index))), _jsx(Select, { options: OPTIONS.map((option, index) => ({
+    return (_jsx(LeftBar, { color: theme.accent, children: _jsxs(Box, { flexDirection: "column", children: [!embedded && (_jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: showHint ? 'Approval Required' : `Approval Required · ${hint}` })), shownDetail.map((line, index) => (_jsx(Text, { color: index === 0 ? theme.muted : theme.dim, wrap: "truncate-end", children: line }, index))), _jsx(Select, { options: OPTIONS.map((option, index) => ({
                         value: option.value,
                         label: `${showNumbers ? `${index + 1}. ` : ''}${fit(option.label, labelWidth)}`,
                     })), onChange: (value) => respond(value) }), showHint && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint }))] }) }));

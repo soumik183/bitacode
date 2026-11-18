@@ -10,6 +10,8 @@ export interface AskPromptProps {
   columns: number;
   /** Short terminals drop the decorative margins so every option stays visible. */
   compact?: boolean;
+  /** Rendered inside a Dialog that already supplies the title and hint. */
+  embedded?: boolean;
   onRespond: (response: AskResponse) => void;
 }
 
@@ -47,7 +49,7 @@ function clampText(text: string, width: number): string {
  *  - typing is always allowed unless the question sets allow_free_text false
  *  - a progress line makes a multi-question ask feel bounded
  */
-export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compact = false, onRespond }) => {
+export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compact = false, embedded = false, onRespond }) => {
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Answered>({});
   const [cursor, setCursor] = useState(0);
@@ -219,14 +221,16 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
   return (
     <LeftBar color={theme.accent} marginTop={gap} marginBottom={gap}>
       <Box flexDirection="column">
-        <Text>
-          <Text color={theme.accent} bold>
-            Agent question
+        {!embedded && (
+          <Text>
+            <Text color={theme.accent} bold>
+              Agent question
+            </Text>
+            {total > 1 && (
+              <Text color={theme.dim}>{`  ${index + 1}/${total}`}</Text>
+            )}
           </Text>
-          {total > 1 && (
-            <Text color={theme.dim}>{`  ${index + 1}/${total}`}</Text>
-          )}
-        </Text>
+        )}
 
         <Text color={theme.text} bold wrap="truncate-end">
           {question.question}
@@ -287,20 +291,22 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
           </Box>
         )}
 
-        <Box marginTop={gap}>
-          <Text color={theme.dim} wrap="truncate-end">
-            {typing
-              ? 'type your answer · enter send · esc skip'
-              : [
-                  hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
-                  hasOptions && canType ? 'tab type' : '',
-                  question.multiple ? 'enter toggle/confirm' : 'enter send',
-                  'esc skip',
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-          </Text>
-        </Box>
+        {!embedded && (
+          <Box marginTop={gap}>
+            <Text color={theme.dim} wrap="truncate-end">
+              {typing
+                ? 'type your answer · enter send · esc skip'
+                : [
+                    hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
+                    hasOptions && canType ? 'tab type' : '',
+                    question.multiple ? 'enter toggle/confirm' : 'enter send',
+                    'esc skip',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+            </Text>
+          </Box>
+        )}
       </Box>
     </LeftBar>
   );

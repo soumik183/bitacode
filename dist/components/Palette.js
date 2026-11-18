@@ -13,6 +13,7 @@ export const SLASH_COMMANDS = [
     { name: '/find', description: 'Search the transcript' },
     { name: '/image', description: 'Attach an image path' },
     { name: '/undo', description: 'Undo the last file change' },
+    { name: '/update', description: 'Update Bitacode from npm' },
     { name: '/quit', description: 'Exit Bitacode' },
     { name: '/exit', description: 'Alias for /quit' },
 ];

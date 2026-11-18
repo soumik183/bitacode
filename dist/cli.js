@@ -14,7 +14,8 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { App } from './App.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
-import { theme } from './theme.js';
+import { getTheme } from './theme.js';
+import { loadSettings } from './settings.js';
 import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
@@ -50,13 +51,16 @@ program
     // Enter the alternate screen and clear BEFORE Ink's first render so the
     // terminal starts from a known state. Hide the cursor while we own it.
     process.stdout.write('\x1b[?1049h');
-    process.stdout.write(`\x1b]11;${theme.bg}\x07`);
+    // App applies the saved palette after mount; the terminal canvas must use
+    // that same colour from the first frame, not the hard-coded dark default.
+    process.stdout.write(`\x1b]11;${getTheme(loadSettings().theme).bg}\x07`);
     process.stdout.write('\x1b[2J\x1b[H\x1b[?25l');
     // Default action - start the main app
     const appProps = {
         dangerouslySkipPermissions: options.dangerouslySkipPermissions || false,
         logLevel: options.logLevel,
         sessionId: options.session,
+        version: packageJson.version,
     };
     const instance = render(_jsx(ErrorBoundary, { children: _jsx(App, { ...appProps }) }), { maxFps: 60 });
     // Best-effort notice: render first, then upgrade the UI only if a newer

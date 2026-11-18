@@ -33,7 +33,7 @@ function clampText(text, width) {
  *  - typing is always allowed unless the question sets allow_free_text false
  *  - a progress line makes a multi-question ask feel bounded
  */
-export const AskPrompt = ({ questions, columns, compact = false, onRespond }) => {
+export const AskPrompt = ({ questions, columns, compact = false, embedded = false, onRespond }) => {
     const [index, setIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [cursor, setCursor] = useState(0);
@@ -190,7 +190,7 @@ export const AskPrompt = ({ questions, columns, compact = false, onRespond }) =>
     // them to a single star there while keeping the word on roomy screens.
     const showRecommendedText = cols >= 48;
     const gap = compact ? 0 : 1;
-    return (_jsx(LeftBar, { color: theme.accent, marginTop: gap, marginBottom: gap, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { children: [_jsx(Text, { color: theme.accent, bold: true, children: "Agent question" }), total > 1 && (_jsx(Text, { color: theme.dim, children: `  ${index + 1}/${total}` }))] }), _jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: question.question }), question.context && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: clampText(question.context, width) })), hasOptions && (_jsx(Box, { flexDirection: "column", marginTop: gap, children: options.map((option, optionIndex) => {
+    return (_jsx(LeftBar, { color: theme.accent, marginTop: gap, marginBottom: gap, children: _jsxs(Box, { flexDirection: "column", children: [!embedded && (_jsxs(Text, { children: [_jsx(Text, { color: theme.accent, bold: true, children: "Agent question" }), total > 1 && (_jsx(Text, { color: theme.dim, children: `  ${index + 1}/${total}` }))] })), _jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: question.question }), question.context && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: clampText(question.context, width) })), hasOptions && (_jsx(Box, { flexDirection: "column", marginTop: gap, children: options.map((option, optionIndex) => {
                         const active = !typing && optionIndex === cursor;
                         const isPicked = question.multiple ? picked.includes(optionIndex) : active;
                         const recWidth = option.recommended
@@ -200,7 +200,7 @@ export const AskPrompt = ({ questions, columns, compact = false, onRespond }) =>
                         // labels keep as much room as the terminal allows.
                         const labelMax = Math.max(1, cols - GUTTER - indent - recWidth);
                         return (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${active ? '❯' : ' '} ` }), multiple && (_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${isPicked ? CHECKED : UNCHECKED} ` })), _jsx(Text, { color: active ? theme.text : theme.muted, bold: active, children: `${optionIndex + 1}. ${clampText(option.label, labelMax)}` }), option.recommended && (_jsx(Text, { color: theme.success, children: showRecommendedText ? `  ${RECOMMENDED_TAG}` : ' ★' }))] }), active && option.description && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${' '.repeat(indent)}${clampText(option.description, Math.max(1, cols - GUTTER - indent))}` }))] }, `${option.label}-${optionIndex}`));
-                    }) })), typing && (_jsx(Box, { marginTop: gap, children: _jsxs(Text, { children: [_jsx(Text, { color: theme.accent, children: '> ' }), _jsx(Text, { color: theme.text, children: draft }), _jsx(Text, { inverse: true, children: ' ' })] }) })), _jsx(Box, { marginTop: gap, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: typing
+                    }) })), typing && (_jsx(Box, { marginTop: gap, children: _jsxs(Text, { children: [_jsx(Text, { color: theme.accent, children: '> ' }), _jsx(Text, { color: theme.text, children: draft }), _jsx(Text, { inverse: true, children: ' ' })] }) })), !embedded && (_jsx(Box, { marginTop: gap, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: typing
                             ? 'type your answer · enter send · esc skip'
                             : [
                                 hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
@@ -209,5 +209,5 @@ export const AskPrompt = ({ questions, columns, compact = false, onRespond }) =>
                                 'esc skip',
                             ]
                                 .filter(Boolean)
-                                .join(' · ') }) })] }) }));
+                                .join(' · ') }) }))] }) }));
 };

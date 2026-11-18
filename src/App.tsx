@@ -5,54 +5,15 @@ Renders the chat loop, tool call feedback, approval prompts,
 and cost/usage info. All heavy logic lives in `agentic-loop.ts`;
 this file is purely presentation + state wiring.
 
-ACTUAL UI Layout:
-┌─────────────────────────────────────────┐
-│  Bitacode wordmark (centered hero, empty conversation only)
-│  Model: Provider / model | Session: id  │  static header
-│  Debug logs: /path/to/log               │  static, if --log-level set
-│  Config file: /path/to/config           │  static, if config exists
-│  MCPs: server1, server2                 │  static, if MCPs connected
-├─────────────────────────────────────────┤
-│                                         │
-│  Archived messages (Static scrollback): │
-│  > user message                         │
-│  assistant reply text                   │
-│  ▶ tool_name: result preview...         │
-│                                         │
-├ ─ ─ ─ ─ ─ live boundary ─ ─ ─ ─ ─ ─ ─ ─ ┤
-│                                         │
-│  assistant streaming text...▍           │  live (re-renders per token)
-│                                         │
-│  ⠹ Running read_file...                 │  live, spinner + active tool
-│                                         │
-│ ╭─ Approval Required ─────────────────╮ │  live, when pending approval
-│ │  description / detail               │ │
-│ │  ○ Approve once                     │ │
-│ │  ○ Approve for session              │ │
-│ │  ○ Reject                           │ │
-│ ╰─────────────────────────────────────╯ │
-│                                         │
-│  [Error: message]                       │  live, inline thread errors
-│                                         │
-├─────────────────────────────────────────┤
-│  tokens: 1234↓ 56↑ | ctx: 12% | $0.02   │  live, updates each turn
-├─────────────────────────────────────────┤
-│  /quit  — Exit Bitacode               │  dynamic, shown when typing / to show available commands
-├─────────────────────────────────────────┤
-│  ⠹ Running read_file...                 │  dynamic, shown while loading
-├─────────────────────────────────────────┤
-│ ╭─────────────────────────────────────╮ │
-│ │ > [text input cursor              ] │ │  always visible when initialized
-│ ╰─────────────────────────────────────╯ │
-├─────────────────────────────────────────┤
-│  Session saved. Resume with:            │  one-shot, shown on /quit
-│  bitacode --session abc12345          │
-└─────────────────────────────────────────┘
-
-NOTES:
-- System prompt is NOT displayed (filtered out in replay)
-- Tool results are flat text, not collapsible
-- "Working..." spinner shown when loading but not streaming
+Layout:
+- The transcript is one measured flow: replayed messages, then the live
+  thinking block and streaming tail directly under the message that caused
+  them. No footer-pinned thought with a gap above it.
+- The composer and status line stay fixed below the scrollable viewport.
+- Pickers, settings and critical prompts use one Dialog card, centred
+  horizontally and anchored near the top of a clean canvas.
+- On exit (ctrl+c or /quit) the session is saved and a resume card is printed
+  after Ink unmounts.
 */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
@@ -61,6 +22,7 @@ import { basename } from 'node:path';
 import { spawn } from 'node:child_process';
 import { LeftBar } from './components/LeftBar.js';
 import { Palette, SLASH_COMMANDS, type PaletteItem } from './components/Palette.js';
+import { Dialog, DialogList, dialogInnerWidth, type DialogItem } from './components/Dialog.js';
 import { ApprovalPrompt } from './components/ApprovalPrompt.js';
 import { AskPrompt } from './components/AskPrompt.js';
 import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
@@ -129,8 +91,10 @@ import { renderFormattedText, normalizeTranscriptText } from './utils/format-mes
 import { formatContextWindow, listProviderModels } from './utils/provider-models.js';
 import { addToolResultView } from './utils/tool-result-view.js';
 import { itemAtViewportRow, type AddStaticFn } from './utils/transcript.js';
-import { getLeftMousePress, getWheelDelta, isClickOnThinkingBlock, isMouseReport, stripMouseReports } from './utils/mouse.js';
+import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
 import { nextThinkingExpansion } from './utils/thinking-expansion.js';
+import { formatSessionExit } from './utils/session-exit-format.js';
+import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import {
   clampScroll,
   maxScrollOffset,
@@ -154,6 +118,15 @@ interface StaticItem {
   };
   expanded?: boolean;
 }
+
+// Live conversation ids. Thinking and the streaming tail are appended to the
+// transcript flow under stable ids so the measured window can scroll them like
+// any archived message (and so a click can still toggle a live thought).
+const LIVE_THINKING_ID = '__live_thinking';
+const LIVE_STREAM_ID = '__live_stream';
+// A streaming tail longer than this is clipped; completed lines already live
+// in the transcript, so only the unfinished edge needs to be on screen.
+const MAX_LIVE_STREAM_ROWS = 14;
 
 // Keep scrollback rendering light on long sessions and low-memory devices.
 const MAX_STATIC_ITEMS = 120;
@@ -376,6 +349,17 @@ function clipToRows(text: string, maxRows: number, columns: number): string {
   return (kept.length > 0 ? kept : [lines[lines.length - 1] ?? '']).join('\n');
 }
 
+/** Wrapped display rows for a block of text at a fixed column width. */
+function wrappedRowCount(text: string, width: number): number {
+  const cols = Math.max(1, Math.floor(width));
+  return text
+    .split('\n')
+    .reduce(
+      (total, line) => total + Math.max(1, Math.ceil(Array.from(line).length / cols)),
+      0
+    );
+}
+
 // Tools that can change files or system state. In plan mode their tool_call
 // events are shown as blocked instead of being forwarded to the transcript.
 const MUTATING_TOOLS = new Set([
@@ -476,6 +460,8 @@ export interface AppProps {
   sessionId?: string;
   /** Optional one-line update hint shown in the live area when idle. */
   updateNotice?: string;
+  /** Installed package version, used by /update to fetch npm releases. */
+  version?: string;
 }
 
 // ─── Help text derived from slash commands ───
@@ -486,10 +472,21 @@ const APPROVAL_MODES: ApprovalMode[] = ['manual', 'auto', 'yolo'];
 function buildHelpText(approvalMode: ApprovalMode): string {
   // Keep the panel compact: the live area is height-capped so the composer and
   // footer can never be pushed off screen.
-  const commands = SLASH_COMMANDS.map((cmd) => cmd.name).join(' ');
+  // Wrap at 72 columns: a single long line would be clipped at 100 columns
+  // and push the key legend out of the help panel.
+  const commandLines: string[] = [];
+  let line = '  ';
+  for (const name of SLASH_COMMANDS.map((cmd) => cmd.name)) {
+    if (line.length + name.length + 1 > 72) {
+      commandLines.push(line.trimEnd());
+      line = '  ';
+    }
+    line += `${name} `;
+  }
+  commandLines.push(line.trimEnd());
   return [
     'Commands:',
-    `  ${commands}`,
+    ...commandLines,
     '  /session delete <id> - delete a saved session',
     '',
     'Keys (ctrl or alt):',
@@ -563,6 +560,7 @@ export const App: React.FC<AppProps> = ({
   logLevel,
   sessionId,
   updateNotice,
+  version,
 }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -717,6 +715,12 @@ export const App: React.FC<AppProps> = ({
   // Every component imports the same mutable `theme` palette object, so
   // retheming in place is the smallest way to apply a choice across the UI.
   Object.assign(theme, getTheme(settings.theme));
+  // Keep the terminal canvas in step with the palette so the row below the
+  // Ink frame (and any terminal clearing) uses the same background colour.
+  useEffect(() => {
+    if (!stdout) return;
+    stdout.write(`\x1b]11;${getTheme(settings.theme).bg}\x07`);
+  }, [settings.theme, stdout]);
   const [settingsIndex, setSettingsIndex] = useState<number | null>(null);
   const [thinkingText, setThinkingText] = useState('');
   // Expansion is driven by the provider: reasoning opens the block, and it
@@ -790,6 +794,10 @@ export const App: React.FC<AppProps> = ({
   const modelCacheTimeRef = useRef<Record<string, number>>({});
   // Whether the transcript on disk matches what the user has seen
   const sessionSavedRef = useRef(false);
+  // Session to advertise on exit, and a guard against saving twice on a fast
+  // ctrl+c / /quit burst.
+  const exitSessionIdRef = useRef<string | null>(null);
+  const exitingRef = useRef(false);
   const assistantMessageRef = useRef<AssistantMessageRef | null>(null);
   // Latest reasoning for the current turn; refs survive stale loop closures.
   const reasoningRef = useRef('');
@@ -1100,11 +1108,12 @@ export const App: React.FC<AppProps> = ({
     if (!stdout) return;
     return () => {
       stdout.write('\x1b[?1006l\x1b[?1000l');
-      stdout.write('\x1b]111\x07');
       stdout.write('\x1b[?1049l');
-      if (sessionSavedRef.current) {
-        stdout.write('\x1b[2m  session saved\x1b[0m\n');
-      }
+      // The card is painted while the themed terminal background is still set;
+      // reset it afterwards so the user's own colours come back.
+      const exitId = exitSessionIdRef.current;
+      if (exitId) stdout.write(`${formatSessionExit(exitId, theme)}\n`);
+      stdout.write('\x1b]111\x07');
     };
   }, [stdout]);
 
@@ -1307,31 +1316,36 @@ export const App: React.FC<AppProps> = ({
     ? 'yolo'
     : settings.approvalMode;
 
-  const settingItems = [
+  // The display order must stay index-aligned with SETTING_KEYS, because
+  // toggleSetting() indexes that table by the highlighted row.
+  const settingItems: DialogItem[] = [
     {
       id: 'animations',
       label: 'Animations',
-      description: settings.animations ? 'on' : 'off',
+      section: 'Interface',
+      meta: settings.animations ? 'on' : 'off',
     },
     {
       id: 'mouseClicks',
       label: 'Mouse click thinking',
-      description: settings.mouseClicks ? 'on' : 'off',
+      meta: settings.mouseClicks ? 'on' : 'off',
     },
     {
       id: 'approvalMode',
       label: 'Approval mode',
-      description: effectiveApprovalMode,
+      section: 'Agent',
+      meta: effectiveApprovalMode,
     },
     {
       id: 'theme',
       label: 'Theme',
-      description: settings.theme ?? 'dark',
+      section: 'Appearance',
+      meta: settings.theme ?? 'black',
     },
     {
       id: 'statusLine',
       label: 'Status line',
-      description: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length} shown`,
+      meta: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length}`,
     },
   ];
 
@@ -1349,7 +1363,7 @@ export const App: React.FC<AppProps> = ({
         return;
       }
       if (key === 'theme') {
-        const current = (THEME_NAMES as readonly string[]).indexOf(settings.theme ?? 'dark');
+        const current = (THEME_NAMES as readonly string[]).indexOf(settings.theme ?? 'black');
         const nextName = THEME_NAMES[(current + 1) % THEME_NAMES.length]!;
         const next = { ...settings, theme: nextName };
         setSettings(next);
@@ -1371,10 +1385,11 @@ export const App: React.FC<AppProps> = ({
     [settings, showToast]
   );
 
-  const statusLineItems: PaletteItem[] = STATUS_LINE_ITEMS.map((id) => ({
+  const statusLineItems: DialogItem[] = STATUS_LINE_ITEMS.map((id) => ({
     id,
     label: id,
-    description: (settings.statusLine ?? STATUS_LINE_ITEMS).includes(id) ? 'on' : 'off',
+    section: 'Segments',
+    meta: (settings.statusLine ?? STATUS_LINE_ITEMS).includes(id) ? 'shown' : 'hidden',
   }));
 
   const persistActiveSelection = useCallback(
@@ -1876,6 +1891,52 @@ export const App: React.FC<AppProps> = ({
     }
   }, [session?.id, addStatic, showToast]);
 
+  /** Persist the live session, then exit with its resume id on screen. */
+  const exitWithSave = useCallback(() => {
+    if (exitingRef.current) return;
+    exitingRef.current = true;
+    if (!session) {
+      exit();
+      return;
+    }
+    const finished: Session = {
+      ...session,
+      completionMessages,
+      todos: getTodosForSession(session.id),
+      title: generateTitle(completionMessages),
+      variant: variantId,
+      subAgentActivities,
+    };
+    void saveSession(finished)
+      .catch(() => undefined)
+      .finally(() => {
+        exitSessionIdRef.current = finished.id;
+        sessionSavedRef.current = true;
+        exit();
+      });
+  }, [session, completionMessages, variantId, subAgentActivities, exit]);
+
+  /** Check npm and install the newest release without leaving the chat. */
+  const handleUpdate = useCallback(async (local = false) => {
+    setError(null);
+    const info = await checkForUpdate(version ?? '', { force: true });
+    if (!info) {
+      setError('Could not reach npm for an update check. Try again later.');
+      return;
+    }
+    if (!info.updateAvailable) {
+      showToast(`Already up to date (v${info.current})`);
+      return;
+    }
+    showToast(`Installing v${info.latest} from npm…`, 0);
+    const result = await installUpdate({ version: info.latest, global: !local });
+    if (result.success) {
+      showToast(`Updated to v${info.latest} — restart Bitacode to use it`, 0);
+    } else {
+      setError(result.message);
+    }
+  }, [version, showToast]);
+
   const handleSlashCommand = useCallback(async (cmd: string, raw = cmd): Promise<boolean> => {
     const parts = raw.trim().split(/\s+/);
     const command = cmd.toLowerCase();
@@ -1883,33 +1944,13 @@ export const App: React.FC<AppProps> = ({
     switch (command) {
       case '/quit':
       case '/exit':
-        // No active session: exit immediately. Otherwise: save before exit.
-        if (!session) {
-          exit();
-          return true;
-        }
-
-        try {
-          const nextSession: Session = {
-            ...session,
-            completionMessages,
-            todos: getTodosForSession(session.id),
-            title: generateTitle(completionMessages),
-            variant: variantId,
-            subAgentActivities,
-          };
-
-          await saveSession(nextSession);
-          setSession(nextSession);
-          setError(null);
-          sessionSavedRef.current = true;
-          exit();
-        } catch (err: any) {
-          setError(`Failed to save session before exit: ${err.message}`);
-        }
+        exitWithSave();
         return true;
       case '/help':
         setHelpMessage(buildHelpText(effectiveApprovalMode));
+        return true;
+      case '/update':
+        void handleUpdate(parts[1]?.toLowerCase() === '--local');
         return true;
       case '/new':
         void startNewSession();
@@ -2024,6 +2065,8 @@ export const App: React.FC<AppProps> = ({
   }, [
     config,
     exit,
+    exitWithSave,
+    handleUpdate,
     session,
     completionMessages,
     allModelItems,
@@ -2320,16 +2363,115 @@ export const App: React.FC<AppProps> = ({
     [handleSubmit]
   );
 
+  // ── Layout and the live conversation tail ────────────────────────────
+  // Thinking and the streaming tail are conversation content, not a footer
+  // panel. They are appended to the measured transcript flow so they render
+  // directly after the message that produced them, instead of being pinned to
+  // the bottom of the screen with an empty gap above.
+  const layout = resolveLayout(columns, rows);
+  const { paletteWindow, visibleTodos, gutter, dense } = layout;
+  const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
+
+  // Provider-driven only: the block appears when the model actually streams
+  // reasoning, never just because a request is in flight.
+  const hasThinkingBlock = initialized && !thinkingArchived && thinkingText.length > 0;
+  const thinkingActive = thinkingStartedAt !== null && !thinkingArchived;
+  const thinkingRows = hasThinkingBlock
+    ? thinkingBlockHeight(thinkingText, thinkingExpanded, columns, rows)
+    : 0;
+  const todoRows = todoPanelRows(todos, visibleTodos);
+  const helpRows = helpMessage ? helpMessage.split('\n').length + 3 : 0;
+  const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
+  // Panels that stay under the transcript (todos, help, child agents) reserve
+  // their own rows; thinking and streaming live inside the transcript now.
+  const area = splitLiveArea(frameHeight, {
+    todos: todoRows,
+    thinking: 0,
+    help: helpRows,
+    streaming: subAgentRows,
+  });
+  const maxStreamRows = Math.max(2, Math.min(MAX_LIVE_STREAM_ROWS, area.transcriptRows));
+  const streamingIsDiff = isStreaming && looksLikeDiff(streamingText);
+  const liveStreamWidth = Math.max(1, columns - gutter * 2);
+  const liveStreamTextRows = wrappedRowCount(
+    clipToRows(streamingText, maxStreamRows, liveStreamWidth),
+    liveStreamWidth
+  );
+  const liveStreamRows = !isStreaming
+    ? 0
+    : streamingIsDiff
+      ? Math.min(maxStreamRows, 10) + 4
+      : liveStreamTextRows + (dense ? 0 : 1);
+  const liveStreamNode = !isStreaming ? null : streamingIsDiff ? (
+    <DiffView
+      header="Streaming diff"
+      diff={clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns)}
+      maxRows={Math.max(2, maxStreamRows - 3)}
+    />
+  ) : (
+    <Box paddingX={gutter} paddingBottom={dense ? 0 : 1}>
+      <Text wrap="truncate-end">
+        {renderFormattedText(
+          clipToRows(streamingText, maxStreamRows, liveStreamWidth),
+          liveStreamWidth
+        )}
+        <Text dimColor>▍</Text>
+      </Text>
+    </Box>
+  );
+
+  // Live rows join the flow only for the normal transcript. /find keeps its
+  // result set to saved messages so a moving stream cannot change the matches.
+  const liveItems: StaticItem[] = [];
+  const liveRowMap = new Map<string, number>();
+  if (!searchQuery) {
+    if (hasThinkingBlock) {
+      liveItems.push({
+        id: LIVE_THINKING_ID,
+        node: (
+          <ThinkingBlock
+            text={thinkingText}
+            expanded={thinkingExpanded}
+            active={thinkingActive}
+            animate={settings.animations}
+            frame={spinnerFrame}
+            columns={columns}
+            rows={rows}
+            elapsedMs={thinkingElapsedMs}
+          />
+        ),
+      });
+      liveRowMap.set(LIVE_THINKING_ID, Math.max(1, thinkingRows));
+    }
+    if (isStreaming && liveStreamNode) {
+      liveItems.push({ id: LIVE_STREAM_ID, node: liveStreamNode });
+      liveRowMap.set(LIVE_STREAM_ID, Math.max(1, liveStreamRows));
+    }
+  }
+
   // /find filters the scrollback view without deleting history.
   const searchMatches = searchQuery
     ? staticItems.filter((item) =>
         nodeText(item.node).toLowerCase().includes(searchQuery.toLowerCase())
       )
     : staticItems;
-  const transcriptRows = searchMatches.reduce(
-    (total, item) => total + (measuredHeights[item.id] ?? fallbackItemRows(item.node)),
-    0
-  );
+  // Rows for an item: live rows use their estimate (their content changes every
+  // frame, so a cached measurement would lag a growing stream), while archived
+  // items use the height Ink measured for them.
+  const sizedItems = searchMatches.map((item) => ({
+    item,
+    rows: liveRowMap.get(item.id) ?? measuredHeights[item.id] ?? fallbackItemRows(item.node),
+  }));
+  // The transcript is one flow: archived messages followed by the live tail.
+  const liveSized = liveItems.map((item) => ({
+    id: item.id,
+    rows: liveRowMap.get(item.id) ?? fallbackItemRows(item.node),
+  }));
+  const flowSized = [
+    ...sizedItems.map((entry) => ({ id: entry.item.id, rows: entry.rows })),
+    ...liveSized,
+  ];
+  const transcriptRows = flowSized.reduce((total, entry) => total + entry.rows, 0);
   const unmeasuredItems = staticItems.filter((item) => measuredHeights[item.id] === undefined);
   const restoringTranscript =
     measuringTranscript && staticItems.length > 0 && unmeasuredItems.length > 0;
@@ -2345,22 +2487,18 @@ export const App: React.FC<AppProps> = ({
   // over-scrolls and snaps when used to scroll the whole view, so the window is
   // sliced from measured rows; a margin is used only to clip one partial item.
   const rowWindow = visibleRowWindow(transcriptRows, windowRows, effectiveUserScroll);
-  // Map the row window onto measured items. Items below the viewport are
-  // skipped entirely, so a long session stays cheap to render.
-  const sizedItems = searchMatches.map((item) => ({
-    item,
-    rows: measuredHeights[item.id] ?? fallbackItemRows(item.node),
-  }));
-  const windowSlice = sliceItemsToWindow(
-    sizedItems.map((entry) => ({ id: entry.item.id, rows: entry.rows })),
-    rowWindow.first,
-    rowWindow.last
-  );
-  const visibleIds = new Set(windowSlice.items.map((entry) => entry.id));
-  const visibleItems = searchMatches.filter((item) => visibleIds.has(item.id));
-  const visibleRowItems = visibleItems.map((item) => ({
-    id: item.id,
-    rows: measuredHeights[item.id] ?? fallbackItemRows(item.node),
+  // Map the row window onto items. Items below the viewport are skipped
+  // entirely, so a long session stays cheap to render.
+  const flowById = new Map<string, StaticItem>();
+  for (const item of staticItems) flowById.set(item.id, item);
+  for (const item of liveItems) flowById.set(item.id, item);
+  const windowSlice = sliceItemsToWindow(flowSized, rowWindow.first, rowWindow.last);
+  const visibleItems = windowSlice.items
+    .map((entry) => flowById.get(entry.id))
+    .filter((item): item is StaticItem => Boolean(item));
+  const visibleRowItems = windowSlice.items.map((entry) => ({
+    id: entry.id,
+    rows: entry.rows,
   }));
   const trimTop = windowSlice.trimTop;
 
@@ -2404,7 +2542,7 @@ export const App: React.FC<AppProps> = ({
 
   useInput((input, key) => {
     if (key.ctrl && input === 'c') {
-      exit();
+      exitWithSave();
       return;
     }
 
@@ -2567,13 +2705,13 @@ export const App: React.FC<AppProps> = ({
                 ]
               : visibleRowItems;
           const clickedId = layoutHit?.id ?? itemAtViewportRow(hitItems, clickRow, TOP_PAD, 0);
+          if (clickedId === LIVE_THINKING_ID) {
+            thinkingPinnedRef.current = true;
+            setThinkingExpanded((expanded) => !expanded);
+            return;
+          }
           if (clickedId) toggleStaticItem(clickedId);
           return;
-        }
-        const blockHeight = thinkingBlockHeight(thinkingText, thinkingExpanded, columns, rows);
-        if (isClickOnThinkingBlock(press.y, rows, blockHeight)) {
-          thinkingPinnedRef.current = true;
-          setThinkingExpanded((expanded) => !expanded);
         }
       }
       return;
@@ -2796,53 +2934,222 @@ export const App: React.FC<AppProps> = ({
     rows >= 8 &&
     staticItems.length === 0 &&
     !hasConversationMessages(completionMessages);
-  // Responsive breakpoints live in utils/layout.ts so every panel agrees.
-  const layout = resolveLayout(columns, rows);
-  const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
-  const { paletteWindow, visibleTodos, gutter, dense } = layout;
   const inputFocused =
     initialized && picker === null && settingsIndex === null && keyPrompt === null;
 
-  // Provider-driven only: the block appears when the model actually streams
-  // reasoning, never just because a request is in flight. A busy agent with no
-  // reasoning used to render an empty "Thinking..." row that implied the model
-  // was thinking when the provider had sent nothing.
-  const hasThinkingBlock = initialized && !thinkingArchived && thinkingText.length > 0;
-  const thinkingActive = thinkingStartedAt !== null && !thinkingArchived;
-  // Ask the panel for its exact height instead of re-deriving it here; the two
-  // drifted apart (the "more" markers add rows) and squeezed the composer.
-  const todoRows = todoPanelRows(todos, visibleTodos);
-  // Same function the click hit-test uses, so layout and clicks cannot drift.
-  const thinkingRows = hasThinkingBlock
-    ? thinkingBlockHeight(thinkingText, thinkingExpanded, columns, rows)
-    : 0;
-  const helpRows = helpMessage ? helpMessage.split('\n').length + 3 : 0;
-  // Budget the live area from the frame, so panels appearing or going away
-  // (todos added, todos cleared) automatically hand space back to the
-  // transcript instead of squeezing it or pushing the composer off-screen.
-  const streamReserve = isStreaming ? Math.min(rows, 10) : 0;
-  const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
-  const area = splitLiveArea(frameHeight, {
-    todos: todoRows,
-    thinking: thinkingRows,
-    help: helpRows,
-    streaming: streamReserve + subAgentRows,
-  });
-  const maxStreamRows = Math.max(1, area.transcriptRows);
+  // One dialog owns the screen for any picker or prompt. The card is centred
+  // horizontally and anchored to the upper part of the page, so it reads as a
+  // floating window instead of a footer that happens to be above the composer.
+  const dialogActive =
+    picker !== null ||
+    settingsIndex !== null ||
+    keyPrompt !== null ||
+    pendingApproval !== null ||
+    pendingAsk !== null;
+  const dialogInner = dialogInnerWidth(columns);
+  const compactDialog = rows <= 10;
+  const approvalRequest = pendingApproval
+    ? (() => {
+        const request = pendingApproval.request;
+        const path = extractPathFromArgs(lastToolCallRef.current?.args);
+        if (!path || request.detail?.includes(path)) return request;
+        return {
+          ...request,
+          detail: [request.detail, `File: ${path}`].filter(Boolean).join('\n'),
+        };
+      })()
+    : null;
+  const modelEmptyMessage = modelsLoading
+    ? `Loading models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
+    : modelSearch.trim()
+      ? `No models match "${modelSearch}".`
+      : modelNotice ?? 'No models available.';
+
+  const dialog: React.ReactNode = pendingApproval && approvalRequest ? (
+    <Dialog
+      title="Approval required"
+      badge={pendingApproval.request.type.replace(/_/g, ' ')}
+      hint="↑↓ move · enter confirm · 1/2/3 pick · esc reject"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <ApprovalPrompt
+        request={approvalRequest}
+        columns={compactDialog ? columns : dialogInner + 2}
+        compact={dense || compactDialog}
+        rows={rows}
+        embedded
+        onRespond={(response) => {
+          pendingApproval.resolve(response);
+          setPendingApproval(null);
+        }}
+      />
+    </Dialog>
+  ) : pendingAsk ? (
+    <Dialog
+      title="Agent question"
+      badge={pendingAsk.request.questions.length > 1
+        ? `${pendingAsk.request.questions.length} questions`
+        : undefined}
+      hint="↑↓ pick · tab to type · enter send · esc skip"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <AskPrompt
+        questions={pendingAsk.request.questions}
+        columns={compactDialog ? columns : dialogInner + 4}
+        compact={dense || compactDialog}
+        embedded
+        onRespond={(response) => {
+          pendingAsk.resolve(response);
+          setPendingAsk(null);
+        }}
+      />
+    </Dialog>
+  ) : keyPrompt ? (
+    <Dialog
+      title="API key"
+      badge={keyPrompt.providerName}
+      hint={keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel'}
+      columns={columns}
+      compact={compactDialog}
+    >
+      <ApiKeyPrompt
+        providerName={keyPrompt.providerName}
+        path={keyPrompt.path}
+        error={keyPrompt.error}
+        busy={keyPrompt.busy}
+        columns={compactDialog ? columns : dialogInner + 4}
+        compact={dense || compactDialog}
+        embedded
+        onSubmit={(value) => { void handleApiKeySubmit(value); }}
+      />
+    </Dialog>
+  ) : settingsIndex !== null ? (
+    <Dialog
+      title="Settings"
+      badge={`${settingsIndex + 1}/${settingItems.length}`}
+      hint="↑↓ move · enter toggle · esc close"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <DialogList items={settingItems} selected={settingsIndex} maxVisible={paletteWindow} compact={compactDialog} />
+    </Dialog>
+  ) : picker === 'model' ? (
+    <Dialog
+      title="Select model"
+      badge={modelProvider ? modelProvider.name : undefined}
+      hint="type to search · ↑↓ move · enter use · esc cancel"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <Box flexDirection="row" overflow="hidden">
+        <Text color={theme.dim}>search  </Text>
+        <Box flexShrink={1} minWidth={1}>
+          <Text color={theme.text} wrap="truncate-end">
+            {modelSearch}
+            <Text inverse>{' '}</Text>
+          </Text>
+        </Box>
+        <Text color={theme.dim}>{`  ${modelItems.length}`}</Text>
+      </Box>
+      {(modelsLoading || modelNotice) && (
+        <Text color={theme.dim} wrap="truncate-end">
+          {modelsLoading
+            ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
+            : modelNotice}
+        </Text>
+      )}
+      <DialogList
+        items={modelItems}
+        selected={selectedModelIndex}
+        maxVisible={paletteWindow}
+        empty={modelEmptyMessage}
+        compact={compactDialog}
+      />
+    </Dialog>
+  ) : picker === 'provider' ? (
+    <Dialog
+      title="Select provider"
+      badge={`${providerItems.length} available`}
+      hint="↑↓ move · enter use · esc cancel"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <DialogList
+        items={providerItems}
+        selected={clampIndex(pickerIndex, providerItems.length)}
+        maxVisible={paletteWindow}
+        compact={compactDialog}
+      />
+    </Dialog>
+  ) : picker === 'session' ? (
+    <Dialog
+      title={pendingSessionDelete ? 'Delete session?' : 'Select session'}
+      badge={pendingSessionDelete?.label}
+      hint={pendingSessionDelete
+        ? 'y delete permanently · n cancel'
+        : '↑↓ move · enter resume · d delete · esc close'}
+      columns={columns}
+      compact={compactDialog}
+    >
+      <DialogList
+        items={sessionItems}
+        selected={clampIndex(pickerIndex, sessionItems.length)}
+        maxVisible={paletteWindow}
+        empty={sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.'}
+        compact={compactDialog}
+      />
+    </Dialog>
+  ) : picker === 'variant' ? (
+    <Dialog
+      title="Reasoning variant"
+      badge={`${variantItems.length} options`}
+      hint="↑↓ move · enter use · esc cancel"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <DialogList
+        items={variantItems}
+        selected={clampIndex(pickerIndex, variantItems.length)}
+        maxVisible={paletteWindow}
+        compact={compactDialog}
+      />
+    </Dialog>
+  ) : picker === 'statusLine' ? (
+    <Dialog
+      title="Status line"
+      badge={`${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length} shown`}
+      hint="↑↓ move · enter toggle · esc back"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <DialogList
+        items={statusLineItems}
+        selected={clampIndex(pickerIndex, statusLineItems.length)}
+        maxVisible={paletteWindow}
+        compact={compactDialog}
+      />
+    </Dialog>
+  ) : null;
 
   // Rail geometry. `viewportRows` is measured from the real layout, so the
   // thumb lines up with what is actually on screen.
   const scrollbar = scrollbarGeometry(transcriptRows, viewportRows, effectiveUserScroll);
   const railLines = restoringTranscript ? [] : scrollbarLines(scrollbar);
 
-  // A critical modal owns the full frame so all options stay visible on tiny
-  // terminals. This can trigger Ink's full-repaint path while navigating,
-  // which is an acceptable tradeoff for a modal that is not streaming.
+  // A dialog owns the full frame so its card floats on a clean canvas. This
+  // can trigger Ink's full-repaint path while navigating, which is acceptable
+  // for a modal that is not streaming.
   return (
-    <Box flexDirection="column" height={hasCriticalPrompt ? rows : frameHeight}>
+    <Box
+      flexDirection="column"
+      height={dialogActive ? rows : frameHeight}
+      backgroundColor={theme.bg}
+    >
       {/* Scrollable transcript viewport; the input and footer below stay fixed.
-          A modal prompt removes it entirely so the prompt keeps every row. */}
-      {!hasCriticalPrompt && (
+          A dialog removes it entirely so the card floats on a clean canvas. */}
+      {!dialogActive && (
       <Box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0} minHeight={1}>
         <Box
           ref={viewportRef}
@@ -2932,18 +3239,20 @@ export const App: React.FC<AppProps> = ({
       </Box>
       )}
 
-      {/* Live area: only these few rows re-render while typing. The horizontal
-          rule that used to sit here is gone; the composer's own accent bar is
-          the only border, so there is no double edge between chat and input. */}
-      {/* A modal replaces the composer, so it sits bottom-aligned in the full-height live region. */}
+      {/* Live area: only these rows re-render while typing. A dialog owns the
+          whole area and floats centred on the canvas. On short terminals it
+          top-aligns, otherwise centring would clip the title off the top. */}
       <Box
         flexDirection="column"
-        flexGrow={hasCriticalPrompt ? 1 : 0}
+        flexGrow={dialogActive ? 1 : 0}
         flexShrink={1}
         minHeight={0}
         overflow="hidden"
-        justifyContent={hasCriticalPrompt ? 'flex-end' : undefined}
+        alignItems={dialogActive ? 'center' : undefined}
+        justifyContent={dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined}
       >
+        {dialogActive ? dialog : (
+          <>
         {showUpdateNotice && (
           <Box height={1} flexShrink={0} paddingX={dense ? 0 : gutter} overflow="hidden">
             <Text wrap="truncate-end">
@@ -2994,37 +3303,6 @@ export const App: React.FC<AppProps> = ({
           <SubAgentActivity activities={subAgentActivities} columns={columns} />
         )}
 
-        {hasThinkingBlock && !hasCriticalPrompt && (
-          <ThinkingBlock
-            text={thinkingText}
-            expanded={thinkingExpanded}
-            active={thinkingActive}
-            animate={settings.animations}
-            frame={spinnerFrame}
-            columns={columns}
-            rows={rows}
-            elapsedMs={thinkingElapsedMs}
-          />
-        )}
-
-        {isStreaming && !hasCriticalPrompt && looksLikeDiff(streamingText) ? (
-          <DiffView
-            header="Streaming diff"
-            diff={clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns)}
-            maxRows={Math.max(2, maxStreamRows - 3)}
-          />
-        ) : isStreaming && !hasCriticalPrompt ? (
-          <Box paddingX={gutter} paddingBottom={dense ? 0 : 1}>
-            <Text wrap="truncate-end">
-              {renderFormattedText(
-                clipToRows(streamingText, maxStreamRows, columns - gutter * 2),
-                columns - gutter * 2
-              )}
-              <Text dimColor>▍</Text>
-            </Text>
-          </Box>
-        ) : null}
-
         {!hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (
           <Box key={`thread-error-${threadError.id}`} paddingX={2}>
             <LeftBar color={theme.muted} marginBottom={1}>
@@ -3033,130 +3311,7 @@ export const App: React.FC<AppProps> = ({
           </Box>
         ))}
 
-        {/* Agent question. Takes over the composer area so the user answers
-            here instead of typing into the normal prompt. */}
-        {pendingAsk && !pendingApproval && (
-          <AskPrompt
-            questions={pendingAsk.request.questions}
-            columns={columns}
-            compact={dense || rows <= 10}
-            onRespond={(response) => {
-              pendingAsk.resolve(response);
-              setPendingAsk(null);
-            }}
-          />
-        )}
-
-        {/* Approval prompt. Enrich the detail with the target file path when the
-            most recent tool call carries one (manual review before writing). */}
-        {pendingApproval && (
-          <ApprovalPrompt
-            request={(() => {
-              const request = pendingApproval.request;
-              const path = extractPathFromArgs(lastToolCallRef.current?.args);
-              if (!path || request.detail?.includes(path)) return request;
-              return {
-                ...request,
-                detail: [request.detail, `File: ${path}`].filter(Boolean).join('\n'),
-              };
-            })()}
-            columns={columns}
-            compact={dense || rows <= 10}
-            rows={rows}
-            onRespond={(response) => {
-              pendingApproval.resolve(response);
-              setPendingApproval(null);
-            }}
-          />
-        )}
-
-        {/* Pickers and slash-command palette */}
-        {keyPrompt && (
-          <ApiKeyPrompt
-            providerName={keyPrompt.providerName}
-            path={keyPrompt.path}
-            error={keyPrompt.error}
-            busy={keyPrompt.busy}
-            columns={columns}
-            compact={dense || rows <= 10}
-            onSubmit={(value) => { void handleApiKeySubmit(value); }}
-          />
-        )}
-        {picker === 'model' && (
-          <Box flexDirection="column">
-            <Box paddingX={2}>
-              <Text color={theme.dim}>Search </Text>
-              <Text color={theme.text}>{modelSearch}</Text>
-              <Text inverse>{' '}</Text>
-            </Box>
-            {modelItems.length > 0 ? (
-              <>
-                {(modelsLoading || modelNotice) && (
-                  <Box paddingX={2}>
-                    <Text color={theme.dim} wrap="truncate-end">
-                      {modelsLoading
-                        ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
-                        : modelNotice}
-                    </Text>
-                  </Box>
-                )}
-                <Palette
-                  title={modelProvider ? `Select model · ${modelProvider.name}` : 'Select model'}
-                  items={modelItems}
-                  selected={selectedModelIndex}
-                  maxVisible={paletteWindow}
-                  hint="type to search · ↑↓ select · enter use · esc cancel"
-                />
-              </>
-            ) : (
-              <Box paddingX={2}>
-                <Text color={modelsLoading ? theme.dim : theme.error}>
-                  {modelsLoading
-                    ? `Loading models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
-                    : modelSearch.trim()
-                      ? `No models match "${modelSearch}".`
-                      : modelNotice ?? 'No models available.'}
-                </Text>
-              </Box>
-            )}
-          </Box>
-        )}
-        {picker === 'provider' && (
-          <Palette title="Select provider" items={providerItems} selected={clampIndex(pickerIndex, providerItems.length)} maxVisible={paletteWindow} hint="↑↓ select · enter use · esc cancel" />
-        )}
-        {picker === 'session' && (
-          sessionItems.length > 0 ? (
-            <Palette
-              title={
-                pendingSessionDelete
-                  ? `Delete session "${pendingSessionDelete.label}"?`
-                  : 'Select session'
-              }
-              items={sessionItems}
-              selected={clampIndex(pickerIndex, sessionItems.length)}
-              maxVisible={paletteWindow}
-              hint={
-                pendingSessionDelete
-                  ? 'y delete permanently · n cancel'
-                  : '↑↓ select · enter resume · d delete · esc close'
-              }
-            />
-          ) : (
-            <Box paddingX={2}>
-              <Text color={sessionsLoading ? theme.dim : theme.muted}>
-                {sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.'}
-              </Text>
-            </Box>
-          )
-        )}
-        {picker === 'variant' && (
-          <Palette title="Select variant" items={variantItems} selected={clampIndex(pickerIndex, variantItems.length)} maxVisible={paletteWindow} hint="↑↓ select · enter use · esc cancel" />
-        )}
-        {picker === 'statusLine' && (
-          <Palette title="Status line segments" items={statusLineItems} selected={clampIndex(pickerIndex, statusLineItems.length)} maxVisible={paletteWindow} hint="↑↓ select · enter toggle · esc back" />
-        )}
-        {settingsIndex !== null && (
-          <Palette title="Settings" items={settingItems} selected={settingsIndex} maxVisible={paletteWindow} hint="↑↓ select · enter toggle · esc close" />
+          </>
         )}
         {!picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (
           <Palette items={commandItems} selected={commandIndex} maxVisible={paletteWindow} />
@@ -3167,7 +3322,7 @@ export const App: React.FC<AppProps> = ({
           left. The old full box drew a bright outline around every keystroke;
           a single edge keeps the focus cue without boxing the text in.
           The gaps above and inside give the input room to breathe. */}
-      {initialized && !pendingApproval && !pendingAsk && !keyPrompt && (
+      {initialized && !dialogActive && (
         <Box flexDirection="column" alignItems="center" flexShrink={0}>
           <Box
             flexDirection="row"
@@ -3207,9 +3362,9 @@ export const App: React.FC<AppProps> = ({
         </Box>
       )}
 
-      {/* Status: folder · model · variant · context — hidden while a modal
-          prompt owns the screen so the prompt keeps every available row. */}
-      {initialized && !hasCriticalPrompt && (
+      {/* Status: folder · model · variant · context — hidden while a dialog
+          owns the screen so the card keeps every available row. */}
+      {initialized && !dialogActive && (
         <UsageDisplay
           usage={lastUsage ?? null}
           totalCost={totalCost}

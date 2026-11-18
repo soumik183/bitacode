@@ -13,6 +13,8 @@ export interface ApprovalPromptProps {
   compact?: boolean;
   /** Rows the modal may use. App passes the full terminal height. */
   rows?: number;
+  /** Rendered inside a Dialog that already supplies the title and hint. */
+  embedded?: boolean;
   onRespond: (response: ApprovalResponse) => void;
 }
 
@@ -36,7 +38,7 @@ function fit(text: string, max: number): string {
  * the 1/2/3 and Esc shortcuts. App ignores every key while approval is pending.
  */
 export const ApprovalPrompt: React.FC<ApprovalPromptProps> = ({
-  request, columns = 80, compact = false, rows = 24, onRespond,
+  request, columns = 80, compact = false, rows = 24, embedded = false, onRespond,
 }) => {
   // A digit and Enter can arrive in one burst; settle at most once per prompt.
   const settledRef = useRef(false);
@@ -51,7 +53,7 @@ export const ApprovalPrompt: React.FC<ApprovalPromptProps> = ({
   const showNumbers = cols >= 28;
   // LeftBar gutter (2) + Select pointer/padding (2) + the "1. " number prefix.
   const labelWidth = Math.max(1, cols - 4 - (showNumbers ? 3 : 0));
-  const showHint = height >= 5;
+  const showHint = !embedded && height >= 5;
   // Header + three options + hint are fixed; the remainder is the detail budget.
   const detailRows = Math.max(
     0,
@@ -90,9 +92,11 @@ export const ApprovalPrompt: React.FC<ApprovalPromptProps> = ({
   return (
     <LeftBar color={theme.accent}>
       <Box flexDirection="column">
-        <Text color={theme.text} bold wrap="truncate-end">
-          {showHint ? 'Approval Required' : `Approval Required · ${hint}`}
-        </Text>
+        {!embedded && (
+          <Text color={theme.text} bold wrap="truncate-end">
+            {showHint ? 'Approval Required' : `Approval Required · ${hint}`}
+          </Text>
+        )}
         {shownDetail.map((line, index) => (
           <Text key={index} color={index === 0 ? theme.muted : theme.dim} wrap="truncate-end">
             {line}

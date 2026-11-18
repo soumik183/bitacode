@@ -161,7 +161,7 @@ creates a GitHub Release. Pushing a `v*` tag does the same via `release.yml`
 (with a duplicate-publish guard).
 
 The repo needs one secret: **`NPM_TOKEN`** — an npm token with publish rights
-to the `bitacode-cli` org. Manual runs of **Actions → Publish** support a
+to the `bitacode` package. Manual runs of **Actions → Publish** support a
 `dry_run` that builds and packs without publishing.
 
 ### From your terminal

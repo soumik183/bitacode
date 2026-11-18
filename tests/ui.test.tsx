@@ -8,7 +8,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { render } from 'ink-testing-library';
 import { render as renderInk } from 'ink';
-import { settle, waitForFrame } from './helpers/wait.js';
+import { settle, waitFor, waitForFrame } from './helpers/wait.js';
 import { App, type AppProps } from '../src/App.js';
 import { getUserRuntimeConfigPath, readConfig } from '../src/config.js';
 import { getAllProviders } from '../src/providers/index.js';
@@ -28,6 +28,7 @@ import { PromptInput } from '../src/components/PromptInput.js';
 import { AskPrompt } from '../src/components/AskPrompt.js';
 import { ApprovalPrompt } from '../src/components/ApprovalPrompt.js';
 import { ApiKeyPrompt } from '../src/components/ApiKeyPrompt.js';
+import { theme, themes } from '../src/theme.js';
 import { ErrorBoundary } from '../src/components/ErrorBoundary.js';
 import { maxScrollOffset, visibleRowWindow, sliceItemsToWindow } from '../src/utils/scroll.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from '../src/utils/scrollbar.js';
@@ -954,6 +955,34 @@ test('settings palette shows approval mode and cycles manual -> auto -> yolo', a
   }
 });
 
+test('theme selection repaints the full UI palette', async () => {
+  const app = renderApp();
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    assert.equal(theme.bg, themes.black.bg, 'new installs start on black');
+
+    app.stdin.write('\x1c'); // ctrl+, opens settings
+    await waitForFrameText(app, 'Theme');
+    // Rows: 0 animations, 1 mouse, 2 approval, 3 theme.
+    for (let i = 0; i < 3; i++) {
+      await settle(80);
+      app.stdin.write('\x1b[B');
+    }
+    assert.ok(await waitForFrameWhere(app, (f) => f.includes('› Theme'), 2000), 'theme row selected');
+    for (let attempt = 0; attempt < 5; attempt++) {
+      app.stdin.write('\r');
+      await settle(150);
+      if (theme.bg === themes.sand.bg) break;
+    }
+    await waitFor(() => theme.bg === themes.sand.bg, 2000, 'theme palette did not update');
+    assert.equal(theme.bg, themes.sand.bg, 'background colour follows the choice');
+    assert.equal(theme.accent, themes.sand.accent, 'accents follow the choice too');
+  } finally {
+    app.cleanupAll();
+    Object.assign(theme, themes.black);
+  }
+});
+
 test('alt+h toggles help and ctrl+k clears the prompt', async () => {
   const app = renderApp();
   try {
@@ -1336,6 +1365,45 @@ test('rapid zoom bursts re-render at the new size without stale rows', async () 
   }
 });
 
+test('dialog stays centred and inside the frame across zoom bursts', async () => {
+  const app = renderAppSized(100, 24);
+  try {
+    await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+    app.stdin.write('\x1c'); // ctrl+, opens settings
+    await waitForFrame(app.stdout.frameContaining.bind(app.stdout, 'Settings'), (f) => f.length > 0);
+
+    for (const [columns, rows] of [
+      [100, 24],
+      [60, 16],
+      [40, 10],
+      [20, 6],
+      [100, 24],
+    ] as const) {
+      const from = app.stdout.frames.length;
+      app.resize(columns, rows);
+      const frame = await waitForFrameWhere(
+        app,
+        (f) => f.includes('Settings') && f.split('\n').length <= rows && lineWidth(f) <= columns,
+        3000,
+        from
+      );
+      assert.ok(frame, `dialog survives ${columns}x${rows}`);
+      assert.ok(frame.includes('Settings'), `dialog survives ${columns}x${rows}`);
+      assert.ok(lineWidth(frame) <= columns, `dialog fits ${columns} columns`);
+      assert.ok(frame.split('\n').length <= rows, `dialog fits ${rows} rows`);
+
+      const border = frame.split('\n').find((line) => line.includes('╭'));
+      if (border) {
+        const left = border.length - border.trimStart().length;
+        const expectedLeft = Math.floor((columns - border.trim().length) / 2);
+        assert.ok(Math.abs(left - expectedLeft) <= 1, `dialog is centred at ${columns} columns`);
+      }
+    }
+  } finally {
+    app.cleanup();
+  }
+});
+
 test('transient 0/NaN resize values keep the last valid dimensions', async () => {
   const app = renderAppSized(80, 24);
   try {
@@ -1356,7 +1424,7 @@ for (const [columns, rows] of [
   [30, 8],
   [20, 6],
 ] as const) {
-  test(`approval prompt shows its header, all options and hint at ${columns}x${rows}`, async () => {
+  test(`approval dialog shows its header, all options and hint at ${columns}x${rows}`, async () => {
     const app = renderAppSized(columns, rows);
     try {
       await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
@@ -1368,11 +1436,11 @@ for (const [columns, rows] of [
         sessionId: `approval-${columns}x${rows}`,
       } as any);
       const frame = await waitForFrame(
-        app.stdout.frameContaining.bind(app.stdout, 'Approval Required'),
+        app.stdout.frameContaining.bind(app.stdout, 'Approval required'),
         (f) => f.length > 0
       );
-      assert.ok(frame.length > 0, 'approval prompt never rendered');
-      assert.match(frame, /Approval Required/, 'header is visible');
+      assert.ok(frame.length > 0, 'approval dialog never rendered');
+      assert.match(frame, /Approval required/, 'title is visible');
       assert.match(frame, /Run a shell|echo/, 'description/detail is visible (truncated)');
       assert.match(frame, /Approve once/, 'first option is not clipped away');
       assert.match(frame, /Approve session/, 'session option is readable on narrow screens');
@@ -1387,9 +1455,10 @@ for (const [columns, rows] of [
         lineWidth(frame) <= columns,
         `a line is ${lineWidth(frame)} columns wide on a ${columns}-column terminal`
       );
-      // Bottom-aligned modal: the hint is the last painted row, like the composer.
-      const painted = frame.split('\n').filter((line) => line.trim().length > 0);
-      assert.match(painted[painted.length - 1] ?? '', /enter/, 'prompt sits at the composer position');
+      // The dialog is centred on the canvas, not pinned to the composer.
+      const lines = frame.split('\n');
+      const titleRow = lines.findIndex((line) => line.includes('Approval required'));
+      assert.ok(titleRow >= 0 && titleRow < lines.length - 3, 'dialog is not pinned to the composer');
     } finally {
       app.cleanup();
     }
@@ -1659,6 +1728,19 @@ test('! <cmd> runs bash directly and shows the result in the transcript', async 
     const frame = await waitForFrameText(app, 'SHELL-MARKER', 5000);
     assert.match(frame, /echo SHELL-MARKER/, 'the shell command card is shown');
     assert.match(frame, /SHELL-MARKER/, 'the command output is shown');
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('/update is listed in the slash palette and help', async () => {
+  const app = renderApp();
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    await settle(400);
+    app.stdin.write('/up');
+    const frame = await waitForFrameText(app, '/update', 2000);
+    assert.match(frame, /Update Bitacode from npm/, 'slash palette advertises the npm update');
   } finally {
     app.cleanupAll();
   }

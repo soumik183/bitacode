@@ -35,8 +35,8 @@ function isCompactThreshold(value: unknown): value is number {
   );
 }
 
-function isThemeName(value: unknown): value is 'dark' | 'light' | 'high-contrast' {
-  return value === 'dark' || value === 'light' || value === 'high-contrast';
+function isThemeName(value: unknown): value is 'black' | 'sand' | 'dark' | 'light' | 'high-contrast' {
+  return value === 'black' || value === 'sand' || value === 'dark' || value === 'light' || value === 'high-contrast';
 }
 
 export interface UiSettings {
@@ -56,7 +56,7 @@ export interface UiSettings {
   /** Fraction of the context window (0.5–0.95) that triggers compaction. */
   compactThreshold?: number;
   /** Colour palette used by the UI. */
-  theme?: 'dark' | 'light' | 'high-contrast';
+  theme?: 'black' | 'sand' | 'dark' | 'light' | 'high-contrast';
   /** Segments shown in the status line, in display order. */
   statusLine?: StatusLineItem[];
 }
@@ -67,7 +67,7 @@ export const DEFAULT_SETTINGS: UiSettings = {
   variant: DEFAULT_VARIANT,
   approvalMode: 'manual',
   compactThreshold: COMPACT_THRESHOLD_DEFAULT,
-  theme: 'dark',
+  theme: 'black',
   statusLine: [...STATUS_LINE_ITEMS],
 };
 
@@ -93,7 +93,7 @@ export function loadSettings(): UiSettings {
       compactThreshold: isCompactThreshold(parsed.compactThreshold)
         ? parsed.compactThreshold
         : COMPACT_THRESHOLD_DEFAULT,
-      theme: isThemeName(parsed.theme) ? parsed.theme : 'dark',
+      theme: isThemeName(parsed.theme) ? parsed.theme : DEFAULT_SETTINGS.theme,
       statusLine: Array.isArray(parsed.statusLine)
         ? parsed.statusLine.filter((item) => STATUS_LINE_ITEMS.includes(item))
         : [...STATUS_LINE_ITEMS],

@@ -13,6 +13,8 @@ export interface ApiKeyPromptProps {
   columns?: number;
   /** Short terminals drop the decorative margins so the input is not clipped. */
   compact?: boolean;
+  /** Rendered inside a Dialog that already supplies the title and hint. */
+  embedded?: boolean;
   onSubmit: (value: string) => void;
 }
 
@@ -23,6 +25,7 @@ export const ApiKeyPrompt: React.FC<ApiKeyPromptProps> = ({
   busy,
   columns,
   compact = false,
+  embedded = false,
   onSubmit,
 }) => {
   const [value, setValue] = useState('');
@@ -34,8 +37,10 @@ export const ApiKeyPrompt: React.FC<ApiKeyPromptProps> = ({
   const width = Math.max(1, Math.floor(cols) - 8);
 
   return (
-    <LeftBar color={theme.accent} marginTop={compact ? 0 : 1} marginBottom={compact ? 0 : 1}>
-      <Text color={theme.text} bold wrap="truncate-end">API key for {providerName}</Text>
+    <LeftBar color={theme.accent} marginTop={0} marginBottom={0}>
+      {!embedded && (
+        <Text color={theme.text} bold wrap="truncate-end">API key for {providerName}</Text>
+      )}
       <Text color={theme.dim} wrap="truncate-middle">{path}</Text>
       <Box marginTop={compact ? 0 : 1}>
         <Text color={theme.accent}>› </Text>
@@ -50,9 +55,11 @@ export const ApiKeyPrompt: React.FC<ApiKeyPromptProps> = ({
         />
       </Box>
       {error && <Text color={theme.error} wrap="truncate-end">{error}</Text>}
-      <Text color={theme.dim} wrap="truncate-end">
-        {busy ? 'Checking key and fetching models…' : 'enter save · esc cancel'}
-      </Text>
+      {!embedded && (
+        <Text color={theme.dim} wrap="truncate-end">
+          {busy ? 'Checking key and fetching models…' : 'enter save · esc cancel'}
+        </Text>
+      )}
     </LeftBar>
   );
 };
