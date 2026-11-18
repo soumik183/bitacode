@@ -1,6 +1,6 @@
 name: Publish
 
-# Auto-publishes @bitacode-cli/bitacode to npm when a commit lands on main and the
+# Auto-publishes bitacode to npm when a commit lands on main and the
 # version in package.json is not on the registry yet. Manual runs can do a
 # dry run (build + pack only).
 

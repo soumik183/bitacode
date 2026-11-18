@@ -27,9 +27,9 @@ Ask it to build something and it will read your code, edit files, run commands, 
 Install from npm (the binary is `bitacode`):
 
 ```bash
-npm install -g @bitacode-cli/bitacode
+npm install -g bitacode
 # or, without installing:
-npx @bitacode-cli/bitacode
+npx bitacode
 ```
 
 From a clone:
@@ -152,7 +152,7 @@ CI runs all of the above on Node 20, 22, and 24, and fails if the committed
 
 ## Releasing
 
-The package is published as `@bitacode-cli/bitacode` (binary: `bitacode`).
+The package is published as `bitacode` (binary: `bitacode`).
 
 ### Automatic (GitHub Actions)
 Pushing to `main` runs typecheck, tests, lint and build, packs the tarball,
