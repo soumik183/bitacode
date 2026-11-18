@@ -3,9 +3,125 @@
  *
  * Handles accumulation of streaming response chunks into a complete
  * assistant message, including content, tool calls, and usage data.
+ * Tolerates provider variance (alternate reasoning fields, tool-call
+ * shapes, usage locations) and caps accumulation so a broken stream
+ * cannot exhaust memory.
  */
 import { estimateTokens, estimateConversationTokens, createUsageInfo, getContextInfo } from '../utils/cost-tracker.js';
 import { logger } from '../utils/logger.js';
+// Accumulation caps — a runaway or malformed stream must not grow without bound.
+const MAX_REASONING_CHARS = 100_000;
+const MAX_CONTENT_CHARS = 1_000_000;
+const MAX_TOOL_ARGS_CHARS = 100_000;
+function asNonEmptyString(value) {
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+function safeStringify(value) {
+    try {
+        return JSON.stringify(value) ?? '';
+    }
+    catch {
+        return '';
+    }
+}
+function parseObject(text) {
+    if (!text.trim())
+        return undefined;
+    try {
+        const parsed = JSON.parse(text);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? parsed
+            : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+/** Collect distinct reasoning fragments across common provider field names. */
+function reasoningFragments(delta, chunk) {
+    const d = delta ?? {};
+    const candidates = [
+        asNonEmptyString(d.reasoning_content),
+        asNonEmptyString(d.reasoning),
+        asNonEmptyString(d.reasoning_text),
+        asNonEmptyString(d.delta?.reasoning_content),
+        asNonEmptyString(d.delta?.reasoning),
+        asNonEmptyString(d.additional_kwargs?.reasoning_content),
+        asNonEmptyString(chunk?.additional_kwargs?.reasoning_content),
+    ];
+    // Dedupe by value: a delta may repeat the same text under several names.
+    return [...new Set(candidates.filter((c) => c !== undefined))];
+}
+function finiteNumber(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+/** Normalize the usage shapes providers actually emit into CompletionUsage. */
+function normalizeUsage(raw) {
+    if (!raw || typeof raw !== 'object')
+        return undefined;
+    const prompt = finiteNumber(raw.prompt_tokens) ?? finiteNumber(raw.input_tokens)
+        ?? finiteNumber(raw.promptTokenCount) ?? finiteNumber(raw.inputTokens);
+    const completion = finiteNumber(raw.completion_tokens) ?? finiteNumber(raw.output_tokens)
+        ?? finiteNumber(raw.candidatesTokenCount) ?? finiteNumber(raw.outputTokens);
+    if (prompt === undefined && completion === undefined)
+        return undefined;
+    const cached = finiteNumber(raw.prompt_tokens_details?.cached_tokens)
+        ?? finiteNumber(raw.cached_tokens) ?? finiteNumber(raw.cachedContentTokenCount)
+        ?? finiteNumber(raw.cachedContentTokens);
+    const total = finiteNumber(raw.total_tokens) ?? (prompt ?? 0) + (completion ?? 0);
+    return {
+        prompt_tokens: prompt ?? 0,
+        completion_tokens: completion ?? 0,
+        total_tokens: total,
+        ...(cached !== undefined ? { prompt_tokens_details: { cached_tokens: cached } } : {}),
+    };
+}
+function extractUsage(chunk) {
+    return normalizeUsage(chunk?.usage)
+        ?? normalizeUsage(chunk?.['x-usage'])
+        ?? normalizeUsage(chunk?.usage_metadata)
+        ?? normalizeUsage(chunk?.usageMetadata);
+}
+/** Normalize tool-call deltas to an array, accepting arrays or object maps. */
+function toolCallEntries(raw) {
+    if (!raw)
+        return [];
+    if (Array.isArray(raw))
+        return raw;
+    if (typeof raw !== 'object')
+        return [];
+    // A single tool-call object carries these keys directly; a map is keyed by index/id.
+    if ('function' in raw || 'id' in raw || 'index' in raw)
+        return [raw];
+    return Object.entries(raw).map(([key, value], position) => {
+        if (!value || typeof value !== 'object')
+            return value;
+        const tc = value;
+        const numericKey = /^\d+$/.test(key) ? Number(key) : undefined;
+        const index = Number.isInteger(tc.index) && tc.index >= 0 ? tc.index : (numericKey ?? position);
+        return { ...tc, index };
+    });
+}
+/** Append arguments arriving as a string, a JSON object, or fragments. */
+function appendArguments(current, fragment, hasName) {
+    if (current.length >= MAX_TOOL_ARGS_CHARS)
+        return current;
+    if (typeof fragment === 'string') {
+        return (current + fragment).slice(0, MAX_TOOL_ARGS_CHARS);
+    }
+    if (fragment && typeof fragment === 'object') {
+        // Object-form args only make sense on a well-formed call; malformed deltas
+        // (e.g. a numeric name) are skipped rather than turned into garbage args.
+        if (!hasName)
+            return current;
+        const parsed = parseObject(current);
+        const next = parsed
+            ? safeStringify({ ...parsed, ...fragment })
+            : current + safeStringify(fragment);
+        return next.slice(0, MAX_TOOL_ARGS_CHARS);
+    }
+    return current;
+}
 /**
  * Process a streaming API response, accumulating content and tool calls.
  *
@@ -18,54 +134,70 @@ export async function processStream(stream, messages, model, pricing, onEvent) {
         content: '',
         tool_calls: [],
     };
-    // Cap accumulated reasoning so a runaway provider cannot exhaust memory.
-    const MAX_REASONING_CHARS = 100_000;
     let streamedContent = '';
     let streamedReasoning = '';
     let hasToolCalls = false;
     let actualUsage;
     let refusalEmitted = false;
     let truncationEmitted = false;
-    for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta;
-        if (chunk.usage) {
-            actualUsage = chunk.usage;
-        }
-        // Surface a model refusal (delta.refusal with no text content) once so the
-        // user knows why there was no answer.
-        const refusal = delta?.refusal;
-        if (!refusalEmitted && typeof refusal === 'string' && refusal.length > 0) {
-            refusalEmitted = true;
-            onEvent({ type: 'error', error: refusal, transient: true });
-        }
-        // Surface token-limit truncation once.
-        if (!truncationEmitted && chunk.choices[0]?.finish_reason === 'length') {
-            truncationEmitted = true;
-            onEvent({ type: 'error', error: "Response truncated by the model's token limit.", transient: true });
-        }
-        // Stream reasoning/thinking text when the provider exposes it
-        // (`reasoning_content` for DeepSeek-style APIs, `reasoning` for others).
-        const reasoningDelta = delta?.reasoning_content ?? delta?.reasoning;
-        if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
-            if (streamedReasoning.length < MAX_REASONING_CHARS) {
-                streamedReasoning = (streamedReasoning + reasoningDelta).slice(0, MAX_REASONING_CHARS);
+    let streamErrorEmitted = false;
+    try {
+        for await (const chunk of stream) {
+            const c = chunk;
+            const choice = c?.choices?.[0];
+            const delta = choice?.delta;
+            // Providers report usage under different keys; last non-empty one wins.
+            const usage = extractUsage(c);
+            if (usage)
+                actualUsage = usage;
+            // Surface a model refusal (delta.refusal with no text content) once so the
+            // user knows why there was no answer.
+            const refusal = delta?.refusal;
+            if (!refusalEmitted && typeof refusal === 'string' && refusal.length > 0) {
+                refusalEmitted = true;
+                onEvent({ type: 'error', error: refusal, transient: true });
             }
-            onEvent({ type: 'reasoning_delta', content: reasoningDelta });
-        }
-        // Stream text content (and return to UI for immediate display via onEvent)
-        if (delta?.content) {
-            streamedContent += delta.content;
-            assistantMessage.content = streamedContent;
-            if (!hasToolCalls) {
-                onEvent({ type: 'text_delta', content: delta.content });
+            // Surface token-limit truncation once.
+            if (!truncationEmitted && choice?.finish_reason === 'length') {
+                truncationEmitted = true;
+                onEvent({ type: 'error', error: "Response truncated by the model's token limit.", transient: true });
             }
-        }
-        // Accumulate tool calls across stream chunks
-        if (delta?.tool_calls) {
-            hasToolCalls = true;
-            for (const tc of delta.tool_calls) {
-                // Malformed deltas may carry a negative/fractional index; fall back to slot 0.
-                const idx = Number.isInteger(tc.index) && tc.index >= 0 ? tc.index : 0;
+            // Stream reasoning/thinking text across the field-name variants providers use.
+            for (const fragment of reasoningFragments(delta, c)) {
+                if (streamedReasoning.length < MAX_REASONING_CHARS) {
+                    streamedReasoning = (streamedReasoning + fragment).slice(0, MAX_REASONING_CHARS);
+                }
+                onEvent({ type: 'reasoning_delta', content: fragment });
+            }
+            // Stream text content (up to the cap) for immediate UI display.
+            if (delta?.content) {
+                const room = MAX_CONTENT_CHARS - streamedContent.length;
+                if (room > 0) {
+                    const kept = delta.content.slice(0, room);
+                    streamedContent += kept;
+                    assistantMessage.content = streamedContent;
+                    // Never emit plain text once tool calls have started.
+                    if (!hasToolCalls) {
+                        onEvent({ type: 'text_delta', content: kept });
+                    }
+                }
+            }
+            // Accumulate tool calls across stream chunks (array or object map).
+            const toolEntries = toolCallEntries(delta?.tool_calls);
+            if (toolEntries.length > 0)
+                hasToolCalls = true;
+            for (const tc of toolEntries) {
+                if (!tc || typeof tc !== 'object')
+                    continue;
+                // Malformed deltas may carry a negative/fractional/missing index. For a
+                // prefixed id, reuse a matching slot before falling back to slot 0.
+                let idx = Number.isInteger(tc.index) && tc.index >= 0 ? tc.index : -1;
+                if (idx < 0 && typeof tc.id === 'string' && tc.id.length > 0) {
+                    const found = assistantMessage.tool_calls.findIndex((t) => t?.id === tc.id);
+                    idx = found >= 0 ? found : 0;
+                }
+                if (idx < 0)
+                    idx = 0;
                 if (!assistantMessage.tool_calls[idx]) {
                     assistantMessage.tool_calls[idx] = {
                         id: '',
@@ -73,26 +205,37 @@ export async function processStream(stream, messages, model, pricing, onEvent) {
                         function: { name: '', arguments: '' },
                     };
                 }
-                if (tc.id)
-                    assistantMessage.tool_calls[idx].id = tc.id;
-                if (typeof tc.function?.name === 'string') {
-                    assistantMessage.tool_calls[idx].function.name += tc.function.name;
+                const call = assistantMessage.tool_calls[idx];
+                // Preserve provider ids verbatim (call_..., functions.xxx:0, ...).
+                if (typeof tc.id === 'string' && tc.id.length > 0)
+                    call.id = tc.id;
+                const fn = tc.function;
+                if (fn && typeof fn === 'object') {
+                    if (typeof fn.name === 'string') {
+                        call.function.name += fn.name;
+                    }
+                    const hasName = typeof fn.name === 'string' || call.function.name.length > 0;
+                    if ('arguments' in fn) {
+                        call.function.arguments = appendArguments(call.function.arguments, fn.arguments, hasName);
+                    }
                 }
-                if (typeof tc.function?.arguments === 'string') {
-                    assistantMessage.tool_calls[idx].function.arguments += tc.function.arguments;
-                }
-                // Gemini 3+ models include an `extra_content` field on tool calls
-                // containing a `thought_signature`. This MUST be preserved and sent
-                // back in subsequent requests, otherwise Gemini returns a 400.
-                // See: https://ai.google.dev/gemini-api/docs/openai
-                // See also: https://gist.github.com/thomasgauvin/3cfe8e907c957fba4e132e6cf0f06292
+                // Gemini 3+ includes an `extra_content.thought_signature` that MUST be
+                // echoed back or Gemini rejects the next request with a 400.
                 if (tc.extra_content) {
-                    assistantMessage.tool_calls[idx].extra_content = tc.extra_content;
+                    call.extra_content = tc.extra_content;
                 }
             }
         }
     }
-    // Calculate usage metrics
+    catch (err) {
+        // A network error mid-stream must not discard what we already accumulated.
+        if (!streamErrorEmitted) {
+            streamErrorEmitted = true;
+            const message = err instanceof Error ? err.message : String(err);
+            onEvent({ type: 'error', error: `Stream interrupted: ${message}`, transient: true });
+        }
+    }
+    // Calculate usage metrics (estimated when the provider reported none).
     const inputTokens = actualUsage?.prompt_tokens ?? estimateConversationTokens(messages);
     const outputTokens = actualUsage?.completion_tokens ?? estimateTokens(assistantMessage.content || '');
     const cachedTokens = actualUsage?.prompt_tokens_details?.cached_tokens;
@@ -102,6 +245,9 @@ export async function processStream(stream, messages, model, pricing, onEvent) {
     const contextPercent = pricing
         ? getContextInfo(messages, pricing).utilizationPercentage
         : 0;
+    if (!actualUsage) {
+        logger.warn('Stream usage is partial (estimated); provider did not report usage.');
+    }
     // Log API response with usage info at INFO level
     logger.info('Received API response', {
         model,

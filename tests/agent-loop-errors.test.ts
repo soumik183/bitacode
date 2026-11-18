@@ -205,3 +205,43 @@ test('404 points at model/endpoint configuration', async () => {
   assert.equal(result.handled, false);
   assert.match(result.errorMessage || '', /not found/i);
 });
+
+// Instant classifier for message-based paths; sleep is always stubbed.
+async function classify(error: unknown) {
+  return handleApiError(
+    error, [], new Set(), undefined, freshState(), 1, noEvent,
+    ...tail, undefined, async () => {}
+  );
+}
+
+test('authentication message on status 400 is non-retryable and never echoed', async () => {
+  const result = await classify({ status: 400, message: 'invalid_api_key sk-secret-value' });
+  assert.equal(result.handled, false);
+  assert.match(result.errorMessage || '', /API key|Authentication/i);
+  assert.doesNotMatch(result.errorMessage || '', /invalid_api_key|sk-secret-value/);
+});
+
+test('quota message without a 429 status still backs off', async () => {
+  const result = await classify({ status: 400, message: 'RESOURCE_EXHAUSTED quota exceeded' });
+  assert.equal(result.handled, true);
+  assert.equal(result.shouldAbort, false);
+  assert.equal(result.silentRetry, true);
+});
+
+test('context-length message triggers the compaction path', async () => {
+  const result = await classify({ status: 400, message: 'input too long for this model' });
+  assert.equal(result.handled, true);
+  assert.equal(result.silentRetry, true);
+});
+
+test('network error codes are retryable', async () => {
+  const result = await classify({ code: 'ETIMEDOUT', message: 'request timed out' });
+  assert.equal(result.handled, true);
+  assert.equal(result.silentRetry, true);
+});
+
+test('generic errors redact secrets instead of echoing the raw message', async () => {
+  const result = await classify({ status: 422, message: 'bad token sk-secret-value here' });
+  assert.equal(result.handled, false);
+  assert.doesNotMatch(result.errorMessage || '', /sk-secret-value/);
+});

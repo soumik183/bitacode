@@ -104,6 +104,16 @@ test('resolveApiKey falls back to BITACODE_API_KEY when provider env is absent',
   assert.equal(apiKey, 'override-secret');
 });
 
+test('resolveApiKey recognizes provider alias env vars', () => {
+  for (const key of KEY_ENV_VARS) delete process.env[key];
+  process.env.GOOGLE_API_KEY = 'google-alias';
+
+  assert.equal(resolveApiKey({ provider: 'google', apiKey: undefined }), 'google-alias');
+
+  process.env.GEMINI_API_KEY = 'gemini-primary';
+  assert.equal(resolveApiKey({ provider: 'google', apiKey: undefined }), 'gemini-primary');
+});
+
 test('resolveApiKey does not mistake cosmetic headers for authentication', () => {
   delete process.env.OPENROUTER_API_KEY;
   delete process.env.BITACODE_API_KEY;

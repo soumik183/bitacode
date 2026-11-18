@@ -26,6 +26,18 @@ const LIMITS = {
   MAX_CONTINUE: 1,
 };
 
+// Providers and proxies disagree on status codes, so classify by message too.
+// These only match error text, never response bodies (those stay redacted).
+const AUTH_ERROR_PATTERN = /invalid[_\s-]?api[_\s-]?key|incorrect api key|authentication[_\s-]?error|unauthorized|permission[_\s-]?denied|access denied|forbidden|no auth credentials|expired (api )?(key|token)|invalid token/i;
+const RATE_ERROR_PATTERN = /rate[_\s-]?limit|too many requests|quota|resource[_\s-]?exhausted|usage limit|throttl|slow down/i;
+const CONTEXT_ERROR_PATTERN = /maximum context length|context[_\s-]?(length|window)|input too long|prompt too long|token limit|maximum tokens?|too many tokens|tokens? exceed|string too long|request too large/i;
+const RETRYABLE_CODES = new Set([
+  'ECONNRESET', 'ECONNABORTED', 'ECONNREFUSED', 'ECONNDOWN',
+  'ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ERR_SOCKET_TIMEOUT',
+  'ENETUNREACH', 'ENETDOWN', 'EHOSTUNREACH', 'EAI_AGAIN',
+  'ENOTFOUND', 'EPIPE', 'ERR_NETWORK',
+]);
+
 // Sleep with abort signal support.
 export async function sleepWithAbort(delayMs: number, abortSignal?: AbortSignal): Promise<void> {
   if (!abortSignal) {
@@ -81,19 +93,41 @@ export async function handleApiError(
 ): Promise<ErrorHandlerResult> {
   const errMsg = apiError?.message || 'Unknown API error';
   const status = apiError?.status;
+  const msg = typeof errMsg === 'string' ? errMsg : '';
 
   logger.error(`API error: ${errMsg}`, { status, code: apiError?.code });
 
+  const authMessage = AUTH_ERROR_PATTERN.test(msg);
+  const rateMessage = RATE_ERROR_PATTERN.test(msg);
+  const contextMessage = CONTEXT_ERROR_PATTERN.test(msg);
   const retryableStatus = status === 408 || status === 409 || status === 425;
-  const retryableCode = ['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENETUNREACH', 'EAI_AGAIN'].includes(apiError?.code);
+  const retryableCode = typeof apiError?.code === 'string' && RETRYABLE_CODES.has(apiError.code);
 
-  // Context window exceeded - force compaction (check before generic 400 handling).
+  // Auth by message wins first (proxies return 400/403 for key errors).
+  if (authMessage) {
+    return {
+      handled: false,
+      shouldAbort: false,
+      silentRetry: false,
+      errorMessage: 'Authentication failed. Check your API key or credentials.',
+    };
+  }
+
+  // Context window exceeded - force compaction (before generic 400 handling).
   // 413 (payload too large) is the same condition reported by some providers.
   const isContextTooLong =
-    status === 413 ||
-    (status === 400 && /prompt.*too long|context.*length|maximum.*token|tokens?.*exceed/i.test(errMsg));
+    contextMessage || status === 413 ||
+    (status === 400 && /prompt.*too long|context.*length|maximum.*token|tokens?.*exceed/i.test(msg));
 
-  if (isContextTooLong && retryState.contextCount < LIMITS.MAX_CONTEXT) {
+  if (isContextTooLong) {
+    if (retryState.contextCount >= LIMITS.MAX_CONTEXT) {
+      return {
+        handled: false,
+        shouldAbort: false,
+        silentRetry: false,
+        errorMessage: 'Conversation is too long. Try /clear or a shorter input.',
+      };
+    }
     retryState.contextCount++;
     logger.warn(`Prompt too long (attempt ${retryState.contextCount})`);
     onEvent({
@@ -134,8 +168,8 @@ export async function handleApiError(
     return { handled: true, shouldAbort: false, silentRetry: true };
   }
 
-  // Rate limit - backoff
-  if (status === 429) {
+  // Rate limit - backoff (some proxies report quota exhaustion with other statuses)
+  if (rateMessage || status === 429) {
     const backoff = parseRetryAfterMs(apiError?.headers);
     logger.info(`Rate limited, retrying in ${backoff / 1000}s...`);
     onEvent({ type: 'error', error: `Rate limited. Retrying...`, transient: true });
@@ -147,8 +181,8 @@ export async function handleApiError(
     return { handled: true, shouldAbort: false, silentRetry: true };
   }
 
-  // Server error - exponential backoff
-  if (status >= 500 || retryableStatus || retryableCode) {
+  // Server or network error - exponential backoff
+  if ((status !== undefined && status >= 500) || retryableStatus || retryableCode) {
     const backoff = Math.min(2 ** iterationCount * 1000, 30_000);
     logger.info(`Request failed, retrying in ${backoff / 1000}s...`);
     onEvent({ type: 'error', error: `Request failed. Retrying...`, transient: true });
@@ -160,34 +194,28 @@ export async function handleApiError(
     return { handled: true, shouldAbort: false, silentRetry: true };
   }
 
+  // Auth by status (non-auth quota/context messages were handled above).
+  if (status === 401 || status === 403) {
+    return {
+      handled: false,
+      shouldAbort: false,
+      silentRetry: false,
+      errorMessage: 'Authentication failed. Check your API key or credentials.',
+    };
+  }
+
   // Generic 400 errors - try repair/truncate/continue
   if (status === 400) {
     return await handle400Error(messages, validToolNames, retryState, onEvent);
   }
 
   // Non-retryable - short, user-facing messages; never leak raw response bodies.
-  if (status === 401 || status === 403) {
-    return {
-      handled: false,
-      shouldAbort: false,
-      silentRetry: false,
-      errorMessage: 'Authentication failed. Check your API key and try again.',
-    };
-  }
   if (status === 404) {
     return {
       handled: false,
       shouldAbort: false,
       silentRetry: false,
       errorMessage: 'Model or endpoint not found. Check your model configuration.',
-    };
-  }
-  if (status === 413) {
-    return {
-      handled: false,
-      shouldAbort: false,
-      silentRetry: false,
-      errorMessage: 'Request too large. Try /clear or a shorter input.',
     };
   }
   return {
@@ -352,9 +380,12 @@ function safeErrorMessage(errMsg: unknown, status: number | undefined): string {
   if (typeof errMsg !== 'string') return fallback;
 
   const text = errMsg.replace(/\s+/g, ' ').trim();
-  const singleLine = text.startsWith('{') || text.startsWith('[')
+  const scrubbed = text
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, '[redacted]')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{6,}/gi, 'Bearer [redacted]');
+  const singleLine = scrubbed.startsWith('{') || scrubbed.startsWith('[')
     ? 'Unexpected response from provider.'
-    : text;
+    : scrubbed;
   const short = singleLine.length > 160 ? `${singleLine.slice(0, 160)}…` : singleLine;
   return status ? `${short} (status ${status})` : short;
 }

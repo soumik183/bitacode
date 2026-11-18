@@ -12,7 +12,7 @@ import {
   type RuntimeProviderConfig,
   RuntimeConfigFileSchema 
 } from './runtime-config.js';
-import { getAllProviders, getProvider } from './providers/index.js';
+import { getAllProviders, getProvider, getProviderApiKeyEnvVars } from './providers/index.js';
 import { theme } from './theme.js';
 
 export interface Config {
@@ -35,9 +35,9 @@ function hardenPermissions(targetPath: string, mode: number): void {
 export function resolveApiKey(config: Pick<Config, 'provider' | 'apiKey'>): string | null {
   const provider = getProvider(config.provider);
 
-  // 1. Provider-specific environment variable
-  if (provider?.apiKeyEnvVar) {
-    const providerEnvOverride = process.env[provider.apiKeyEnvVar]?.trim();
+  // 1. Provider-specific environment variable and its common aliases
+  for (const envVar of getProviderApiKeyEnvVars(config.provider)) {
+    const providerEnvOverride = process.env[envVar]?.trim();
     if (providerEnvOverride) {
       return providerEnvOverride;
     }
@@ -80,8 +80,8 @@ export function resolveApiKey(config: Pick<Config, 'provider' | 'apiKey'>): stri
 export function detectConfigFromEnvironment(): Config | null {
   try {
     const providers = getAllProviders();
-    // Aliases not covered by a provider's apiKeyEnvVar; their value must be
-    // copied into the config because resolveApiKey will not see them.
+    // Common alias keys; copy the value into config so detection behavior is
+    // unchanged even for callers that read config.apiKey directly.
     const commonEnvVars: Record<string, string[]> = {
       google: ['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
     };

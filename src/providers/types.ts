@@ -16,6 +16,8 @@ export interface ModelProvider {
   baseURL?: string;
   apiKey?: string;
   apiKeyEnvVar?: string;
+  /** Extra env var names accepted for this provider's API key (aliases). */
+  keyEnvVars?: string[];
   headers?: Record<string, string>;
   defaultParams?: Record<string, unknown>;
   models: ModelDetails[];

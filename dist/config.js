@@ -7,7 +7,7 @@ import { Box, Text } from 'ink';
 import { Select, TextInput, PasswordInput } from '@inkjs/ui';
 import { parse } from 'jsonc-parser';
 import { getActiveRuntimeConfigPath, RuntimeConfigFileSchema } from './runtime-config.js';
-import { getAllProviders, getProvider } from './providers/index.js';
+import { getAllProviders, getProvider, getProviderApiKeyEnvVars } from './providers/index.js';
 import { theme } from './theme.js';
 const CONFIG_DIR_MODE = 0o700;
 const CONFIG_FILE_MODE = 0o600;
@@ -18,9 +18,9 @@ function hardenPermissions(targetPath, mode) {
 }
 export function resolveApiKey(config) {
     const provider = getProvider(config.provider);
-    // 1. Provider-specific environment variable
-    if (provider?.apiKeyEnvVar) {
-        const providerEnvOverride = process.env[provider.apiKeyEnvVar]?.trim();
+    // 1. Provider-specific environment variable and its common aliases
+    for (const envVar of getProviderApiKeyEnvVars(config.provider)) {
+        const providerEnvOverride = process.env[envVar]?.trim();
         if (providerEnvOverride) {
             return providerEnvOverride;
         }
@@ -56,8 +56,8 @@ export function resolveApiKey(config) {
 export function detectConfigFromEnvironment() {
     try {
         const providers = getAllProviders();
-        // Aliases not covered by a provider's apiKeyEnvVar; their value must be
-        // copied into the config because resolveApiKey will not see them.
+        // Common alias keys; copy the value into config so detection behavior is
+        // unchanged even for callers that read config.apiKey directly.
         const commonEnvVars = {
             google: ['GOOGLE_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY'],
         };
