@@ -415,26 +415,17 @@ export const ApiKeyInput = ({ selectedProviderId, selectedModelId, target = 'use
 export const ConfigResult = ({ configWritten }) => {
     return (_jsxs(Box, { flexDirection: "column", children: [configWritten ? (_jsx(Text, { color: theme.text, children: "Configuration saved successfully!" })) : (_jsx(Text, { color: theme.muted, children: "Configuration not changed." })), _jsx(Text, { children: "You can now run Bitacode." })] }));
 };
-export const ConfigureComponent = ({ onComplete, firstRun = false } = {}) => {
-    const [step, setStep] = useState(firstRun ? 2 : 0);
-    const [target, setTarget] = useState('user');
-    const [existingConfig, setExistingConfig] = useState(null);
+export const ConfigureComponent = ({ onComplete } = {}) => {
+    // Global (user) config only — no target question. Setup is always:
+    // provider + model → API key → done.
+    const [step, setStep] = useState(2);
+    const [target] = useState('user');
     const [selectedProviderId, setSelectedProviderId] = useState('');
     const [selectedModelId, setSelectedModelId] = useState('');
     const [configWritten, setConfigWritten] = useState(false);
-    if (step === 0) {
-        return (_jsx(TargetSelection, { subtitle: "Choose where to configure Bitacode:", onSelect: (value) => {
-                setTarget(value);
-                const existing = readConfig(value);
-                setExistingConfig(existing);
-                setStep(existing ? 1 : 2);
-            } }));
-    }
     switch (step) {
-        case 1:
-            return _jsx(ResetPrompt, { existingConfig: existingConfig, setStep: setStep, setConfigWritten: setConfigWritten });
         case 2:
-            return (_jsx(ModelSelection, { setSelectedProviderId: setSelectedProviderId, setSelectedModelId: setSelectedModelId, setStep: setStep, title: firstRun ? 'Welcome to Bitacode' : undefined, subtitle: firstRun ? `Saving to ${getUserRuntimeConfigPath()}` : undefined }));
+            return (_jsx(ModelSelection, { setSelectedProviderId: setSelectedProviderId, setSelectedModelId: setSelectedModelId, setStep: setStep, title: "Configure Bitacode", subtitle: `Saving to ${getUserRuntimeConfigPath()}` }));
         case 3:
             return (_jsx(ApiKeyInput, { selectedProviderId: selectedProviderId, selectedModelId: selectedModelId, target: target, onComplete: onComplete, setStep: setStep, setConfigWritten: setConfigWritten }));
         case 4:

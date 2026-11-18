@@ -56,7 +56,7 @@ Runtime config lookup is simple:
 - if `<cwd>/.bitacode/bitacode.jsonc` exists, Bitacode uses it
 - otherwise it falls back to the shared user config at `~/.config/bitacode/bitacode.jsonc` on macOS/Linux and `~/AppData/Local/bitacode/bitacode.jsonc` on Windows
 
-You can also run the standalone wizard directly:
+You can also run setup directly. `bitacode configure` sets up **globally** (shared user config): if an API key is already in the environment it writes the config and exits immediately; otherwise it goes straight to provider → model → API key with no target question.
 
 ```bash
 bitacode configure

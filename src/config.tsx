@@ -620,39 +620,24 @@ interface ConfigureComponentProps {
   firstRun?: boolean;
 }
 
-export const ConfigureComponent = ({ onComplete, firstRun = false }: ConfigureComponentProps = {}) => {
-  const [step, setStep] = useState(firstRun ? 2 : 0);
-  const [target, setTarget] = useState<InitConfigTarget>('user');
-  const [existingConfig, setExistingConfig] = useState<Config | null>(null);
+export const ConfigureComponent = ({ onComplete }: ConfigureComponentProps = {}) => {
+  // Global (user) config only — no target question. Setup is always:
+  // provider + model → API key → done.
+  const [step, setStep] = useState(2);
+  const [target] = useState<InitConfigTarget>('user');
   const [selectedProviderId, setSelectedProviderId] = useState('');
   const [selectedModelId, setSelectedModelId] = useState('');
   const [configWritten, setConfigWritten] = useState(false);
 
-  if (step === 0) {
-    return (
-      <TargetSelection
-        subtitle="Choose where to configure Bitacode:"
-        onSelect={(value) => {
-          setTarget(value);
-          const existing = readConfig(value);
-          setExistingConfig(existing);
-          setStep(existing ? 1 : 2);
-        }}
-      />
-    );
-  }
-
   switch (step) {
-    case 1:
-      return <ResetPrompt existingConfig={existingConfig!} setStep={setStep} setConfigWritten={setConfigWritten} />;
     case 2:
       return (
         <ModelSelection
           setSelectedProviderId={setSelectedProviderId}
           setSelectedModelId={setSelectedModelId}
           setStep={setStep}
-          title={firstRun ? 'Welcome to Bitacode' : undefined}
-          subtitle={firstRun ? `Saving to ${getUserRuntimeConfigPath()}` : undefined}
+          title="Configure Bitacode"
+          subtitle={`Saving to ${getUserRuntimeConfigPath()}`}
         />
       );
     case 3:

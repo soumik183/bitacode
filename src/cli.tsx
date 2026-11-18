@@ -26,7 +26,7 @@ import {
   formatUpdateUnavailable,
   formatUpToDate,
 } from './utils/cli-update-format.js';
-import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig } from './config.js';
+import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig, detectConfigFromEnvironment } from './config.js';
 
 // A rejected promise in a background fetch should be logged, not kill the TUI.
 process.on('unhandledRejection', (reason) => {
@@ -136,6 +136,18 @@ program
       return;
     }
 
+    // Automatic global setup: if an API key is already in the environment,
+    // write the shared user config and finish without any wizard.
+    const detected = detectConfigFromEnvironment();
+    if (detected) {
+      const path = writeConfig(detected, 'user');
+      console.log('Configured Bitacode (global):');
+      console.log(path);
+      console.log(`${detected.provider} / ${detected.model}`);
+      return;
+    }
+
+    // Otherwise go straight to provider → model → API key. No target question.
     render(<ConfigureComponent />, { maxFps: 60 });
   });
 

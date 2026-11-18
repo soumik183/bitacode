@@ -19,7 +19,7 @@ import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import { formatInstalled, formatUpdateAvailable, formatUpdateNotice, formatUpdateUnavailable, formatUpToDate, } from './utils/cli-update-format.js';
-import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig } from './config.js';
+import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig, detectConfigFromEnvironment } from './config.js';
 // A rejected promise in a background fetch should be logged, not kill the TUI.
 process.on('unhandledRejection', (reason) => {
     logger.error('Unhandled promise rejection', {
@@ -104,6 +104,17 @@ program
         }
         return;
     }
+    // Automatic global setup: if an API key is already in the environment,
+    // write the shared user config and finish without any wizard.
+    const detected = detectConfigFromEnvironment();
+    if (detected) {
+        const path = writeConfig(detected, 'user');
+        console.log('Configured Bitacode (global):');
+        console.log(path);
+        console.log(`${detected.provider} / ${detected.model}`);
+        return;
+    }
+    // Otherwise go straight to provider → model → API key. No target question.
     render(_jsx(ConfigureComponent, {}), { maxFps: 60 });
 });
 program
