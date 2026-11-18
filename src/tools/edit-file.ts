@@ -40,26 +40,58 @@ export const editFileTool = {
 
 // ─── Fuzzy Match Strategies ───
 
+/** An exact region in the file content that a strategy resolved old_string to. */
+interface Match {
+  /** Start index of `text` in the original file content. */
+  index: number;
+  /** Exact substring in the file to be replaced. */
+  text: string;
+}
+
 interface MatchStrategy {
   name: string;
-  /** Given file content and the model's oldString, return the actual substring in content to replace, or null. */
-  findMatch(content: string, oldString: string): string | null;
+  /** Return every region in `content` that matches `oldString` under this strategy. */
+  findMatches(content: string, oldString: string): Match[];
+}
+
+/** Character offset of each line's first character in `content`. */
+function lineStartOffsets(lines: string[]): number[] {
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const line of lines) {
+    offsets.push(offset);
+    offset += line.length + 1; // +1 for the '\n' separator
+  }
+  return offsets;
+}
+
+/** All non-overlapping indices of `needle` in `haystack`. */
+function indicesOf(haystack: string, needle: string): number[] {
+  const indices: number[] = [];
+  let idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    indices.push(idx);
+    idx += Math.max(needle.length, 1);
+  }
+  return indices;
 }
 
 /** Strategy 1: Exact verbatim match (current behavior). */
 const exactReplacer: MatchStrategy = {
   name: 'exact',
-  findMatch(content, oldString) {
-    return content.includes(oldString) ? oldString : null;
+  findMatches(content, oldString) {
+    return indicesOf(content, oldString).map(index => ({ index, text: oldString }));
   },
 };
 
 /** Strategy 2: Per-line .trim() comparison — uses file's actual indentation. */
 const lineTrimmedReplacer: MatchStrategy = {
   name: 'line-trimmed',
-  findMatch(content, oldString) {
+  findMatches(content, oldString) {
     const searchLines = oldString.split('\n').map(l => l.trim());
     const contentLines = content.split('\n');
+    const offsets = lineStartOffsets(contentLines);
+    const matches: Match[] = [];
 
     for (let i = 0; i <= contentLines.length - searchLines.length; i++) {
       let match = true;
@@ -70,24 +102,25 @@ const lineTrimmedReplacer: MatchStrategy = {
         }
       }
       if (match) {
-        // Return the actual lines from the file content
-        return contentLines.slice(i, i + searchLines.length).join('\n');
+        matches.push({ index: offsets[i], text: contentLines.slice(i, i + searchLines.length).join('\n') });
       }
     }
-    return null;
+    return matches;
   },
 };
 
 /** Strategy 3: Strip common leading indent from both before comparing. */
 const indentFlexReplacer: MatchStrategy = {
   name: 'indent-flexible',
-  findMatch(content, oldString) {
+  findMatches(content, oldString) {
     const oldLines = oldString.split('\n');
     const commonIndent = getCommonIndent(oldLines);
-    if (commonIndent === 0) return null;
+    if (commonIndent === 0) return [];
 
     const stripped = oldLines.map(l => l.slice(commonIndent)).join('\n');
     const contentLines = content.split('\n');
+    const offsets = lineStartOffsets(contentLines);
+    const matches: Match[] = [];
 
     for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
       const fileSlice = contentLines.slice(i, i + oldLines.length);
@@ -95,42 +128,43 @@ const indentFlexReplacer: MatchStrategy = {
       const fileStripped = fileSlice.map(l => l.slice(fileCommonIndent)).join('\n');
 
       if (fileStripped === stripped) {
-        return fileSlice.join('\n');
+        matches.push({ index: offsets[i], text: fileSlice.join('\n') });
       }
     }
-    return null;
+    return matches;
   },
 };
 
 /** Strategy 4: Collapse all whitespace runs to single space before comparing. */
 const whitespaceNormReplacer: MatchStrategy = {
   name: 'whitespace-normalized',
-  findMatch(content, oldString) {
+  findMatches(content, oldString) {
     const normalize = (s: string) => s.replace(/\s+/g, ' ').trim();
     const target = normalize(oldString);
-    if (!target) return null;
+    if (!target) return [];
 
     const contentLines = content.split('\n');
+    const offsets = lineStartOffsets(contentLines);
     const oldLineCount = oldString.split('\n').length;
+    const matches: Match[] = [];
 
-    // Slide a window of oldLineCount lines across the file
     for (let i = 0; i <= contentLines.length - oldLineCount; i++) {
       const window = contentLines.slice(i, i + oldLineCount).join('\n');
       if (normalize(window) === target) {
-        return window;
+        matches.push({ index: offsets[i], text: window });
       }
     }
-    return null;
+    return matches;
   },
 };
 
 /** Strategy 5: .trim() the entire oldString before searching. */
 const trimmedBoundaryReplacer: MatchStrategy = {
   name: 'trimmed-boundary',
-  findMatch(content, oldString) {
+  findMatches(content, oldString) {
     const trimmed = oldString.trim();
-    if (trimmed === oldString) return null; // no change from exact
-    return content.includes(trimmed) ? trimmed : null;
+    if (trimmed === oldString) return []; // no change from exact
+    return indicesOf(content, trimmed).map(index => ({ index, text: trimmed }));
   },
 };
 
@@ -152,40 +186,45 @@ function getCommonIndent(lines: string[]): number {
   return min === Infinity ? 0 : min;
 }
 
-/**
- * Count non-overlapping occurrences of `needle` in `haystack`.
- */
-function countOccurrences(haystack: string, needle: string): number {
-  let count = 0;
-  let idx = 0;
-  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
-    count++;
-    idx += needle.length;
-  }
-  return count;
-}
+type CascadeOutcome =
+  | { kind: 'match'; matches: Match[]; strategy: string }
+  | { kind: 'ambiguous'; strategy: string; lines: number[] }
+  | { kind: 'wrong-count'; count: number; strategy: string }
+  | { kind: 'not-found' };
 
 /**
- * Try each strategy in order. Return the actual substring to replace,
- * the strategy name used, and how many occurrences exist.
- * Only accepts strategies that find exactly one match (unambiguous).
+ * Try each strategy in order. A strategy is accepted only when all of its
+ * matches resolve to the same exact text (unambiguous) and their count equals
+ * the expected replacement count. Fuzzy matches that resolve to different
+ * regions are reported as ambiguous instead of being silently applied.
  */
 function findWithCascade(
   content: string,
   oldString: string,
   expectedReplacements: number,
-): { actual: string; strategy: string; count: number } | null {
-  for (const strategy of STRATEGIES) {
-    const actual = strategy.findMatch(content, oldString);
-    if (!actual) continue;
+): CascadeOutcome {
+  let wrongCount: { count: number; strategy: string } | null = null;
 
-    const count = countOccurrences(content, actual);
-    if (count === expectedReplacements) {
-      return { actual, strategy: strategy.name, count };
+  for (const strategy of STRATEGIES) {
+    const matches = strategy.findMatches(content, oldString);
+    if (matches.length === 0) continue;
+
+    // Distinct resolved texts mean the fuzzy match could target different
+    // blocks. Editing one (or all) would silently touch the wrong region.
+    const distinctTexts = new Set(matches.map(m => m.text));
+    if (distinctTexts.size > 1) {
+      const lines = matches.map(m => content.slice(0, m.index).split('\n').length);
+      return { kind: 'ambiguous', strategy: strategy.name, lines };
     }
-    // If count doesn't match expected, skip this strategy
+
+    const count = matches.length;
+    if (count === expectedReplacements) {
+      return { kind: 'match', matches, strategy: strategy.name };
+    }
+    if (wrongCount === null) wrongCount = { count, strategy: strategy.name };
   }
-  return null;
+
+  return wrongCount ? { kind: 'wrong-count', ...wrongCount } : { kind: 'not-found' };
 }
 
 // ─── Main editFile function ───
@@ -256,18 +295,15 @@ export async function editFile(
   const content = await fs.readFile(validated, 'utf8');
 
   // Use fuzzy match cascade
-  const match = findWithCascade(content, oldString, expected);
+  const outcome = findWithCascade(content, oldString, expected);
 
-  if (!match) {
-    // Check if we found it with wrong count
-    for (const strategy of STRATEGIES) {
-      const actual = strategy.findMatch(content, oldString);
-      if (actual) {
-        const count = countOccurrences(content, actual);
-        return `Error: found ${count} occurrence(s) of old_string (via ${strategy.name} match), but expected ${expected}. Be more specific or set expected_replacements=${count}.`;
-      }
-    }
-
+  if (outcome.kind === 'ambiguous') {
+    return `Error: ambiguous match — old_string matches multiple distinct regions via ${outcome.strategy} at line(s) ${outcome.lines.join(', ')}. Make old_string more specific so it targets a single block.`;
+  }
+  if (outcome.kind === 'wrong-count') {
+    return `Error: found ${outcome.count} occurrence(s) of old_string (via ${outcome.strategy} match), but expected ${expected}. Be more specific or set expected_replacements=${outcome.count}.`;
+  }
+  if (outcome.kind === 'not-found') {
     // Build a per-strategy diagnostic to help the model self-correct without
     // requiring a full re-read. For each strategy, find the closest partial
     // match and report ALL lines where it diverges (not just the first).
@@ -336,7 +372,8 @@ export async function editFile(
     return `Error: old_string not found in ${filePath}.${hint}\nDo NOT retry with a guess. Call read_file on ${filePath} first to get the exact current content, then construct old_string by copying verbatim from the file.`;
   }
 
-  const { actual, strategy, count } = match;
+  const { matches, strategy } = outcome;
+  const count = matches.length;
 
   // Request approval
   const oldPreview = oldString.length > 200 ? oldString.slice(0, 200) + '...' : oldString;
@@ -356,8 +393,13 @@ export async function editFile(
     return `Operation cancelled: edit to ${filePath} was rejected by user.`;
   }
 
-  // Perform replacement using the actual matched string (not the model's version)
-  const newContent = content.split(actual).join(newString);
+  // Replace each matched region by its exact index, working backwards so
+  // earlier indices stay valid. Never use split/join: a fuzzy-resolved
+  // substring may also appear elsewhere and must not be edited there.
+  let newContent = content;
+  for (const match of [...matches].sort((a, b) => b.index - a.index)) {
+    newContent = newContent.slice(0, match.index) + newString + newContent.slice(match.index + match.text.length);
+  }
   const directory = path.dirname(validated);
   const tempPath = path.join(directory, `.bitacode-edit-${process.pid}-${Date.now()}-${path.basename(validated)}`);
   try {

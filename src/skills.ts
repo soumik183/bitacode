@@ -38,6 +38,23 @@ interface SkillRoot {
 const ACTIVATE_SKILL_TOOL_NAME = 'activate_skill';
 const VALID_SKILL_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const MAX_RESOURCE_FILES = 200;
+const MAX_SKILL_FILE_BYTES = 256 * 1024;
+
+// Discovery is expensive and happens once for the system prompt and again on
+// every activateSkill(). Cache the promise (not just the result) so concurrent
+// callers with the same roots share a single filesystem scan. Callers get a
+// shallow array copy so they cannot mutate what is stored here.
+const skillsCache = new Map<string, Promise<Skill[]>>();
+
+export function clearSkillsCache(): void {
+  skillsCache.clear();
+}
+
+function skillCacheKey(options: SkillDiscoveryOptions = {}): string {
+  const cwd = options.cwd ?? process.cwd();
+  const homeDir = options.homeDir ?? os.homedir();
+  return JSON.stringify({ cwd, homeDir, roots: getSkillRoots(options) });
+}
 
 function getSkillRoots(options: SkillDiscoveryOptions = {}): SkillRoot[] {
   const cwd = options.cwd ?? process.cwd();
@@ -132,6 +149,12 @@ async function loadSkillFromDirectory(skillDir: string, source: 'project' | 'use
   const location = path.join(skillDir, 'SKILL.md');
 
   try {
+    const stats = await fs.stat(location);
+    if (stats.size > MAX_SKILL_FILE_BYTES) {
+      logger.warn(`Skipping oversized SKILL.md at ${location} (${stats.size} bytes > ${MAX_SKILL_FILE_BYTES} bytes).`);
+      return null;
+    }
+
     const rawContent = await fs.readFile(location, 'utf8');
     const parsed = parseFrontmatter(rawContent);
     const skill = validateSkill(parsed, skillDir, source, location);
@@ -163,7 +186,7 @@ async function discoverSkillsInRoot(root: SkillRoot): Promise<Skill[]> {
   return loaded.filter((skill): skill is Skill => skill !== null);
 }
 
-export async function loadSkills(options: SkillDiscoveryOptions = {}): Promise<Skill[]> {
+async function discoverAllSkills(options: SkillDiscoveryOptions): Promise<Skill[]> {
   const roots = getSkillRoots(options);
   const merged = new Map<string, Skill>();
 
@@ -180,6 +203,17 @@ export async function loadSkills(options: SkillDiscoveryOptions = {}): Promise<S
   }
 
   return Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function loadSkills(options: SkillDiscoveryOptions = {}): Promise<Skill[]> {
+  const key = skillCacheKey(options);
+  let cached = skillsCache.get(key);
+  if (!cached) {
+    cached = discoverAllSkills(options);
+    skillsCache.set(key, cached);
+  }
+
+  return [...(await cached)];
 }
 
 function escapeXml(value: string): string {
@@ -215,15 +249,35 @@ ${catalog}
 </available_skills>`;
 }
 
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
 async function listSkillResources(skillDir: string): Promise<string[]> {
   const files: string[] = [];
+
+  let realSkillDir: string;
+  try {
+    realSkillDir = await fs.realpath(skillDir);
+  } catch {
+    return [];
+  }
 
   async function walk(relativeDir: string): Promise<void> {
     if (files.length >= MAX_RESOURCE_FILES) return;
 
     const absoluteDir = path.join(skillDir, relativeDir);
-    let entries: Dirent[] = [];
+    let realDir: string;
+    try {
+      realDir = await fs.realpath(absoluteDir);
+    } catch {
+      return;
+    }
+    // A top-level resource dir symlinked to an outside location must not be walked.
+    if (!isPathInside(realSkillDir, realDir)) return;
 
+    let entries: Dirent[] = [];
     try {
       entries = await fs.readdir(absoluteDir, { withFileTypes: true });
     } catch {
@@ -237,6 +291,15 @@ async function listSkillResources(skillDir: string): Promise<string[]> {
       if (entry.isDirectory()) {
         await walk(nextRelative);
       } else {
+        // Dirent.isDirectory() is false for symlinks, so a symlinked file (or
+        // dir) would be listed above. Verify its real target stays in the skill.
+        let realFile: string;
+        try {
+          realFile = await fs.realpath(path.join(absoluteDir, entry.name));
+        } catch {
+          continue;
+        }
+        if (!isPathInside(realSkillDir, realFile)) continue;
         files.push(nextRelative.split(path.sep).join('/'));
       }
     }
@@ -245,7 +308,7 @@ async function listSkillResources(skillDir: string): Promise<string[]> {
   for (const dir of ['scripts', 'references', 'assets']) {
     await walk(dir);
   }
-  return files.sort();
+  return [...new Set(files)].sort();
 }
 
 export async function activateSkill(skillName: string, options: SkillDiscoveryOptions = {}): Promise<string> {

@@ -18,6 +18,8 @@ export interface StreamResult {
     role: 'assistant';
     content: string;
     tool_calls: any[];
+    /** UI-only field persisted for replaying the thought on resume. */
+    reasoning?: string;
   };
   hasToolCalls: boolean;
   usage: {
@@ -47,10 +49,15 @@ export async function processStream(
     tool_calls: [] as any[],
   };
 
+  // Cap accumulated reasoning so a runaway provider cannot exhaust memory.
+  const MAX_REASONING_CHARS = 100_000;
+
   let streamedContent = '';
   let streamedReasoning = '';
   let hasToolCalls = false;
   let actualUsage: OpenAI.CompletionUsage | undefined;
+  let refusalEmitted = false;
+  let truncationEmitted = false;
 
   for await (const chunk of stream) {
     const delta = chunk.choices[0]?.delta;
@@ -59,11 +66,27 @@ export async function processStream(
       actualUsage = chunk.usage;
     }
 
+    // Surface a model refusal (delta.refusal with no text content) once so the
+    // user knows why there was no answer.
+    const refusal = (delta as any)?.refusal;
+    if (!refusalEmitted && typeof refusal === 'string' && refusal.length > 0) {
+      refusalEmitted = true;
+      onEvent({ type: 'error', error: refusal, transient: true });
+    }
+
+    // Surface token-limit truncation once.
+    if (!truncationEmitted && chunk.choices[0]?.finish_reason === 'length') {
+      truncationEmitted = true;
+      onEvent({ type: 'error', error: "Response truncated by the model's token limit.", transient: true });
+    }
+
     // Stream reasoning/thinking text when the provider exposes it
     // (`reasoning_content` for DeepSeek-style APIs, `reasoning` for others).
     const reasoningDelta = (delta as any)?.reasoning_content ?? (delta as any)?.reasoning;
     if (typeof reasoningDelta === 'string' && reasoningDelta.length > 0) {
-      streamedReasoning += reasoningDelta;
+      if (streamedReasoning.length < MAX_REASONING_CHARS) {
+        streamedReasoning = (streamedReasoning + reasoningDelta).slice(0, MAX_REASONING_CHARS);
+      }
       onEvent({ type: 'reasoning_delta', content: reasoningDelta });
     }
 
@@ -80,7 +103,8 @@ export async function processStream(
     if (delta?.tool_calls) {
       hasToolCalls = true;
       for (const tc of delta.tool_calls) {
-        const idx = tc.index || 0;
+        // Malformed deltas may carry a negative/fractional index; fall back to slot 0.
+        const idx = Number.isInteger(tc.index) && tc.index >= 0 ? tc.index : 0;
         if (!assistantMessage.tool_calls[idx]) {
           assistantMessage.tool_calls[idx] = {
             id: '',
@@ -89,10 +113,10 @@ export async function processStream(
           };
         }
         if (tc.id) assistantMessage.tool_calls[idx].id = tc.id;
-        if (tc.function?.name) {
+        if (typeof tc.function?.name === 'string') {
           assistantMessage.tool_calls[idx].function.name += tc.function.name;
         }
-        if (tc.function?.arguments) {
+        if (typeof tc.function?.arguments === 'string') {
           assistantMessage.tool_calls[idx].function.arguments += tc.function.arguments;
         }
         // Gemini 3+ models include an `extra_content` field on tool calls
@@ -147,6 +171,13 @@ export async function processStream(
       argsPreview: tc.function?.arguments?.slice(0, 100),
     })),
   });
+
+  // Keep the reasoning with the assistant message so it survives session
+  // save/replay. This is a UI-only field; the agentic loop strips it before
+  // sending history back to the provider.
+  if (streamedReasoning.trim()) {
+    (assistantMessage as any).reasoning = streamedReasoning;
+  }
 
   return {
     assistantMessage,

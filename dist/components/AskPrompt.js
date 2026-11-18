@@ -9,6 +9,12 @@ const RECOMMENDED_TAG = 'recommended';
 /** Marker shown for a chosen option in multi-select mode. */
 const CHECKED = '◉';
 const UNCHECKED = '◯';
+// Fixed columns an option line spends before its label: the LeftBar gutter,
+// the cursor, the optional multi-select marker and the "N. " index.
+const GUTTER = 2;
+const CURSOR = 2;
+const NUMBER = 3;
+const indentFor = (multiple) => CURSOR + (multiple ? 2 : 0) + NUMBER;
 function clampText(text, width) {
     const single = text.replace(/\s+/g, ' ').trim();
     if (single.length <= width)
@@ -27,7 +33,7 @@ function clampText(text, width) {
  *  - typing is always allowed unless the question sets allow_free_text false
  *  - a progress line makes a multi-question ask feel bounded
  */
-export const AskPrompt = ({ questions, columns, onRespond }) => {
+export const AskPrompt = ({ questions, columns, compact = false, onRespond }) => {
     const [index, setIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [cursor, setCursor] = useState(0);
@@ -56,7 +62,9 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
     const options = question?.options ?? [];
     const canType = question?.allow_free_text !== false;
     const hasOptions = options.length > 0;
-    const width = Math.max(20, columns - 8);
+    // Fit the terminal: an old 20-column floor overflowed narrow/zoomed screens.
+    const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+    const width = Math.max(1, cols - 8);
     const currentAnswer = () => {
         if (question?.multiple && pickedRef.current.length > 0) {
             return pickedRef.current
@@ -176,12 +184,23 @@ export const AskPrompt = ({ questions, columns, onRespond }) => {
     });
     if (!question)
         return null;
-    return (_jsx(LeftBar, { color: theme.accent, marginTop: 1, marginBottom: 1, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { children: [_jsx(Text, { color: theme.accent, bold: true, children: "Agent question" }), total > 1 && (_jsx(Text, { color: theme.dim, children: `  ${index + 1}/${total}` }))] }), _jsx(Text, { color: theme.text, bold: true, wrap: "wrap", children: question.question }), question.context && (_jsx(Text, { color: theme.dim, wrap: "wrap", children: clampText(question.context, width * 2) })), hasOptions && (_jsx(Box, { flexDirection: "column", marginTop: 1, children: options.map((option, optionIndex) => {
+    const multiple = Boolean(question.multiple);
+    const indent = indentFor(multiple);
+    // Long "recommended" labels eat the whole row on narrow terminals; collapse
+    // them to a single star there while keeping the word on roomy screens.
+    const showRecommendedText = cols >= 48;
+    const gap = compact ? 0 : 1;
+    return (_jsx(LeftBar, { color: theme.accent, marginTop: gap, marginBottom: gap, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { children: [_jsx(Text, { color: theme.accent, bold: true, children: "Agent question" }), total > 1 && (_jsx(Text, { color: theme.dim, children: `  ${index + 1}/${total}` }))] }), _jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: question.question }), question.context && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: clampText(question.context, width) })), hasOptions && (_jsx(Box, { flexDirection: "column", marginTop: gap, children: options.map((option, optionIndex) => {
                         const active = !typing && optionIndex === cursor;
                         const isPicked = question.multiple ? picked.includes(optionIndex) : active;
-                        const marker = question.multiple ? (isPicked ? CHECKED : UNCHECKED) : active ? '❯' : ' ';
-                        return (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${active ? '❯' : ' '} ` }), question.multiple && (_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${marker} ` })), _jsx(Text, { color: active ? theme.text : theme.muted, bold: active, children: `${optionIndex + 1}. ${clampText(option.label, width - 8)}` }), option.recommended && (_jsx(Text, { color: theme.success, children: `  ${RECOMMENDED_TAG}` }))] }), active && option.description && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `     ${clampText(option.description, width - 8)}` }))] }, `${option.label}-${optionIndex}`));
-                    }) })), typing && (_jsx(Box, { marginTop: 1, children: _jsxs(Text, { children: [_jsx(Text, { color: theme.accent, children: '> ' }), _jsx(Text, { color: theme.text, children: draft }), _jsx(Text, { inverse: true, children: ' ' })] }) })), _jsx(Box, { marginTop: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: typing
+                        const recWidth = option.recommended
+                            ? showRecommendedText ? RECOMMENDED_TAG.length + 2 : 2
+                            : 0;
+                        // Reserve only what this specific line actually draws, so long
+                        // labels keep as much room as the terminal allows.
+                        const labelMax = Math.max(1, cols - GUTTER - indent - recWidth);
+                        return (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${active ? '❯' : ' '} ` }), multiple && (_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${isPicked ? CHECKED : UNCHECKED} ` })), _jsx(Text, { color: active ? theme.text : theme.muted, bold: active, children: `${optionIndex + 1}. ${clampText(option.label, labelMax)}` }), option.recommended && (_jsx(Text, { color: theme.success, children: showRecommendedText ? `  ${RECOMMENDED_TAG}` : ' ★' }))] }), active && option.description && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${' '.repeat(indent)}${clampText(option.description, Math.max(1, cols - GUTTER - indent))}` }))] }, `${option.label}-${optionIndex}`));
+                    }) })), typing && (_jsx(Box, { marginTop: gap, children: _jsxs(Text, { children: [_jsx(Text, { color: theme.accent, children: '> ' }), _jsx(Text, { color: theme.text, children: draft }), _jsx(Text, { inverse: true, children: ' ' })] }) })), _jsx(Box, { marginTop: gap, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: typing
                             ? 'type your answer · enter send · esc skip'
                             : [
                                 hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',

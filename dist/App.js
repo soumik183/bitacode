@@ -66,7 +66,9 @@ import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
 import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
 import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.js';
+import { ThinkingArchive } from './components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
+import { SubAgentActivity, subAgentActivityRows, subAgentActivitySummary, upsertSubAgentActivity, } from './components/SubAgentActivity.js';
 import { theme } from './theme.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { VARIANTS } from './variants.js';
@@ -76,7 +78,7 @@ import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, 
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
 import { getAllProviders, getProvider, getModelDetails, getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { runAgenticLoop, initializeMessages, } from './agentic-loop.js';
-import { setDangerouslySkipPermissions, setApprovalMode, setApprovalHandler, clearApprovalHandler, setAskHandler, } from './tools/index.js';
+import { setDangerouslySkipPermissions, setApprovalMode, setApprovalHandler, clearApprovalHandler, setAskHandler, recordSubAgentStatus, } from './tools/index.js';
 import { setLogLevel, LogLevel, initLogFile, logger } from './utils/logger.js';
 import { createSession, deleteSession, ensureSystemPromptAtTop, hasConversationMessages, saveSession, loadSession, listSessions, generateTitle, } from './sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession } from './tools/todo.js';
@@ -89,7 +91,7 @@ import { itemAtViewportRow } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isClickOnThinkingBlock, isMouseReport, stripMouseReports } from './utils/mouse.js';
 import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import { clampScroll, maxScrollOffset, scrollAfterGrowth, sliceItemsToWindow, visibleRowWindow, } from './utils/scroll.js';
-import { clampIndex, composerTextWidth, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
+import { clampIndex, composerTextWidth, finiteDim, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from './utils/scrollbar.js';
 import { useAgentEventHandler } from './hooks/useAgentEventHandler.js';
 // Keep scrollback rendering light on long sessions and low-memory devices.
@@ -148,10 +150,17 @@ function printMessageToScrollback(addStatic, role, text) {
     // Fallback is assistant, render with Markdown formatting (bold, italic)
     addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized) }) }));
 }
-function replayOneMessage(addStatic, message, toolCallsById) {
+function replayOneMessage(addStatic, message, toolCallsById, columns) {
     const msgAny = message;
     if (message.role === 'system')
         return;
+    // Persisted reasoning is replayed as an expandable thought card above the
+    // answer it produced, matching the live session's scrollback order.
+    if (msgAny.role === 'assistant' && typeof msgAny.reasoning === 'string' && msgAny.reasoning.trim()) {
+        const collapsed = _jsx(ThinkingArchive, { text: msgAny.reasoning, elapsedMs: 0, columns: columns });
+        const expanded = _jsx(ThinkingArchive, { text: msgAny.reasoning, elapsedMs: 0, columns: columns, expanded: true });
+        addStatic(collapsed, { collapsed, expanded });
+    }
     if (message.role === 'user' && typeof message.content === 'string') {
         printMessageToScrollback(addStatic, 'user', message.content);
         return;
@@ -169,7 +178,7 @@ function replayOneMessage(addStatic, message, toolCallsById) {
         addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''));
     }
 }
-function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.length) {
+function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.length, columns) {
     const omitted = Math.max(0, messages.length - maxMessages);
     const visible = omitted > 0 ? messages.slice(omitted) : messages;
     // Saved tool results only carry tool_call_id, so recover the tool name and
@@ -191,7 +200,7 @@ function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.
     }
     for (const message of visible) {
         try {
-            replayOneMessage(addStatic, message, toolCallsById);
+            replayOneMessage(addStatic, message, toolCallsById, columns);
         }
         catch (err) {
             // One malformed saved message must not abort the rest of the transcript.
@@ -205,6 +214,12 @@ function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.
     if (messages.length > 0) {
         addStatic(_jsx(Box, { height: 1 }));
     }
+}
+/** Flush one compact card summarising a resumed session's child agents. */
+function replaySubAgentActivities(addStatic, activities) {
+    if (activities.length === 0)
+        return;
+    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: `▣ ${subAgentActivitySummary(activities)}` }) }));
 }
 // Limit streaming text to the free viewport rows. Count WRAPPED rows, not
 // logical lines: one long token with no newline can still wrap to many rows
@@ -290,9 +305,11 @@ function buildClient(config, apiKeyOverride) {
 export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }) => {
     const { exit } = useApp();
     const { stdout } = useStdout();
+    // A zoom burst can briefly report 0/undefined/NaN dimensions; clamp once at
+    // the source so every downstream width/height stays a finite positive int.
     const [dims, setDims] = useState({
-        columns: stdout?.columns || 80,
-        rows: stdout?.rows || 24,
+        columns: finiteDim(stdout?.columns, 80),
+        rows: finiteDim(stdout?.rows, 24),
     });
     const { columns, rows } = dims;
     // One row shorter than the terminal. Rendering at exactly `rows` makes Ink
@@ -402,6 +419,10 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     const [thinkingElapsedMs, setThinkingElapsedMs] = useState(0);
     const [thinkingArchived, setThinkingArchived] = useState(false);
     const [todos, setTodos] = useState([]);
+    // Child-agent activity. Kept as the full record for session persistence;
+    // a separate flag drives the compact live panel and its auto-hide timer.
+    const [subAgentActivities, setSubAgentActivities] = useState([]);
+    const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
     // Input reset key — incremented on submit to force TextInput remount and clear
     const [inputResetKey, setInputResetKey] = useState(0);
     // Palette state: slash-command list, provider/model/variant pickers
@@ -474,6 +495,31 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         streamingBufferRef,
         columns,
     });
+    // Wrap the shared event handler so child-agent progress is tracked here
+    // (the hook is shared and intentionally unaware of this UI-only state).
+    const handleAgentEventWithSubAgents = useCallback((event) => {
+        if (event.type === 'sub_agent_iteration') {
+            const fields = event;
+            if (fields.subAgentId) {
+                setSubAgentActivities((prev) => upsertSubAgentActivity(prev, fields));
+                setShowSubAgentPanel(true);
+                // Feed the in-memory registry used by the agent_status tool so the
+                // main model can query what its children are doing.
+                recordSubAgentStatus(fields.subAgentId, fields.subAgentTask ?? fields.subAgentLabel ?? '', fields.subAgentStatus ?? 'start');
+            }
+        }
+        handleAgentEvent(event);
+    }, [handleAgentEvent]);
+    // Finished children linger briefly, then fold away so the panel does not
+    // occupy the live area forever. A new activity resets the timer; a still
+    // running child keeps the panel pinned.
+    const hasActiveSubAgent = subAgentActivities.some((item) => item.status === 'start');
+    useEffect(() => {
+        if (!showSubAgentPanel || hasActiveSubAgent)
+            return;
+        const timer = setTimeout(() => setShowSubAgentPanel(false), 8000);
+        return () => clearTimeout(timer);
+    }, [showSubAgentPanel, hasActiveSubAgent, subAgentActivities]);
     const didPrintIntroRef = useRef(false);
     const printedThreadErrorIdsRef = useRef(new Set());
     const initializeWithConfig = useCallback(async (loadedConfig) => {
@@ -528,11 +574,15 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 setTodosForSession(loadedSession.id, loadedSession.todos);
                 setSession(loadedSession);
                 setCompletionMessages(loadedSession.completionMessages);
+                const savedActivities = loadedSession.subAgentActivities ?? [];
+                setSubAgentActivities(savedActivities);
+                setShowSubAgentPanel(false);
                 if (!didPrintIntroRef.current) {
                     if (hasConversationMessages(loadedSession.completionMessages)) {
                         setMeasuringTranscript(true);
                     }
-                    replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES);
+                    replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES, columns);
+                    replaySubAgentActivities(addStatic, savedActivities);
                     didPrintIntroRef.current = true;
                     sessionSavedRef.current = true;
                 }
@@ -552,7 +602,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             didPrintIntroRef.current = true;
         }
         setInitialized(true);
-    }, [dangerouslySkipPermissions, sessionId, addStatic]);
+    }, [dangerouslySkipPermissions, sessionId, addStatic, columns]);
     const handleSetupComplete = useCallback((nextConfig) => {
         setError(null);
         void initializeWithConfig(nextConfig).catch((err) => {
@@ -673,18 +723,24 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             stdout.write('\x1b[?1006l\x1b[?1000l');
         };
     }, [stdout, mouseTrackingEnabled]);
-    // Re-render at the new size when the terminal is resized.
+    // Re-render at the new size when the terminal is resized. Guard the values
+    // so a transient 0/NaN during a zoom burst cannot poison the whole frame.
     useEffect(() => {
         if (!stdout)
             return;
         const onResize = () => {
-            setDims({ columns: stdout.columns || 80, rows: stdout.rows || 24 });
+            const next = {
+                columns: finiteDim(stdout.columns, dims.columns),
+                rows: finiteDim(stdout.rows, dims.rows),
+            };
+            // Skip no-op bursts (several resize events can fire for one zoom step).
+            setDims((prev) => prev.columns === next.columns && prev.rows === next.rows ? prev : next);
         };
         stdout.on('resize', onResize);
         return () => {
             stdout.off('resize', onResize);
         };
-    }, [stdout]);
+    }, [stdout, dims.columns, dims.rows]);
     // The bottom input/footer are fixed; the transcript viewport takes the
     // remaining rows. Measure it so wheel/keyboard scrolling can clamp exactly.
     //
@@ -706,6 +762,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         picker ?? '',
         settingsIndex !== null ? 1 : 0,
         initialized ? 1 : 0,
+        subAgentActivities.length,
+        showSubAgentPanel ? 1 : 0,
     ].join(':');
     useEffect(() => {
         if (!viewportRef.current)
@@ -798,7 +856,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         ? allModelItems.filter((item) => item.label.toLowerCase().includes(modelSearchTerm) ||
             item.id.toLowerCase().includes(modelSearchTerm))
         : allModelItems;
-    const selectedModelIndex = Math.min(pickerIndex, Math.max(0, modelItems.length - 1));
+    const selectedModelIndex = clampIndex(pickerIndex, modelItems.length);
     const variantItems = VARIANTS.map((variant) => ({
         id: variant.id,
         label: variant.label,
@@ -1005,6 +1063,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         setIsStreaming(false);
         setLoading(false);
         setActiveTool(null);
+        setSubAgentActivities([]);
+        setShowSubAgentPanel(false);
         setThreadErrors([]);
         setLastUsage(null);
         setTotalCost(0);
@@ -1054,6 +1114,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                     todos: getTodosForSession(session.id),
                     title: generateTitle(completionMessages),
                     variant: variantId,
+                    subAgentActivities,
                 };
                 await saveSession(finished);
             }
@@ -1162,13 +1223,15 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             }
             // Preserve the current conversation before replacing it.
             if (session && hasConversationMessages(completionMessages)) {
-                await saveSession({
+                const toSave = {
                     ...session,
                     completionMessages,
                     todos: getTodosForSession(session.id),
                     title: generateTitle(completionMessages),
                     variant: variantId,
-                });
+                    subAgentActivities,
+                };
+                await saveSession(toSave);
             }
             const systemPrompt = await generateSystemPrompt();
             const messages = ensureSystemPromptAtTop(loaded.completionMessages, systemPrompt);
@@ -1207,6 +1270,9 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             setTodosForSession(loaded.id, loaded.todos);
             setTodos(loaded.todos);
             resetLiveState();
+            const loadedActivities = loaded.subAgentActivities ?? [];
+            setSubAgentActivities(loadedActivities);
+            setShowSubAgentPanel(false);
             if (modelError) {
                 setError(`Session loaded, but its model is unavailable: ${modelError}`);
             }
@@ -1215,7 +1281,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             if (hasConversationMessages(messages)) {
                 setMeasuringTranscript(true);
             }
-            replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES);
+            replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES, columns);
+            replaySubAgentActivities(addStatic, loadedActivities);
             didPrintIntroRef.current = true;
             sessionSavedRef.current = true;
         }
@@ -1252,6 +1319,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                         todos: getTodosForSession(session.id),
                         title: generateTitle(completionMessages),
                         variant: variantId,
+                        subAgentActivities,
                     };
                     await saveSession(nextSession);
                     setSession(nextSession);
@@ -1480,7 +1548,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
             }
             // Create abort controller for this completion
             abortControllerRef.current = new AbortController();
-            const updatedMessages = await runAgenticLoop(clientRef.current, config.model, [...completionMessages, userMessage], trimmed, handleAgentEvent, {
+            const updatedMessages = await runAgenticLoop(clientRef.current, config.model, [...completionMessages, userMessage], trimmed, handleAgentEventWithSubAgents, {
                 pricing: pricing || undefined,
                 abortSignal: abortControllerRef.current.signal,
                 sessionId: session?.id,
@@ -1500,6 +1568,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 session.provider = config.provider;
                 session.model = config.model;
                 session.variant = variantId;
+                session.subAgentActivities = subAgentActivities;
                 await saveSession(session);
                 sessionSavedRef.current = true;
             }
@@ -1514,7 +1583,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                 setLoading(false);
             }
         }
-    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings]);
+    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents]);
     // Any command path can reject; never let that become an unhandled rejection
     // that kills the TUI after a turn.
     const submitSafely = useCallback(async (value) => {
@@ -1881,15 +1950,19 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
         ? `${providerLabel} / ${remoteModelLabel ?? getModelDetails(config.provider, config.model)?.name ?? config.model}`
         : 'not configured';
     const folderName = basename(process.cwd());
+    // Any interactive prompt owns the live area. Optional panels are hidden so
+    // the critical prompt keeps its rows instead of being clipped at the bottom.
+    const hasCriticalPrompt = pendingApproval !== null || pendingAsk !== null || keyPrompt !== null;
     const showSplash = initialized &&
         config !== null &&
         !loading &&
         !isStreaming &&
+        rows >= 8 &&
         !hasConversationMessages(completionMessages);
     // Responsive breakpoints live in utils/layout.ts so every panel agrees.
     const layout = resolveLayout(columns, rows);
     const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
-    const { paletteWindow, visibleTodos, gutter } = layout;
+    const { paletteWindow, visibleTodos, gutter, dense } = layout;
     const inputFocused = initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
     // Provider-driven only: the block appears when the model actually streams
     // reasoning, never just because a request is in flight. A busy agent with no
@@ -1909,30 +1982,31 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
     // (todos added, todos cleared) automatically hand space back to the
     // transcript instead of squeezing it or pushing the composer off-screen.
     const streamReserve = isStreaming ? Math.min(rows, 10) : 0;
+    const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
     const area = splitLiveArea(frameHeight, {
         todos: todoRows,
         thinking: thinkingRows,
         help: helpRows,
-        streaming: streamReserve,
+        streaming: streamReserve + subAgentRows,
     });
     const maxStreamRows = Math.max(1, area.transcriptRows);
     // Rail geometry. `viewportRows` is measured from the real layout, so the
     // thumb lines up with what is actually on screen.
     const scrollbar = scrollbarGeometry(transcriptRows, viewportRows, effectiveUserScroll);
     const railLines = restoringTranscript ? [] : scrollbarLines(scrollbar);
-    return (_jsxs(Box, { flexDirection: "column", height: frameHeight, children: [_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
+    return (_jsxs(Box, { flexDirection: "column", height: frameHeight, children: [!hasCriticalPrompt && (_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
                                     // First item is partly above the viewport. Trim its top rows
                                     // by shifting it up inside a clipped, fixed-height box. A
                                     // blank spacer here shows empty rows and shoves the item's
                                     // bottom off-screen. The wrapper is registered for clicks so
                                     // the yoga lookup still sees the clipped geometry.
-                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] }), _jsxs(Box, { flexDirection: "column", flexShrink: 1, minHeight: 0, overflow: "hidden", children: [helpMessage && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && (_jsx(Box, { paddingX: 2, marginY: 1, children: _jsx(ConfigureComponent, { firstRun: true, onComplete: handleSetupComplete }) })), initialized && !pendingApproval && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), hasThinkingBlock && !pendingApproval && (_jsx(ThinkingBlock, { text: thinkingText, expanded: thinkingExpanded, active: thinkingActive, animate: settings.animations, frame: spinnerFrame, columns: columns, rows: rows, elapsedMs: thinkingElapsedMs })), isStreaming && (_jsx(Box, { paddingX: gutter, paddingBottom: 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, columns - gutter * 2)), _jsx(Text, { dimColor: true, children: "\u258D" })] }) })), threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`))), pendingAsk && !pendingApproval && (_jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: columns, onRespond: (response) => {
+                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: hasCriticalPrompt ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", children: [helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && (_jsx(Box, { paddingX: 2, marginY: 1, children: _jsx(ConfigureComponent, { firstRun: true, onComplete: handleSetupComplete }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), hasThinkingBlock && !hasCriticalPrompt && (_jsx(ThinkingBlock, { text: thinkingText, expanded: thinkingExpanded, active: thinkingActive, animate: settings.animations, frame: spinnerFrame, columns: columns, rows: rows, elapsedMs: thinkingElapsedMs })), isStreaming && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, columns - gutter * 2), columns - gutter * 2), _jsx(Text, { dimColor: true, children: "\u258D" })] }) })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`))), pendingAsk && !pendingApproval && (_jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: columns, compact: dense || rows <= 10, onRespond: (response) => {
                             pendingAsk.resolve(response);
                             setPendingAsk(null);
-                        } })), pendingApproval && (_jsx(ApprovalPrompt, { request: pendingApproval.request, onRespond: (response) => {
+                        } })), pendingApproval && (_jsx(ApprovalPrompt, { request: pendingApproval.request, columns: columns, compact: dense || rows <= 10, onRespond: (response) => {
                             pendingApproval.resolve(response);
                             setPendingApproval(null);
-                        } })), keyPrompt && (_jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, onSubmit: (value) => { void handleApiKeySubmit(value); } })), picker === 'model' && (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Box, { paddingX: 2, children: [_jsx(Text, { color: theme.dim, children: "Search " }), _jsx(Text, { color: theme.text, children: modelSearch }), _jsx(Text, { inverse: true, children: ' ' })] }), modelItems.length > 0 ? (_jsxs(_Fragment, { children: [(modelsLoading || modelNotice) && (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
+                        } })), keyPrompt && (_jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: columns, compact: dense || rows <= 10, onSubmit: (value) => { void handleApiKeySubmit(value); } })), picker === 'model' && (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Box, { paddingX: 2, children: [_jsx(Text, { color: theme.dim, children: "Search " }), _jsx(Text, { color: theme.text, children: modelSearch }), _jsx(Text, { inverse: true, children: ' ' })] }), modelItems.length > 0 ? (_jsxs(_Fragment, { children: [(modelsLoading || modelNotice) && (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
                                                 ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
                                                 : modelNotice }) })), _jsx(Palette, { title: modelProvider ? `Select model · ${modelProvider.name}` : 'Select model', items: modelItems, selected: selectedModelIndex, maxVisible: paletteWindow, hint: "type to search \u00B7 \u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })] })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: modelsLoading ? theme.dim : theme.error, children: modelsLoading
                                         ? `Loading models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
@@ -1942,5 +2016,5 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, }
                             ? `Delete session "${pendingSessionDelete.label}"?`
                             : 'Select session', items: sessionItems, selected: clampIndex(pickerIndex, sessionItems.length), maxVisible: paletteWindow, hint: pendingSessionDelete
                             ? 'y delete permanently · n cancel'
-                            : '↑↓ select · enter resume · d delete · esc close' })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: sessionsLoading ? theme.dim : theme.muted, children: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.' }) }))), picker === 'variant' && (_jsx(Palette, { title: "Select variant", items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), settingsIndex !== null && (_jsx(Palette, { title: "Settings", items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter toggle \u00B7 esc close" })), !picker && !keyPrompt && settingsIndex === null && initialized && !pendingApproval && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && config && !pendingApproval && !pendingAsk && !keyPrompt && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && config && !pendingApproval && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter }))] }));
+                            : '↑↓ select · enter resume · d delete · esc close' })) : (_jsx(Box, { paddingX: 2, children: _jsx(Text, { color: sessionsLoading ? theme.dim : theme.muted, children: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.' }) }))), picker === 'variant' && (_jsx(Palette, { title: "Select variant", items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter use \u00B7 esc cancel" })), settingsIndex !== null && (_jsx(Palette, { title: "Settings", items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, hint: "\u2191\u2193 select \u00B7 enter toggle \u00B7 esc close" })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && config && !pendingApproval && !pendingAsk && !keyPrompt && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && config && !hasCriticalPrompt && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense }))] }));
 };

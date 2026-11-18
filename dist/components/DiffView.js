@@ -1,7 +1,10 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../theme.js';
 import { annotateDiff, displayFilePath } from '../utils/file-diff.js';
+import { detectLanguage, safeHighlight } from '../utils/code-highlight.js';
+import { TokenText } from './CodeBlock.js';
 const MAX_VISIBLE_LINES = 24;
 function lineColor(line) {
     if (line.kind === 'add')
@@ -18,12 +21,16 @@ function lineColor(line) {
  * Compact, colour-coded unified diff for edit_file/write_file results.
  * Green additions, red removals and file line numbers in a bordered card.
  */
-export const DiffView = ({ header, diff, filePath, operation }) => {
+export const DiffView = ({ header, diff, filePath, operation, language: languageOverride }) => {
     const lines = annotateDiff(diff);
     const additions = lines.filter((line) => line.kind === 'add').length;
     const removals = lines.filter((line) => line.kind === 'remove').length;
     const shown = lines.slice(0, MAX_VISIBLE_LINES);
     const hidden = lines.length - shown.length;
+    const language = languageOverride ?? detectLanguage(filePath);
+    // Highlight once per diff, not per render. Syntax colours sit on top of the
+    // green/red line tint: uncoloured tokens inherit `baseColor` below.
+    const tokens = React.useMemo(() => shown.map((line) => safeHighlight(line.text, language)[0] ?? [{ text: line.text }]), [diff, language]);
     const gutter = Math.max(2, ...shown.map((line) => (line.number == null ? 0 : String(line.number).length)));
     const summary = header
         .replace(/^Successfully (edited|wrote) /i, (_, verb) => (verb.toLowerCase() === 'edited' ? 'Edited ' : 'Wrote '))
@@ -38,6 +45,6 @@ export const DiffView = ({ header, diff, filePath, operation }) => {
                     return (_jsx(Text, { color: color, wrap: "truncate-end", children: `${' '.repeat(gutter)}  ${line.text}` }, index));
                 }
                 const sign = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ';
-                return (_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: color, children: String(line.number).padStart(gutter) }), _jsx(Text, { color: theme.dim, children: '  ' }), _jsx(Text, { color: color, children: `${sign} ${line.text}` })] }, index));
+                return (_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: color, children: String(line.number).padStart(gutter) }), _jsx(Text, { color: theme.dim, children: '  ' }), _jsx(Text, { color: color, children: `${sign} ` }), _jsx(TokenText, { tokens: tokens[index] ?? [{ text: line.text }], baseColor: color })] }, index));
             }), hidden > 0 && (_jsx(Text, { color: theme.dim, children: `${' '.repeat(gutter)}  … ${hidden} more line${hidden === 1 ? '' : 's'}` }))] }));
 };

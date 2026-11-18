@@ -1,18 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import React from 'react';
 import { Box, Text } from 'ink';
 import { render } from 'ink-testing-library';
+import { render as renderInk } from 'ink';
 import { settle, waitForFrame } from './helpers/wait.js';
 import { App } from '../src/App.js';
-import { getApprovalMode, setApprovalMode } from '../src/utils/approval.js';
+import { getApprovalMode, setApprovalMode, requestApproval } from '../src/utils/approval.js';
 import { ThinkingBlock, clipToPreview, thinkingBlockHeight } from '../src/components/ThinkingBlock.js';
 import { ThinkingArchive, archivePreviewChars } from '../src/components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from '../src/components/TodoPanel.js';
+import {
+  SubAgentActivity,
+  subAgentActivityRows,
+  subAgentActivitySummary,
+  upsertSubAgentActivity,
+  type SubAgentActivityItem,
+} from '../src/components/SubAgentActivity.js';
 import { PromptInput } from '../src/components/PromptInput.js';
+import { AskPrompt } from '../src/components/AskPrompt.js';
+import { ApprovalPrompt } from '../src/components/ApprovalPrompt.js';
+import { ApiKeyPrompt } from '../src/components/ApiKeyPrompt.js';
 import { ErrorBoundary } from '../src/components/ErrorBoundary.js';
 import { maxScrollOffset, visibleRowWindow, sliceItemsToWindow } from '../src/utils/scroll.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from '../src/utils/scrollbar.js';
@@ -126,9 +138,9 @@ test('prompt input scrolls the window when the cursor moves into the middle', as
 
   for (let i = 0; i < 27; i++) {
     stdin.write('\x1b[D');
-    await settle(30);
+    await settle(80);
   }
-  await settle(50);
+  await settle(100);
 
   const frame = plain(lastFrame() ?? '');
   assert.equal(frame.split('\n').length, 1);
@@ -172,9 +184,9 @@ test('prompt input backspace removes a whole emoji instead of half a surrogate p
   const { stdin } = render(<Harness />);
   await settle();
   stdin.write('\x7f'); // delete 'b'
-  await settle(30);
+  await settle(80);
   stdin.write('\x7f'); // must delete the whole emoji, not one UTF-16 unit
-  await settle(50);
+  await settle(100);
   assert.equal(value(), 'a');
 });
 
@@ -184,12 +196,12 @@ test('prompt input arrows keep the cursor on emoji glyph boundaries', async () =
   await settle();
   for (let i = 0; i < 3; i++) {
     stdin.write('\x1b[D');
-    await settle(30);
+    await settle(80);
   }
   stdin.write('\x1b[C');
-  await settle(30);
+  await settle(80);
   stdin.write('X');
-  await settle(50);
+  await settle(100);
   // A UTF-16 cursor would land between the surrogate halves and split 😀.
   assert.equal(value(), '😀Xb');
 });
@@ -199,12 +211,12 @@ test('prompt input CJK arrows and backspace land on whole glyphs', async () => {
   const { stdin } = render(<Harness />);
   await settle();
   stdin.write('\x1b[D'); // before 字
-  await settle(30);
+  await settle(80);
   stdin.write('X');
-  await settle(30);
+  await settle(80);
   assert.equal(value(), '漢X字');
   stdin.write('\x7f'); // removes X, not half of a glyph
-  await settle(50);
+  await settle(100);
   assert.equal(value(), '漢字');
 });
 
@@ -227,7 +239,7 @@ test('prompt input ignores SGR mouse reports', async () => {
   const { stdin } = render(<Harness />);
   await settle();
   stdin.write('\x1b[<0;10;5M');
-  await settle(50);
+  await settle(100);
 
   assert.equal(value, '');
 });
@@ -244,6 +256,26 @@ test('todo panel renders live completion state', () => {
   assert.match(frame, /1\/3 done/);
   assert.match(frame, /write tests/);
   assert.match(frame, /ship feature/);
+});
+
+test('todo panel never overflows a narrow terminal', () => {
+  const todos = [
+    { id: '1', content: 'a very long task description that must be clipped', status: 'in_progress' as const, priority: 'high' as const },
+    { id: '2', content: 'another long task description here', status: 'pending' as const, priority: 'medium' as const },
+    { id: '3', content: 'one more long task', status: 'completed' as const, priority: 'low' as const },
+  ];
+  for (const columns of [8, 20, 30]) {
+    const { lastFrame } = render(
+      <Box width={columns}>
+        <TodoPanel todos={todos} columns={columns} maxVisible={3} />
+      </Box>
+    );
+    const frame = plain(lastFrame() ?? '');
+    assert.ok(
+      lineWidth(frame) <= columns,
+      `todo panel is ${lineWidth(frame)} columns wide at ${columns} columns`
+    );
+  }
 });
 
 test('thinking block collapses to a plain header once reasoning ends', async () => {
@@ -297,6 +329,31 @@ test('collapsed thinking block stays a two-row header', () => {
   assert.equal((lastFrame() ?? '').split('\n').length, 2);
 });
 
+test('thinking block height matches the rendered row count for multi-line reasoning', () => {
+  const cases = [
+    'first line\nsecond line\nthird line',
+    Array.from({ length: 40 }, (_, i) => `line ${i} with some content here`).join('\n'),
+  ];
+  for (const text of cases) {
+    for (const expanded of [false, true]) {
+      const estimate = thinkingBlockHeight(text, expanded, 80, 24);
+      const { lastFrame } = render(
+        <ThinkingBlock
+          text={text}
+          expanded={expanded}
+          active={false}
+          animate={false}
+          frame={0}
+          columns={80}
+          rows={24}
+        />
+      );
+      const actual = (lastFrame() ?? '').split('\n').length;
+      assert.equal(estimate, actual, `estimate must match rendered rows (expanded=${expanded})`);
+    }
+  }
+});
+
 test('todo panel keeps the in-progress item visible in a long list', () => {
   const todos = Array.from({ length: 10 }, (_, i) => ({
     id: String(i),
@@ -318,20 +375,34 @@ test('archive preview uses the terminal width instead of a fixed cut', () => {
   assert.ok(wide.length > narrow.length);
 });
 
-test('archived thinking expands to the full reasoning on click', () => {
-  const text = `${'first line '.repeat(40)}\nSECOND LINE`;
-  const collapsed = render(
+test('archived thinking keeps each reasoning line and expands to all of them on click', () => {
+  const lines = Array.from({ length: 10 }, (_, i) => `thought line ${i}`);
+  const text = lines.join('\n');
+
+  const collapsed = plain(render(
     <ThinkingArchive text={text} elapsedMs={1000} columns={80} />
-  ).lastFrame() ?? '';
+  ).lastFrame() ?? '');
   assert.match(collapsed, /Thought/);
   assert.match(collapsed, /click to expand/);
-  assert.doesNotMatch(collapsed, /SECOND LINE/);
 
-  const expanded = render(
+  // Each kept line is its own row, in order — never flattened with `/\s+/g`.
+  const collapsedRows = collapsed.split('\n').map((row) => row.trim());
+  for (const line of lines.slice(0, 6)) {
+    assert.ok(collapsedRows.includes(line), `collapsed preview is missing "${line}"`);
+  }
+  assert.doesNotMatch(collapsed, /thought line 6/);
+  assert.match(collapsed, /… 4 more lines · click to expand/);
+  assert.doesNotMatch(collapsed, /thought line 0 thought line 1/);
+
+  const expanded = plain(render(
     <ThinkingArchive text={text} elapsedMs={1000} columns={80} expanded />
-  ).lastFrame() ?? '';
+  ).lastFrame() ?? '');
   assert.match(expanded, /click to collapse/);
-  assert.match(expanded, /SECOND LINE/);
+  const expandedRows = expanded.split('\n').map((row) => row.trim());
+  for (const line of lines) {
+    assert.ok(expandedRows.includes(line), `expanded view is missing "${line}"`);
+  }
+  assert.doesNotMatch(expanded, /more lines/);
 });
 
 
@@ -527,6 +598,144 @@ test('the composer placeholder appears exactly once in the frame', async () => {
   }
 });
 
+test('resuming a session replays saved reasoning line by line before its answer, once', async () => {
+  const originalHome = process.env.HOME;
+  const originalKey = process.env.OPENAI_API_KEY;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-reasoning-replay-'));
+  process.env.HOME = home;
+  process.env.OPENAI_API_KEY = 'test-key';
+  fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'bitacode.jsonc'),
+    JSON.stringify({
+      providers: { openai: { apiKey: 'test-key', models: { 'gpt-4o-mini': {} } } },
+      mcp: { servers: {} },
+    })
+  );
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'settings.json'),
+    JSON.stringify({ animations: false, mouseClicks: false, variant: 'none', approvalMode: 'manual' })
+  );
+
+  const id = 'reason01';
+  const dir = path.join(home, '.local', 'share', 'bitacode', 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `${id}.json`),
+    JSON.stringify({
+      id,
+      title: 'chat',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      model: 'gpt-4o-mini',
+      provider: 'openai',
+      todos: [],
+      completionMessages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'hello' },
+        {
+          role: 'assistant',
+          content: 'FINAL-ANSWER-MARKER',
+          reasoning: 'THOUGHT-STEP-ONE\nTHOUGHT-STEP-TWO\nTHOUGHT-STEP-THREE',
+        },
+      ],
+    })
+  );
+
+  let instance: ReturnType<typeof render> | undefined;
+  try {
+    instance = render(<App sessionId={id} />);
+    const frame = await waitForFrame(instance.lastFrame, (f) => f.includes('FINAL-ANSWER-MARKER'), 6000);
+    assert.match(frame, /Thought/, 'saved reasoning is replayed as a thought card');
+    assert.equal((frame.match(/Thought/g) ?? []).length, 1, 'the thought card appears exactly once');
+    assert.equal((frame.match(/FINAL-ANSWER-MARKER/g) ?? []).length, 1, 'the answer appears once');
+
+    const rows = frame.split('\n').map((row) => row.trim());
+    for (const step of ['THOUGHT-STEP-ONE', 'THOUGHT-STEP-TWO', 'THOUGHT-STEP-THREE']) {
+      assert.ok(rows.includes(step), `replayed reasoning is missing the line "${step}"`);
+    }
+    assert.ok(
+      frame.indexOf('THOUGHT-STEP-ONE') < frame.indexOf('FINAL-ANSWER-MARKER'),
+      'the reasoning card is replayed above its answer'
+    );
+  } finally {
+    instance?.unmount();
+    instance?.cleanup();
+    process.env.HOME = originalHome;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+    fs.rmSync(home, { recursive: true, force: true });
+    setApprovalMode('manual');
+  }
+});
+
+test('replayed transcript frame orders user message, thought card, then answer', async () => {
+  const originalHome = process.env.HOME;
+  const originalKey = process.env.OPENAI_API_KEY;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-frame-order-'));
+  process.env.HOME = home;
+  process.env.OPENAI_API_KEY = 'test-key';
+  fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'bitacode.jsonc'),
+    JSON.stringify({
+      providers: { openai: { apiKey: 'test-key', models: { 'gpt-4o-mini': {} } } },
+      mcp: { servers: {} },
+    })
+  );
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'settings.json'),
+    JSON.stringify({ animations: false, mouseClicks: false, variant: 'none', approvalMode: 'manual' })
+  );
+
+  const id = 'order001';
+  const dir = path.join(home, '.local', 'share', 'bitacode', 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, `${id}.json`),
+    JSON.stringify({
+      id,
+      title: 'chat',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      model: 'gpt-4o-mini',
+      provider: 'openai',
+      todos: [],
+      completionMessages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'USER-MARKER' },
+        {
+          role: 'assistant',
+          content: 'ANSWER-MARKER',
+          reasoning: 'THOUGHT-MARKER',
+        },
+      ],
+    })
+  );
+
+  let instance: ReturnType<typeof render> | undefined;
+  try {
+    instance = render(<App sessionId={id} />);
+    const frame = await waitForFrame(instance.lastFrame, (f) => f.includes('ANSWER-MARKER'), 6000);
+    const user = frame.indexOf('USER-MARKER');
+    const thought = frame.indexOf('THOUGHT-MARKER');
+    const answer = frame.indexOf('ANSWER-MARKER');
+    assert.ok(user >= 0, 'the user message is in the frame');
+    assert.ok(thought >= 0, 'the thought card is in the frame');
+    assert.ok(answer >= 0, 'the answer is in the frame');
+    assert.ok(user < thought, `user message (${user}) must precede the thought card (${thought})`);
+    assert.ok(thought < answer, `thought card (${thought}) must precede the answer (${answer})`);
+  } finally {
+    instance?.unmount();
+    instance?.cleanup();
+    process.env.HOME = originalHome;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+    fs.rmSync(home, { recursive: true, force: true });
+    setApprovalMode('manual');
+  }
+});
+
 test('opening help never pushes the composer or footer off screen', async () => {
   const app = renderApp();
   try {
@@ -663,5 +872,472 @@ test('ctrl+n starts a new session and clears the draft', async () => {
     assert.doesNotMatch(frame, /unsent draft/, '/new clears the input without leaking the old draft');
   } finally {
     app.cleanupAll();
+  }
+});
+
+// ─── Sub-agent activity tests ───
+test('sub-agent activity panel renders a synthetic event with status, task, tools and elapsed', () => {
+  const startedAt = 1_000_000;
+  let items: SubAgentActivityItem[] = [];
+  items = upsertSubAgentActivity(items, {
+    subAgentId: 'sub-agent-abc123',
+    subAgentLabel: 'Explore',
+    subAgentStatus: 'start',
+    subAgentTask: 'find all TODOs',
+  }, startedAt);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].status, 'start');
+  assert.equal(items[0].task, 'find all TODOs');
+
+  items = upsertSubAgentActivity(items, {
+    subAgentId: 'sub-agent-abc123',
+    subAgentTool: { tool: 'grep_search', status: 'running', iteration: 0 },
+  }, startedAt + 100);
+
+  const { lastFrame } = render(
+    <SubAgentActivity activities={items} columns={80} now={startedAt + 2300} />
+  );
+  const frame = lastFrame() ?? '';
+  assert.match(frame, /Sub-agents/);
+  assert.match(frame, /⠹/, 'a running child shows the spinner icon');
+  assert.match(frame, /find all TODOs/);
+  assert.match(frame, /1 tools/);
+  assert.match(frame, /2\.3s/, 'elapsed time is shown');
+});
+
+test('sub-agent activity upsert records completion and summary', () => {
+  const t0 = 1000;
+  let items: SubAgentActivityItem[] = [];
+  items = upsertSubAgentActivity(items, {
+    subAgentId: 'sa-1',
+    subAgentStatus: 'start',
+    subAgentTask: 'scan repo',
+  }, t0);
+  items = upsertSubAgentActivity(items, {
+    subAgentId: 'sa-1',
+    subAgentStatus: 'done',
+    subAgentTool: { tool: 'read_file', status: 'done', iteration: 2 },
+  }, t0 + 500);
+
+  assert.equal(items.length, 1, 'the child is upserted, not duplicated');
+  assert.equal(items[0].status, 'done');
+  assert.equal(items[0].endedAt, t0 + 500);
+  assert.equal(items[0].summary, 'read_file');
+  assert.equal(subAgentActivitySummary(items), '1 sub-agent: 1 done');
+
+  const { lastFrame } = render(<SubAgentActivity activities={items} columns={80} now={t0 + 500} />);
+  assert.match(lastFrame() ?? '', /✓/, 'a finished child shows the check icon');
+});
+
+test('sub-agent activity summary counts mixed statuses in one line', () => {
+  const items: SubAgentActivityItem[] = [
+    { id: 'a', task: 'a', status: 'done', startedAt: 0 },
+    { id: 'b', task: 'b', status: 'done', startedAt: 0 },
+    { id: 'c', task: 'c', status: 'error', startedAt: 0 },
+  ];
+  assert.equal(subAgentActivitySummary(items), '3 sub-agents: 2 done, 1 error');
+});
+
+test('sub-agent panel caps at four rows so it never hides the composer', () => {
+  const many: SubAgentActivityItem[] = Array.from({ length: 8 }, (_, i) => ({
+    id: `sa-${i}`,
+    task: `task ${i}`,
+    status: 'start' as const,
+    startedAt: i,
+  }));
+  assert.ok(subAgentActivityRows(many) <= 4);
+  const { lastFrame } = render(<SubAgentActivity activities={many} columns={80} now={5000} />);
+  const frame = lastFrame() ?? '';
+  assert.ok(frame.split('\n').length <= 4, `panel grew to ${frame.split('\n').length} rows`);
+});
+
+test('sub-agent activities replay from a saved session, keep the composer and persist on quit', async () => {
+  const originalHome = process.env.HOME;
+  const originalKey = process.env.OPENAI_API_KEY;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-subagents-'));
+  process.env.HOME = home;
+  process.env.OPENAI_API_KEY = 'test-key';
+  fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'bitacode.jsonc'),
+    JSON.stringify({
+      providers: { openai: { apiKey: 'test-key', models: { 'gpt-4o-mini': {} } } },
+      mcp: { servers: {} },
+    })
+  );
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'settings.json'),
+    JSON.stringify({ animations: false, mouseClicks: false, variant: 'none', approvalMode: 'manual' })
+  );
+
+  const id = 'subact01';
+  const dir = path.join(home, '.local', 'share', 'bitacode', 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const activities: SubAgentActivityItem[] = [
+    { id: 'sa-1', task: 'scan repo', status: 'done', toolCalls: 3, startedAt: 1000, endedAt: 2000 },
+    { id: 'sa-2', task: 'write docs', status: 'error', toolCalls: 1, startedAt: 1000, endedAt: 1500 },
+  ];
+  fs.writeFileSync(
+    path.join(dir, `${id}.json`),
+    JSON.stringify({
+      id,
+      title: 'chat',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      model: 'gpt-4o-mini',
+      provider: 'openai',
+      todos: [],
+      completionMessages: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: 'hello' },
+        { role: 'assistant', content: 'hi' },
+      ],
+      subAgentActivities: activities,
+    })
+  );
+
+  let instance: ReturnType<typeof render> | undefined;
+  try {
+    instance = render(<App sessionId={id} />);
+    const frame = await waitForFrame(
+      instance.lastFrame,
+      (f) => f.includes('2 sub-agents: 1 done, 1 error'),
+      6000
+    );
+    assert.match(frame, /Build anything…/, 'composer stays visible with the replay card');
+
+    // /quit saves the active session before exiting.
+    instance.stdin.write('/quit');
+    await settle(50);
+    instance.stdin.write('\r');
+
+    const file = path.join(dir, `${id}.json`);
+    const deadline = Date.now() + 4000;
+    let saved: any = null;
+    while (Date.now() < deadline) {
+      try {
+        saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+      } catch {
+        // not written yet
+      }
+      if (saved?.subAgentActivities?.length === 2) break;
+      await settle(50);
+    }
+    assert.ok(saved, 'session file is still present after /quit');
+    assert.deepEqual(
+      saved.subAgentActivities,
+      activities,
+      'sub-agent activities persist into the saved session'
+    );
+  } finally {
+    instance?.unmount();
+    instance?.cleanup();
+    process.env.HOME = originalHome;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+    fs.rmSync(home, { recursive: true, force: true });
+    setApprovalMode('manual');
+  }
+});
+
+// ─── Zoom / resize safety ───
+// ink-testing-library hard-codes 100 columns and exposes no rows, so render the
+// App with a controllable stdout instead. This lets us drive real resize events
+// (both Ink and App subscribe to stdout 'resize') at phone-sized dimensions.
+class SizedStdout extends EventEmitter {
+  frames: string[] = [];
+  isTTY = true;
+  constructor(public cols: number, public rowCount: number) {
+    super();
+  }
+  get columns() { return this.cols; }
+  get rows() { return this.rowCount; }
+  write = (chunk: string | Uint8Array): boolean => {
+    this.frames.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  };
+  /** Most recent real Ink frame (raw control writes are skipped). */
+  frame(): string {
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const frame = plain(this.frames[i] ?? '');
+      if (frame.includes('┃')) return frame; // composer accent bar
+    }
+    return '';
+  }
+  /** Most recent frame containing `text` (modal prompts hide the composer). */
+  frameContaining(text: string): string {
+    for (let i = this.frames.length - 1; i >= 0; i--) {
+      const frame = plain(this.frames[i] ?? '');
+      if (frame.includes(text)) return frame;
+    }
+    return '';
+  }
+}
+
+class SizedStdin extends EventEmitter {
+  isTTY = true;
+  setEncoding() {}
+  setRawMode() {}
+  resume() {}
+  pause() {}
+  ref() {}
+  unref() {}
+  read() { return null; }
+  write = (_data: string) => {};
+}
+
+class SizedStderr extends EventEmitter {
+  frames: string[] = [];
+  write = (chunk: string | Uint8Array): boolean => {
+    this.frames.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+    return true;
+  };
+}
+
+function setupSizedHome() {
+  const originalHome = process.env.HOME;
+  const originalKey = process.env.OPENAI_API_KEY;
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-zoom-'));
+  process.env.HOME = home;
+  process.env.OPENAI_API_KEY = 'test-key';
+  fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'bitacode.jsonc'),
+    JSON.stringify({
+      providers: { openai: { apiKey: 'test-key', models: { 'gpt-4o-mini': {} } } },
+      mcp: { servers: {} },
+    })
+  );
+  fs.writeFileSync(
+    path.join(home, '.config', 'bitacode', 'settings.json'),
+    JSON.stringify({ animations: false, mouseClicks: false, variant: 'none', approvalMode: 'manual' })
+  );
+  return () => {
+    process.env.HOME = originalHome;
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+    fs.rmSync(home, { recursive: true, force: true });
+    setApprovalMode('manual');
+  };
+}
+
+function renderAppSized(columns: number, rows: number) {
+  const restoreHome = setupSizedHome();
+  const stdout = new SizedStdout(columns, rows);
+  const instance = renderInk(<App />, {
+    stdout: stdout as any,
+    stdin: new SizedStdin() as any,
+    stderr: new SizedStderr() as any,
+    debug: true,
+    patchConsole: false,
+    exitOnCtrlC: false,
+  });
+  const resize = (cols: number, lineCount: number) => {
+    stdout.cols = cols;
+    stdout.rowCount = lineCount;
+    stdout.emit('resize');
+  };
+  return {
+    stdout,
+    instance,
+    resize,
+    cleanup() {
+      instance.unmount();
+      instance.cleanup();
+      restoreHome();
+    },
+  };
+}
+
+const lineWidth = (frame: string): number =>
+  Math.max(0, ...frame.split('\n').map((line) => stripAnsi(line).length));
+
+for (const [columns, rows] of [
+  [40, 10],
+  [30, 8],
+  [20, 6],
+  [8, 4],
+  [200, 60],
+] as const) {
+  test(`app frame fits a ${columns}x${rows} terminal: composer + footer always present`, async () => {
+    const app = renderAppSized(columns, rows);
+    try {
+      const frame = await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+      assert.ok(frame.length > 0, `no real frame rendered at ${columns}x${rows}`);
+      assert.match(frame, /┃/, 'composer stays visible');
+      assert.match(frame, /📁|ctx/, 'footer stays visible');
+      assert.ok(
+        frame.split('\n').length <= rows - 1,
+        `frame grew to ${frame.split('\n').length} rows on a ${rows}-row terminal`
+      );
+      assert.ok(
+        lineWidth(frame) <= columns,
+        `a line is ${lineWidth(frame)} columns wide on a ${columns}-column terminal`
+      );
+    } finally {
+      app.cleanup();
+    }
+  });
+}
+
+test('rapid zoom bursts re-render at the new size without stale rows', async () => {
+  const app = renderAppSized(80, 24);
+  try {
+    await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+
+    // Shrink in a burst; the last frame must reflect the last size only.
+    app.resize(20, 6);
+    let frame = await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => lineWidth(f) <= 20);
+    assert.ok(frame.split('\n').length <= 5, `frame is ${frame.split('\n').length} rows tall at 20x6`);
+
+    app.resize(8, 4);
+    frame = await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => lineWidth(f) <= 8);
+    assert.ok(frame.split('\n').length <= 3, `frame is ${frame.split('\n').length} rows tall at 8x4`);
+
+    // Grow again; composer must still be present and within the new bounds.
+    app.resize(200, 60);
+    frame = await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃') && f.split('\n').length > 20);
+    assert.ok(frame.split('\n').length <= 59);
+    assert.ok(lineWidth(frame) <= 200);
+  } finally {
+    app.cleanup();
+  }
+});
+
+test('transient 0/NaN resize values keep the last valid dimensions', async () => {
+  const app = renderAppSized(80, 24);
+  try {
+    await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+    app.resize(0, Number.NaN);
+    await settle(80);
+    const frame = app.stdout.frame();
+    assert.ok(frame.length > 0);
+    assert.ok(Number.isFinite(lineWidth(frame)), 'frame width is a finite number');
+    assert.ok(frame.split('\n').length <= 23, 'frame did not grow from a bogus resize');
+  } finally {
+    app.cleanup();
+  }
+});
+
+test('an approval prompt stays visible and fits a small terminal frame', async () => {
+  const app = renderAppSized(30, 8);
+  try {
+    await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+    // Trigger the UI-owned approval handler; do not await (it resolves on input).
+    void requestApproval({
+      type: 'bash',
+      description: 'Run a shell command',
+      sessionId: 'zoom-approval-test',
+    } as any);
+    const frame = await waitForFrame(
+      app.stdout.frameContaining.bind(app.stdout, 'Approval Required'),
+      (f) => f.length > 0
+    );
+    assert.ok(frame.length > 0, 'approval prompt never rendered');
+    assert.match(frame, /Approval Required/);
+    assert.match(frame, /Approve once/, 'the options are not clipped away');
+    assert.ok(frame.split('\n').length <= 7, `frame grew to ${frame.split('\n').length} rows`);
+    assert.ok(lineWidth(frame) <= 30, `a line is ${lineWidth(frame)} columns wide`);
+  } finally {
+    app.cleanup();
+  }
+});
+
+test('critical prompts stay inside a narrow terminal', () => {
+  for (const columns of [8, 20, 30, 40]) {
+    const ask = render(
+      <Box width={columns}>
+        <AskPrompt
+          columns={columns}
+          questions={[{
+            id: 'q',
+            question: 'Which approach should I take?',
+            context: 'Both work; one is simpler and faster.',
+            options: [
+              { label: 'Rewrite everything from scratch', recommended: true },
+              { label: 'Apply a small targeted patch' },
+            ],
+          }]}
+          onRespond={() => {}}
+        />
+      </Box>
+    );
+    const askFrame = ask.lastFrame() ?? '';
+    assert.ok(
+      lineWidth(askFrame) <= columns,
+      `ask prompt is ${lineWidth(askFrame)} wide at ${columns} columns`
+    );
+    ask.unmount();
+    ask.cleanup();
+
+    const approval = render(
+      <Box width={columns}>
+        <ApprovalPrompt
+          columns={columns}
+          request={{
+            type: 'bash',
+            description: 'Run a very long shell command description here',
+            detail: 'x'.repeat(400),
+          } as any}
+          onRespond={() => {}}
+        />
+      </Box>
+    );
+    const approvalFrame = approval.lastFrame() ?? '';
+    assert.ok(
+      lineWidth(approvalFrame) <= columns,
+      `approval prompt is ${lineWidth(approvalFrame)} wide at ${columns} columns`
+    );
+    approval.unmount();
+    approval.cleanup();
+
+    const key = render(
+      <Box width={columns}>
+        <ApiKeyPrompt
+          columns={columns}
+          providerName="OpenAI"
+          path="/a/very/long/path/to/the/configuration/file.jsonc"
+          error={null}
+          busy={false}
+          onSubmit={() => {}}
+        />
+      </Box>
+    );
+    const keyFrame = key.lastFrame() ?? '';
+    assert.ok(
+      lineWidth(keyFrame) <= columns,
+      `API key prompt is ${lineWidth(keyFrame)} wide at ${columns} columns`
+    );
+    key.unmount();
+    key.cleanup();
+  }
+});
+
+test('ask prompt keeps option labels and the recommended marker visible on narrow screens', () => {
+  for (const columns of [20, 30, 40]) {
+    const ask = render(
+      <Box width={columns}>
+        <AskPrompt
+          columns={columns}
+          compact
+          questions={[{
+            id: 'q',
+            question: 'Which approach?',
+            options: [
+              { label: 'Rewrite everything from scratch', recommended: true },
+              { label: 'Apply a small targeted patch' },
+            ],
+          }]}
+          onRespond={() => {}}
+        />
+      </Box>
+    );
+    const frame = plain(ask.lastFrame() ?? '');
+    assert.ok(lineWidth(frame) <= columns, `ask prompt overflows at ${columns} columns`);
+    assert.ok(frame.includes('Rewri'), `first option label is clipped away at ${columns} columns`);
+    assert.ok(frame.includes('Apply'), `second option label is clipped away at ${columns} columns`);
+    assert.ok(/★|recommended/.test(frame), `recommended marker is missing at ${columns} columns`);
+    ask.unmount();
+    ask.cleanup();
   }
 });

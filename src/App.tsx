@@ -66,7 +66,15 @@ import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
 import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
 import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.js';
+import { ThinkingArchive } from './components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
+import {
+  SubAgentActivity,
+  subAgentActivityRows,
+  subAgentActivitySummary,
+  upsertSubAgentActivity,
+  type SubAgentEventFields,
+} from './components/SubAgentActivity.js';
 import { theme } from './theme.js';
 import { loadSettings, saveSettings, type UiSettings, type ApprovalMode } from './settings.js';
 import { VARIANTS } from './variants.js';
@@ -87,6 +95,7 @@ import {
   setApprovalHandler,
   clearApprovalHandler,
   setAskHandler,
+  recordSubAgentStatus,
 } from './tools/index.js';
 import type { ApprovalRequest, ApprovalResponse } from './utils/approval.js';
 import type { AskRequest, AskResponse } from './tools/ask.js';
@@ -101,6 +110,7 @@ import {
   listSessions,
   generateTitle,
   type Session,
+  type SubAgentActivity as SubAgentActivityData,
 } from './sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession, type TodoItem } from './tools/todo.js';
 import { initializeMcp, closeMcp } from './mcp.js';
@@ -118,7 +128,7 @@ import {
   sliceItemsToWindow,
   visibleRowWindow,
 } from './utils/scroll.js';
-import { clampIndex, composerTextWidth, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
+import { clampIndex, composerTextWidth, finiteDim, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from './utils/scrollbar.js';
 import { useAgentEventHandler, type AssistantMessageRef, type StreamingBuffer, type InlineThreadError } from './hooks/useAgentEventHandler.js';
 
@@ -236,10 +246,18 @@ function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assist
 function replayOneMessage(
   addStatic: AddStaticFn,
   message: Message,
-  toolCallsById: Map<string, { name: string; args?: string | Record<string, unknown> }>
+  toolCallsById: Map<string, { name: string; args?: string | Record<string, unknown> }>,
+  columns?: number
 ): void {
   const msgAny = message as any;
   if (message.role === 'system') return;
+  // Persisted reasoning is replayed as an expandable thought card above the
+  // answer it produced, matching the live session's scrollback order.
+  if (msgAny.role === 'assistant' && typeof msgAny.reasoning === 'string' && msgAny.reasoning.trim()) {
+    const collapsed = <ThinkingArchive text={msgAny.reasoning} elapsedMs={0} columns={columns} />;
+    const expanded = <ThinkingArchive text={msgAny.reasoning} elapsedMs={0} columns={columns} expanded />;
+    addStatic(collapsed, { collapsed, expanded });
+  }
   if (message.role === 'user' && typeof message.content === 'string') {
     printMessageToScrollback(addStatic, 'user', message.content);
     return;
@@ -263,7 +281,8 @@ function replayOneMessage(
 function replayMessagesToScrollback(
   addStatic: AddStaticFn,
   messages: Message[],
-  maxMessages = messages.length
+  maxMessages = messages.length,
+  columns?: number
 ): void {
   const omitted = Math.max(0, messages.length - maxMessages);
   const visible = omitted > 0 ? messages.slice(omitted) : messages;
@@ -293,7 +312,7 @@ function replayMessagesToScrollback(
   }
   for (const message of visible) {
     try {
-      replayOneMessage(addStatic, message, toolCallsById);
+      replayOneMessage(addStatic, message, toolCallsById, columns);
     } catch (err: any) {
       // One malformed saved message must not abort the rest of the transcript.
       logger.warn('Skipped malformed session message during replay', {
@@ -310,6 +329,19 @@ function replayMessagesToScrollback(
   if (messages.length > 0) {
     addStatic(<Box height={1} />);
   }
+}
+
+/** Flush one compact card summarising a resumed session's child agents. */
+function replaySubAgentActivities(
+  addStatic: AddStaticFn,
+  activities: SubAgentActivityData[]
+): void {
+  if (activities.length === 0) return;
+  addStatic(
+    <Box paddingX={2} marginBottom={1}>
+      <Text color={theme.muted}>{`▣ ${subAgentActivitySummary(activities)}`}</Text>
+    </Box>
+  );
 }
 
 // Limit streaming text to the free viewport rows. Count WRAPPED rows, not
@@ -423,9 +455,11 @@ export const App: React.FC<AppProps> = ({
 }) => {
   const { exit } = useApp();
   const { stdout } = useStdout();
+  // A zoom burst can briefly report 0/undefined/NaN dimensions; clamp once at
+  // the source so every downstream width/height stays a finite positive int.
   const [dims, setDims] = useState({
-    columns: stdout?.columns || 80,
-    rows: stdout?.rows || 24,
+    columns: finiteDim(stdout?.columns, 80),
+    rows: finiteDim(stdout?.rows, 24),
   });
   const { columns, rows } = dims;
   // One row shorter than the terminal. Rendering at exactly `rows` makes Ink
@@ -538,6 +572,11 @@ export const App: React.FC<AppProps> = ({
   const [thinkingArchived, setThinkingArchived] = useState(false);
   const [todos, setTodos] = useState<TodoItem[]>([]);
 
+  // Child-agent activity. Kept as the full record for session persistence;
+  // a separate flag drives the compact live panel and its auto-hide timer.
+  const [subAgentActivities, setSubAgentActivities] = useState<SubAgentActivityData[]>([]);
+  const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
+
   // Input reset key — incremented on submit to force TextInput remount and clear
   const [inputResetKey, setInputResetKey] = useState(0);
 
@@ -630,6 +669,39 @@ export const App: React.FC<AppProps> = ({
     columns,
   });
 
+  // Wrap the shared event handler so child-agent progress is tracked here
+  // (the hook is shared and intentionally unaware of this UI-only state).
+  const handleAgentEventWithSubAgents = useCallback(
+    (event: AgentEvent) => {
+      if (event.type === 'sub_agent_iteration') {
+        const fields = event as AgentEvent & SubAgentEventFields;
+        if (fields.subAgentId) {
+          setSubAgentActivities((prev) => upsertSubAgentActivity(prev, fields));
+          setShowSubAgentPanel(true);
+          // Feed the in-memory registry used by the agent_status tool so the
+          // main model can query what its children are doing.
+          recordSubAgentStatus(
+            fields.subAgentId,
+            fields.subAgentTask ?? fields.subAgentLabel ?? '',
+            fields.subAgentStatus ?? 'start'
+          );
+        }
+      }
+      handleAgentEvent(event);
+    },
+    [handleAgentEvent]
+  );
+
+  // Finished children linger briefly, then fold away so the panel does not
+  // occupy the live area forever. A new activity resets the timer; a still
+  // running child keeps the panel pinned.
+  const hasActiveSubAgent = subAgentActivities.some((item) => item.status === 'start');
+  useEffect(() => {
+    if (!showSubAgentPanel || hasActiveSubAgent) return;
+    const timer = setTimeout(() => setShowSubAgentPanel(false), 8000);
+    return () => clearTimeout(timer);
+  }, [showSubAgentPanel, hasActiveSubAgent, subAgentActivities]);
+
   const didPrintIntroRef = useRef(false);
   const printedThreadErrorIdsRef = useRef<Set<string>>(new Set());
 
@@ -694,11 +766,15 @@ export const App: React.FC<AppProps> = ({
         setTodosForSession(loadedSession.id, loadedSession.todos);
         setSession(loadedSession);
         setCompletionMessages(loadedSession.completionMessages);
+        const savedActivities = loadedSession.subAgentActivities ?? [];
+        setSubAgentActivities(savedActivities);
+        setShowSubAgentPanel(false);
         if (!didPrintIntroRef.current) {
           if (hasConversationMessages(loadedSession.completionMessages)) {
             setMeasuringTranscript(true);
           }
-          replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES);
+          replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES, columns);
+          replaySubAgentActivities(addStatic, savedActivities);
           didPrintIntroRef.current = true;
           sessionSavedRef.current = true;
         }
@@ -720,7 +796,7 @@ export const App: React.FC<AppProps> = ({
     }
 
     setInitialized(true);
-  }, [dangerouslySkipPermissions, sessionId, addStatic]);
+  }, [dangerouslySkipPermissions, sessionId, addStatic, columns]);
 
   const handleSetupComplete = useCallback(
     (nextConfig: Config) => {
@@ -864,17 +940,25 @@ export const App: React.FC<AppProps> = ({
     };
   }, [stdout, mouseTrackingEnabled]);
 
-  // Re-render at the new size when the terminal is resized.
+  // Re-render at the new size when the terminal is resized. Guard the values
+  // so a transient 0/NaN during a zoom burst cannot poison the whole frame.
   useEffect(() => {
     if (!stdout) return;
     const onResize = () => {
-      setDims({ columns: stdout.columns || 80, rows: stdout.rows || 24 });
+      const next = {
+        columns: finiteDim(stdout.columns, dims.columns),
+        rows: finiteDim(stdout.rows, dims.rows),
+      };
+      // Skip no-op bursts (several resize events can fire for one zoom step).
+      setDims((prev) =>
+        prev.columns === next.columns && prev.rows === next.rows ? prev : next
+      );
     };
     stdout.on('resize', onResize);
     return () => {
       stdout.off('resize', onResize);
     };
-  }, [stdout]);
+  }, [stdout, dims.columns, dims.rows]);
 
   // The bottom input/footer are fixed; the transcript viewport takes the
   // remaining rows. Measure it so wheel/keyboard scrolling can clamp exactly.
@@ -897,6 +981,8 @@ export const App: React.FC<AppProps> = ({
     picker ?? '',
     settingsIndex !== null ? 1 : 0,
     initialized ? 1 : 0,
+    subAgentActivities.length,
+    showSubAgentPanel ? 1 : 0,
   ].join(':');
 
   useEffect(() => {
@@ -1006,7 +1092,7 @@ export const App: React.FC<AppProps> = ({
           item.id.toLowerCase().includes(modelSearchTerm)
       )
     : allModelItems;
-  const selectedModelIndex = Math.min(pickerIndex, Math.max(0, modelItems.length - 1));
+  const selectedModelIndex = clampIndex(pickerIndex, modelItems.length);
 
   const variantItems = VARIANTS.map((variant) => ({
     id: variant.id,
@@ -1253,6 +1339,8 @@ export const App: React.FC<AppProps> = ({
     setIsStreaming(false);
     setLoading(false);
     setActiveTool(null);
+    setSubAgentActivities([]);
+    setShowSubAgentPanel(false);
     setThreadErrors([]);
     setLastUsage(null);
     setTotalCost(0);
@@ -1306,6 +1394,7 @@ export const App: React.FC<AppProps> = ({
           todos: getTodosForSession(session.id),
           title: generateTitle(completionMessages),
           variant: variantId,
+          subAgentActivities,
         };
         await saveSession(finished);
       }
@@ -1419,13 +1508,15 @@ export const App: React.FC<AppProps> = ({
 
         // Preserve the current conversation before replacing it.
         if (session && hasConversationMessages(completionMessages)) {
-          await saveSession({
+          const toSave: Session = {
             ...session,
             completionMessages,
             todos: getTodosForSession(session.id),
             title: generateTitle(completionMessages),
             variant: variantId,
-          });
+            subAgentActivities,
+          };
+          await saveSession(toSave);
         }
 
         const systemPrompt = await generateSystemPrompt();
@@ -1470,6 +1561,9 @@ export const App: React.FC<AppProps> = ({
         setTodosForSession(loaded.id, loaded.todos);
         setTodos(loaded.todos);
         resetLiveState();
+        const loadedActivities = loaded.subAgentActivities ?? [];
+        setSubAgentActivities(loadedActivities);
+        setShowSubAgentPanel(false);
 
         if (modelError) {
           setError(`Session loaded, but its model is unavailable: ${modelError}`);
@@ -1480,7 +1574,8 @@ export const App: React.FC<AppProps> = ({
         if (hasConversationMessages(messages)) {
           setMeasuringTranscript(true);
         }
-        replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES);
+        replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES, columns);
+        replaySubAgentActivities(addStatic, loadedActivities);
         didPrintIntroRef.current = true;
         sessionSavedRef.current = true;
       } catch (err: any) {
@@ -1521,6 +1616,7 @@ export const App: React.FC<AppProps> = ({
             todos: getTodosForSession(session.id),
             title: generateTitle(completionMessages),
             variant: variantId,
+            subAgentActivities,
           };
 
           await saveSession(nextSession);
@@ -1759,7 +1855,7 @@ export const App: React.FC<AppProps> = ({
         config.model,
         [...completionMessages, userMessage],
         trimmed,
-        handleAgentEvent,
+        handleAgentEventWithSubAgents,
         {
           pricing: pricing || undefined,
           abortSignal: abortControllerRef.current.signal,
@@ -1783,6 +1879,7 @@ export const App: React.FC<AppProps> = ({
         session.provider = config.provider;
         session.model = config.model;
         session.variant = variantId;
+        session.subAgentActivities = subAgentActivities;
         await saveSession(session);
         sessionSavedRef.current = true;
       }
@@ -1794,7 +1891,7 @@ export const App: React.FC<AppProps> = ({
         setLoading(false);
       }
     }
-  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings]);
+  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents]);
 
   // Any command path can reject; never let that become an unhandled rejection
   // that kills the TUI after a turn.
@@ -2179,16 +2276,20 @@ export const App: React.FC<AppProps> = ({
     ? `${providerLabel} / ${remoteModelLabel ?? getModelDetails(config.provider, config.model)?.name ?? config.model}`
     : 'not configured';
   const folderName = basename(process.cwd());
+  // Any interactive prompt owns the live area. Optional panels are hidden so
+  // the critical prompt keeps its rows instead of being clipped at the bottom.
+  const hasCriticalPrompt = pendingApproval !== null || pendingAsk !== null || keyPrompt !== null;
   const showSplash =
     initialized &&
     config !== null &&
     !loading &&
     !isStreaming &&
+    rows >= 8 &&
     !hasConversationMessages(completionMessages);
   // Responsive breakpoints live in utils/layout.ts so every panel agrees.
   const layout = resolveLayout(columns, rows);
   const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
-  const { paletteWindow, visibleTodos, gutter } = layout;
+  const { paletteWindow, visibleTodos, gutter, dense } = layout;
   const inputFocused =
     initialized && config !== null && picker === null && settingsIndex === null && keyPrompt === null;
 
@@ -2210,11 +2311,12 @@ export const App: React.FC<AppProps> = ({
   // (todos added, todos cleared) automatically hand space back to the
   // transcript instead of squeezing it or pushing the composer off-screen.
   const streamReserve = isStreaming ? Math.min(rows, 10) : 0;
+  const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
   const area = splitLiveArea(frameHeight, {
     todos: todoRows,
     thinking: thinkingRows,
     help: helpRows,
-    streaming: streamReserve,
+    streaming: streamReserve + subAgentRows,
   });
   const maxStreamRows = Math.max(1, area.transcriptRows);
 
@@ -2225,7 +2327,9 @@ export const App: React.FC<AppProps> = ({
 
   return (
     <Box flexDirection="column" height={frameHeight}>
-      {/* Scrollable transcript viewport; the input and footer below stay fixed. */}
+      {/* Scrollable transcript viewport; the input and footer below stay fixed.
+          A modal prompt removes it entirely so the prompt keeps every row. */}
+      {!hasCriticalPrompt && (
       <Box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0} minHeight={1}>
         <Box
           ref={viewportRef}
@@ -2313,15 +2417,16 @@ export const App: React.FC<AppProps> = ({
           </Box>
         )}
       </Box>
+      )}
 
       {/* Live area: only these few rows re-render while typing. The horizontal
           rule that used to sit here is gone; the composer's own accent bar is
           the only border, so there is no double edge between chat and input. */}
-      <Box flexDirection="column" flexShrink={1} minHeight={0} overflow="hidden">
-        {helpMessage && (
+      <Box flexDirection="column" flexGrow={hasCriticalPrompt ? 1 : 0} flexShrink={1} minHeight={0} overflow="hidden">
+        {helpMessage && !dense && !hasCriticalPrompt && (
           <Box paddingX={2}>
             <LeftBar color={theme.muted} marginTop={1} marginBottom={1}>
-              <Text>{helpMessage}</Text>
+              <Text wrap="truncate-end">{helpMessage}</Text>
             </LeftBar>
           </Box>
         )}
@@ -2333,11 +2438,15 @@ export const App: React.FC<AppProps> = ({
           </Box>
         )}
 
-        {initialized && !pendingApproval && (
+        {initialized && !hasCriticalPrompt && (
           <TodoPanel todos={todos} columns={columns} maxVisible={visibleTodos} />
         )}
 
-        {hasThinkingBlock && !pendingApproval && (
+        {showSubAgentPanel && !hasCriticalPrompt && (
+          <SubAgentActivity activities={subAgentActivities} columns={columns} />
+        )}
+
+        {hasThinkingBlock && !hasCriticalPrompt && (
           <ThinkingBlock
             text={thinkingText}
             expanded={thinkingExpanded}
@@ -2350,16 +2459,19 @@ export const App: React.FC<AppProps> = ({
           />
         )}
 
-        {isStreaming && (
-          <Box paddingX={gutter} paddingBottom={1}>
+        {isStreaming && !hasCriticalPrompt && (
+          <Box paddingX={gutter} paddingBottom={dense ? 0 : 1}>
             <Text wrap="truncate-end">
-              {renderFormattedText(clipToRows(streamingText, maxStreamRows, columns - gutter * 2))}
+              {renderFormattedText(
+                clipToRows(streamingText, maxStreamRows, columns - gutter * 2),
+                columns - gutter * 2
+              )}
               <Text dimColor>▍</Text>
             </Text>
           </Box>
         )}
 
-        {threadErrors.filter((threadError) => threadError.transient).map((threadError) => (
+        {!hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (
           <Box key={`thread-error-${threadError.id}`} paddingX={2}>
             <LeftBar color={theme.muted} marginBottom={1}>
               <Text color={theme.muted}>{threadError.message}</Text>
@@ -2373,6 +2485,7 @@ export const App: React.FC<AppProps> = ({
           <AskPrompt
             questions={pendingAsk.request.questions}
             columns={columns}
+            compact={dense || rows <= 10}
             onRespond={(response) => {
               pendingAsk.resolve(response);
               setPendingAsk(null);
@@ -2384,6 +2497,8 @@ export const App: React.FC<AppProps> = ({
         {pendingApproval && (
           <ApprovalPrompt
             request={pendingApproval.request}
+            columns={columns}
+            compact={dense || rows <= 10}
             onRespond={(response) => {
               pendingApproval.resolve(response);
               setPendingApproval(null);
@@ -2398,6 +2513,8 @@ export const App: React.FC<AppProps> = ({
             path={keyPrompt.path}
             error={keyPrompt.error}
             busy={keyPrompt.busy}
+            columns={columns}
+            compact={dense || rows <= 10}
             onSubmit={(value) => { void handleApiKeySubmit(value); }}
           />
         )}
@@ -2474,7 +2591,7 @@ export const App: React.FC<AppProps> = ({
         {settingsIndex !== null && (
           <Palette title="Settings" items={settingItems} selected={settingsIndex} maxVisible={paletteWindow} hint="↑↓ select · enter toggle · esc close" />
         )}
-        {!picker && !keyPrompt && settingsIndex === null && initialized && !pendingApproval && inputText.startsWith('/') && (
+        {!picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (
           <Palette items={commandItems} selected={commandIndex} maxVisible={paletteWindow} />
         )}
       </Box>
@@ -2489,7 +2606,7 @@ export const App: React.FC<AppProps> = ({
             flexDirection="row"
             width={layout.inputWidth}
             backgroundColor={theme.surface}
-            paddingY={1}
+            paddingY={dense ? 0 : 1}
             paddingLeft={1}
             flexShrink={0}
           >
@@ -2523,8 +2640,9 @@ export const App: React.FC<AppProps> = ({
         </Box>
       )}
 
-      {/* Status: folder · model · variant · context */}
-      {initialized && config && !pendingApproval && (
+      {/* Status: folder · model · variant · context — hidden while a modal
+          prompt owns the screen so the prompt keeps every available row. */}
+      {initialized && config && !hasCriticalPrompt && (
         <UsageDisplay
           usage={lastUsage ?? null}
           totalCost={totalCost}
@@ -2537,6 +2655,7 @@ export const App: React.FC<AppProps> = ({
           frame={spinnerFrame}
           compact={!layout.showFullFooter}
           gutter={gutter}
+          dense={dense}
         />
       )}
     </Box>

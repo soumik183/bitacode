@@ -43,7 +43,7 @@ export const LeftBar: React.FC<LeftBarProps> = ({
   const bar = Array.from({ length: height }, () => '│').join('\n');
 
   return (
-    <Box flexDirection="row" marginTop={marginTop} marginBottom={marginBottom}>
+    <Box flexDirection="row" marginTop={marginTop} marginBottom={marginBottom} overflow="hidden">
       <Box flexDirection="column" marginRight={1}>
         <Text color={color} bold>{bar}</Text>
       </Box>

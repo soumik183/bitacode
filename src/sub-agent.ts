@@ -6,6 +6,7 @@
  * executes it with its own tool calls, and returns a summary.
  *
  * This is exposed as a `sub_agent` tool that the main agent can call.
+ * `task` runs one child; `tasks` fans out several children in parallel.
  */
 
 import type OpenAI from 'openai';
@@ -15,33 +16,76 @@ import { generateSystemPrompt } from './system-prompt.js';
 import { logger } from './utils/logger.js';
 import { clearTodos } from './tools/todo.js';
 import { calculateCost, type ModelPricing, type UsageInfo } from './utils/cost-tracker.js';
+import { saveSubAgentRun, type SubAgentRunStatus } from './utils/subagent-store.js';
+
+/** Default concurrent children for a `tasks` fan-out. */
+const FANOUT_CAP = 3;
+/** Hard ceiling for the fan-out concurrency cap. */
+const MAX_FANOUT_CAP = 5;
+/** Soft total iteration budget shared by all children of one fan-out. */
+const FANOUT_ITERATION_BUDGET = 500;
 
 export const subAgentTool = {
   type: 'function' as const,
   function: {
     name: 'sub_agent',
     description:
-      'Spawn an isolated sub-agent to handle a task without polluting the main conversation context. ' +
-      'Use this for independent subtasks like exploring a codebase, researching a question, or making changes to a separate area. ' +
-      'The sub-agent has access to the same tools but runs in its own conversation.',
+      'Spawn isolated sub-agents to handle tasks without polluting the main conversation context. ' +
+      'Use `task` for a single child, or `tasks` (an array) to run several independent subtasks in parallel. ' +
+      'Good for exploring a codebase, researching a question, or making changes to a separate area. ' +
+      'Each child has access to the same tools but runs in its own conversation.',
     parameters: {
       type: 'object',
       properties: {
         task: {
           type: 'string',
-          description: 'A detailed description of the task for the sub-agent to complete.',
+          description: 'A detailed description of the task for the sub-agent to complete. Use instead of `tasks`.',
+        },
+        tasks: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Multiple independent tasks to run in parallel (bounded concurrency). Use instead of `task`.',
         },
         max_iterations: {
           type: 'number',
-          description: 'Maximum tool-call iterations for the sub-agent. Defaults to 500.',
+          description: 'Maximum tool-call iterations shared across all children. Defaults to 500.',
+        },
+        agent_type: {
+          type: 'string',
+          enum: ['Explore', 'Plan', 'Bash', 'general-purpose'],
+          description: 'Specialization for the sub-agent. Defaults to general-purpose.',
+        },
+        thoroughness: {
+          type: 'string',
+          enum: ['quick', 'medium', 'very thorough'],
+          description: 'How deeply the sub-agent should investigate. "quick" caps iterations. Defaults to medium.',
         },
       },
-      required: ['task'],
+      anyOf: [{ required: ['task'] }, { required: ['tasks'] }],
     },
   },
 };
 
-export type SubAgentProgressHandler = (event: { tool: string; status: 'running' | 'done' | 'error'; iteration: number; args?: Record<string, unknown> }) => void;
+/** Lifecycle status for a child sub-agent (distinct from a tool call's status). */
+export type SubAgentLifecycleStatus = 'start' | 'done' | 'error';
+
+/**
+ * Progress event emitted by a child. The executor forwards these as
+ * `sub_agent_iteration` events; the subAgent* fields are additive to the
+ * original `{ tool, status, iteration, args }` shape.
+ */
+export interface SubAgentProgressEvent {
+  tool: string;
+  status: 'running' | 'done' | 'error';
+  iteration: number;
+  args?: Record<string, unknown>;
+  subAgentId?: string;
+  subAgentLabel?: string;
+  subAgentStatus?: SubAgentLifecycleStatus;
+  subAgentTask?: string;
+}
+
+export type SubAgentProgressHandler = (event: SubAgentProgressEvent) => void;
 
 /** Sub-agent usage stats (uses main UsageInfo type for consistency). */
 export type SubAgentUsage = UsageInfo;
@@ -51,26 +95,126 @@ export interface SubAgentResult {
   usage: SubAgentUsage;
 }
 
+/** One outcome from a parallel fan-out, aligned with its input task. */
+export interface ParallelTaskResult<T> {
+  task: string;
+  index: number;
+  id: string;
+  status: 'fulfilled' | 'rejected' | 'skipped';
+  value?: T;
+  reason?: unknown;
+}
+
 /**
- * Run a sub-agent with its own isolated conversation.
- * Returns the sub-agent's final text response.
+ * Run `tasks` with bounded concurrency using `Promise.allSettled`.
+ *
+ * Pure with respect to the LLM loop: callers supply the `runner`. Results
+ * come back in input order; tasks not reached before abort are `skipped`.
  */
-export async function runSubAgent(
+export async function runParallel<T>(
+  tasks: readonly string[],
+  runner: (task: string, index: number, id: string) => Promise<T>,
+  cap = FANOUT_CAP,
+  signal?: AbortSignal,
+): Promise<ParallelTaskResult<T>[]> {
+  const effectiveCap = Number.isFinite(cap) ? Math.max(1, Math.min(Math.floor(cap), MAX_FANOUT_CAP)) : FANOUT_CAP;
+  const results: ParallelTaskResult<T>[] = new Array(tasks.length);
+
+  for (let start = 0; start < tasks.length; start += effectiveCap) {
+    if (signal?.aborted) break;
+    const chunk = tasks.slice(start, start + effectiveCap);
+    const settled = await Promise.allSettled(
+      chunk.map((task, offset) => {
+        const index = start + offset;
+        if (signal?.aborted) {
+          return Promise.reject(new Error('aborted')) as Promise<T>;
+        }
+        return runner(task, index, `sa-${index + 1}`);
+      }),
+    );
+    settled.forEach((outcome, offset) => {
+      const index = start + offset;
+      results[index] = {
+        task: chunk[offset],
+        index,
+        id: `sa-${index + 1}`,
+        status: outcome.status,
+        ...(outcome.status === 'fulfilled' ? { value: outcome.value } : { reason: outcome.reason }),
+      };
+    });
+  }
+
+  // An abort can stop us before later chunks run — mark them skipped so the
+  // caller gets a result per task.
+  for (let i = 0; i < results.length; i++) {
+    if (results[i]) continue;
+    results[i] = { task: tasks[i], index: i, id: `sa-${i + 1}`, status: 'skipped' };
+  }
+  return results;
+}
+
+/** Sum usage across children into a single combined usage object. */
+function addUsage(total: SubAgentUsage, usage: SubAgentUsage): void {
+  total.inputTokens += usage.inputTokens || 0;
+  total.outputTokens += usage.outputTokens || 0;
+  total.totalTokens += usage.totalTokens || usage.inputTokens + usage.outputTokens;
+  total.estimatedCost += usage.estimatedCost || 0;
+}
+
+/** Build one combined result with a labelled section per task. */
+function combineResults(tasks: readonly string[], results: ParallelTaskResult<SubAgentResult>[]): SubAgentResult {
+  const usage: SubAgentUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 };
+  const sections = results.map((result) => {
+    const header = `## Task ${result.index + 1} (${result.id}): ${result.task}`;
+    if (result.status === 'fulfilled' && result.value) {
+      addUsage(usage, result.value.usage);
+      return `${header}\n${result.value.response}`;
+    }
+    if (result.status === 'skipped') {
+      return `${header}\n(skipped: aborted)`;
+    }
+    const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+    return `${header}\n(Error: ${reason})`;
+  });
+  return { response: sections.join('\n\n---\n\n'), usage };
+}
+
+/** Run a single child with its own isolated conversation (the original loop). */
+async function runSubAgentOnce(
   client: OpenAI,
   model: string,
   task: string,
-  maxIterations = 500,
-  requestDefaults: Record<string, unknown> = {},
-  onProgress?: SubAgentProgressHandler,
-  abortSignal?: AbortSignal,
-  pricing?: ModelPricing,
+  maxIterations: number | undefined,
+  requestDefaults: Record<string, unknown>,
+  onProgress: SubAgentProgressHandler | undefined,
+  abortSignal: AbortSignal | undefined,
+  pricing: ModelPricing | undefined,
+  agentType: string | undefined,
+  thoroughness: string | undefined,
+  sessionId?: string,
+  label?: string,
 ): Promise<SubAgentResult> {
   const requestedIterations = Number(maxIterations);
-  const iterationLimit = Number.isFinite(requestedIterations)
+  let iterationLimit = Number.isFinite(requestedIterations)
     ? Math.min(Math.max(Math.floor(requestedIterations), 1), 500)
     : 500;
 
+  // These are advisory only: validate, log unknowns, and apply just the quick budget.
+  const validTypes = ['Explore', 'Plan', 'Bash', 'general-purpose'];
+  if (agentType != null && !validTypes.includes(agentType)) {
+    logger.warn('Sub-agent ignoring unknown agent_type', { agentType });
+  }
+  const validLevels = ['quick', 'medium', 'very thorough'];
+  if (thoroughness != null && !validLevels.includes(thoroughness)) {
+    logger.warn('Sub-agent ignoring unknown thoroughness', { thoroughness });
+  }
+  if (thoroughness === 'quick') {
+    iterationLimit = Math.min(iterationLimit, 50);
+  }
+  logger.debug('Sub-agent configured', { agentType: agentType ?? 'general-purpose', thoroughness: thoroughness ?? 'medium', iterationLimit });
+
   const op = logger.startOperation('sub-agent');
+  const startedAt = Date.now();
   const subAgentSessionId = `sub-agent-${crypto.randomUUID()}`;
 
   const systemPrompt = await generateSystemPrompt();
@@ -92,11 +236,25 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
   let totalOutputTokens = 0;
   let totalCost = 0;
 
+  const usageNow = (): SubAgentUsage => ({
+    inputTokens: totalInputTokens,
+    outputTokens: totalOutputTokens,
+    totalTokens: totalInputTokens + totalOutputTokens,
+    estimatedCost: totalCost,
+  });
+  let finalResult: SubAgentResult = { response: '', usage: usageNow() };
+  let finalError: string | undefined;
+  /** Record the outcome at every return point so the transcript matches the result. */
+  const finish = (response: string): SubAgentResult => {
+    finalResult = { response, usage: usageNow() };
+    return finalResult;
+  };
+
   try {
     for (let i = 0; i < iterationLimit; i++) {
       // Check abort at the top of each iteration
       if (abortSignal?.aborted) {
-        return { response: '(sub-agent aborted)', usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, totalTokens: totalInputTokens + totalOutputTokens, estimatedCost: totalCost } };
+        return finish('(sub-agent aborted)');
       }
 
       let assistantMessage: any;
@@ -174,7 +332,7 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
         // If aborted during streaming, return gracefully
         if (abortSignal?.aborted || (err instanceof Error && (err.name === 'AbortError' || err.message === 'Operation aborted'))) {
           logger.debug('Sub-agent aborted during streaming');
-          return { response: '(sub-agent aborted)', usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, totalTokens: totalInputTokens + totalOutputTokens, estimatedCost: totalCost } };
+          return finish('(sub-agent aborted)');
         }
         throw err;
       }
@@ -211,7 +369,7 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
         for (const toolCall of assistantMessage.tool_calls) {
           // Check abort between tool calls
           if (abortSignal?.aborted) {
-            return { response: '(sub-agent aborted)', usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, totalTokens: totalInputTokens + totalOutputTokens, estimatedCost: totalCost } };
+            return finish('(sub-agent aborted)');
           }
 
           const { name, arguments: argsStr } = toolCall.function;
@@ -251,18 +409,127 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
           role: 'assistant',
           content: message.content,
         });
-        return { response: message.content, usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, totalTokens: totalInputTokens + totalOutputTokens, estimatedCost: totalCost } };
+        return finish(message.content);
       }
       // The model produced an empty text response (e.g. it only called tools
       // and issued no final summary).  Log it and return a sentinel so the
       // parent agent knows the sub-agent finished but had nothing to say.
       logger.debug('Sub-agent returned empty content', { iteration: i });
-      return { response: '(sub-agent completed with no response)', usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, totalTokens: totalInputTokens + totalOutputTokens, estimatedCost: totalCost } };
+      return finish('(sub-agent completed with no response)');
     }
 
-    return { response: '(sub-agent reached iteration limit)', usage: { inputTokens: totalInputTokens, outputTokens: totalOutputTokens, totalTokens: totalInputTokens + totalOutputTokens, estimatedCost: totalCost } };
+    return finish('(sub-agent reached iteration limit)');
+  } catch (err) {
+    finalError = err instanceof Error ? err.message : String(err);
+    throw err;
   } finally {
+    if (sessionId) {
+      try {
+        const status: SubAgentRunStatus = finalError
+          ? 'error'
+          : finalResult.response === '(sub-agent aborted)'
+            ? 'aborted'
+            : finalResult.response === '(sub-agent reached iteration limit)'
+              ? 'iteration_limit'
+              : 'done';
+        await saveSubAgentRun({
+          sessionId,
+          id: subAgentSessionId,
+          task,
+          label,
+          status,
+          startedAt,
+          endedAt: Date.now(),
+          messages,
+          usage: finalResult.usage,
+          ...(finalError ? { error: finalError } : {}),
+        });
+      } catch (err) {
+        // Persistence is best-effort — never change the child's result.
+        logger.warn('Sub-agent transcript persistence failed', { id: subAgentSessionId, err: String(err) });
+      }
+    }
     op.end();
     clearTodos(subAgentSessionId);
   }
+}
+
+/**
+ * Run one or more sub-agents with isolated conversations.
+ *
+ * A string `task` preserves the original single-child behavior. An array
+ * `tasks` fans out with bounded concurrency, a shared iteration budget, and
+ * per-child progress events carrying stable `sa-N` ids.
+ *
+ * Returns one combined result: a labelled section per child and usage summed
+ * across all children (so the executor can keep emitting a single usage event).
+ */
+export async function runSubAgent(
+  client: OpenAI,
+  model: string,
+  task: string | string[],
+  maxIterations = 500,
+  requestDefaults: Record<string, unknown> = {},
+  onProgress?: SubAgentProgressHandler,
+  abortSignal?: AbortSignal,
+  pricing?: ModelPricing,
+  agentType?: string,
+  thoroughness?: string,
+  sessionId?: string,
+): Promise<SubAgentResult> {
+  const tasks = Array.isArray(task) ? task : [task];
+  const isFanOut = tasks.length > 1;
+
+  // `max_iterations` is a shared budget across the fan-out, soft-capped so
+  // N children cannot each burn the full 500 iterations. Single tasks are
+  // unaffected.
+  const requested = Number(maxIterations);
+  const baseLimit = Number.isFinite(requested)
+    ? Math.min(Math.max(Math.floor(requested), 1), 500)
+    : 500;
+  const perChildIterations = isFanOut
+    ? Math.max(1, Math.min(baseLimit, Math.floor(FANOUT_ITERATION_BUDGET / tasks.length)))
+    : baseLimit;
+
+  const results = await runParallel(
+    tasks,
+    (childTask, index, id) => {
+      const label = `Task ${index + 1}/${tasks.length}`;
+      const childProgress: SubAgentProgressHandler = (evt) =>
+        onProgress?.({ ...evt, subAgentId: id, subAgentLabel: label, subAgentTask: childTask });
+
+      onProgress?.({
+        tool: 'sub_agent', status: 'running', iteration: 0,
+        subAgentId: id, subAgentLabel: label, subAgentStatus: 'start', subAgentTask: childTask,
+      });
+
+      return runSubAgentOnce(
+        client, model, childTask, perChildIterations, requestDefaults,
+        childProgress, abortSignal, pricing, agentType, thoroughness,
+        sessionId, label,
+      ).then(
+        (result) => {
+          onProgress?.({
+            tool: 'sub_agent', status: 'done', iteration: 0,
+            subAgentId: id, subAgentLabel: label, subAgentStatus: 'done',
+            subAgentTask: childTask, args: { ...result.usage },
+          });
+          return result;
+        },
+        (err) => {
+          onProgress?.({
+            tool: 'sub_agent', status: 'error', iteration: 0,
+            subAgentId: id, subAgentLabel: label, subAgentStatus: 'error',
+            subAgentTask: childTask,
+            args: { error: err instanceof Error ? err.message : String(err) },
+          });
+          throw err;
+        },
+      );
+    },
+    FANOUT_CAP,
+    abortSignal,
+  );
+
+  return combineResults(tasks, results);
 }

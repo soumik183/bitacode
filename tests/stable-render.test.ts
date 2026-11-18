@@ -52,3 +52,18 @@ test('a bare clear passes through without fabricating frame rows', () => {
   stdout.write('\x1b[2K\x1b[1A\x1b[2K\x1b[G');
   assert.equal(stdout.writes[0], '\x1b[2K\x1b[1A\x1b[2K\x1b[G');
 });
+
+test('a zoom-out clamps painted rows to the live terminal height', () => {
+  const stdout = fakeStdout();
+  stdout.rows = 24;
+  stdout.write(repaint(Array.from({ length: 23 }, (_, i) => `old${i}`).join('\n')));
+  stdout.rows = 10;
+  stdout.writes.length = 0;
+  stdout.write(repaint('A\nB\nC'));
+  const out = stdout.writes[0];
+  const writtenLines = out.slice('\x1b[H'.length).split('\n').slice(0, -1);
+  assert.ok(writtenLines.length <= 10, `wrote ${writtenLines.length} rows, expected <= 10`);
+  assert.ok(count(out, '\x1b[K') <= 10, 'erases no more than the visible rows');
+  assert.ok(!out.includes('\x1b[1A'), 'no erase-and-move-up sequence');
+  assert.ok(out.includes('A\x1b[K\nB\x1b[K\nC\x1b[K'), 'new rows still painted');
+});

@@ -35,15 +35,18 @@ export async function sleepWithAbort(delayMs, abortSignal) {
     });
 }
 // Handle an API error with appropriate retry strategy.
-export async function handleApiError(apiError, messages, _validToolNames, pricing, retryState, iterationCount, onEvent, client, model, requestDefaults, sessionId) {
+export async function handleApiError(apiError, messages, validToolNames, pricing, retryState, iterationCount, onEvent, client, model, requestDefaults, sessionId, abortSignal, 
+// Injectable for tests; production always uses the abort-aware default.
+sleepFn = sleepWithAbort) {
     const errMsg = apiError?.message || 'Unknown API error';
     const status = apiError?.status;
     logger.error(`API error: ${errMsg}`, { status, code: apiError?.code });
     const retryableStatus = status === 408 || status === 409 || status === 425;
     const retryableCode = ['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'ENETUNREACH', 'EAI_AGAIN'].includes(apiError?.code);
-    // Context window exceeded - force compaction (check before generic 400 handling)
-    const isContextTooLong = status === 400 &&
-        /prompt.*too long|context.*length|maximum.*token|tokens?.*exceed/i.test(errMsg);
+    // Context window exceeded - force compaction (check before generic 400 handling).
+    // 413 (payload too large) is the same condition reported by some providers.
+    const isContextTooLong = status === 413 ||
+        (status === 400 && /prompt.*too long|context.*length|maximum.*token|tokens?.*exceed/i.test(errMsg));
     if (isContextTooLong && retryState.contextCount < LIMITS.MAX_CONTEXT) {
         retryState.contextCount++;
         logger.warn(`Prompt too long (attempt ${retryState.contextCount})`);
@@ -77,11 +80,15 @@ export async function handleApiError(apiError, messages, _validToolNames, pricin
     }
     // Rate limit - backoff
     if (status === 429) {
-        const retryAfter = parseInt(apiError?.headers?.['retry-after'] || '5', 10);
-        const backoff = Math.min(retryAfter * 1000, 60_000);
+        const backoff = parseRetryAfterMs(apiError?.headers);
         logger.info(`Rate limited, retrying in ${backoff / 1000}s...`);
         onEvent({ type: 'error', error: `Rate limited. Retrying...`, transient: true });
-        await sleepWithAbort(backoff);
+        try {
+            await sleepFn(backoff, abortSignal);
+        }
+        catch {
+            return { handled: true, shouldAbort: true, silentRetry: false };
+        }
         return { handled: true, shouldAbort: false, silentRetry: true };
     }
     // Server error - exponential backoff
@@ -89,18 +96,52 @@ export async function handleApiError(apiError, messages, _validToolNames, pricin
         const backoff = Math.min(2 ** iterationCount * 1000, 30_000);
         logger.info(`Request failed, retrying in ${backoff / 1000}s...`);
         onEvent({ type: 'error', error: `Request failed. Retrying...`, transient: true });
-        await sleepWithAbort(backoff);
+        try {
+            await sleepFn(backoff, abortSignal);
+        }
+        catch {
+            return { handled: true, shouldAbort: true, silentRetry: false };
+        }
         return { handled: true, shouldAbort: false, silentRetry: true };
     }
     // Generic 400 errors - try repair/truncate/continue
     if (status === 400) {
-        return await handle400Error(messages, retryState, onEvent);
+        return await handle400Error(messages, validToolNames, retryState, onEvent);
     }
-    // Non-retryable
-    return { handled: false, shouldAbort: false, silentRetry: false, errorMessage: errMsg };
+    // Non-retryable - short, user-facing messages; never leak raw response bodies.
+    if (status === 401 || status === 403) {
+        return {
+            handled: false,
+            shouldAbort: false,
+            silentRetry: false,
+            errorMessage: 'Authentication failed. Check your API key and try again.',
+        };
+    }
+    if (status === 404) {
+        return {
+            handled: false,
+            shouldAbort: false,
+            silentRetry: false,
+            errorMessage: 'Model or endpoint not found. Check your model configuration.',
+        };
+    }
+    if (status === 413) {
+        return {
+            handled: false,
+            shouldAbort: false,
+            silentRetry: false,
+            errorMessage: 'Request too large. Try /clear or a shorter input.',
+        };
+    }
+    return {
+        handled: false,
+        shouldAbort: false,
+        silentRetry: false,
+        errorMessage: safeErrorMessage(errMsg, status),
+    };
 }
 // Handle 400 errors: repair JSON → remove orphaned → truncate → continue.
-async function handle400Error(messages, retryState, onEvent) {
+async function handle400Error(messages, validToolNames, retryState, onEvent) {
     // 1. Try JSON repairs on tool arguments
     // Models sometimes emit invalid escape sequences in tool args (e.g., \| from grep regex)
     // which cause JSON.parse to fail. These persist across requests unless repaired.
@@ -127,14 +168,20 @@ async function handle400Error(messages, retryState, onEvent) {
             return { handled: true, shouldAbort: false, silentRetry: true };
         }
     }
-    // 2. Remove orphaned tool results
-    // This happens when messages are truncated and the assistant's tool_calls are
-    // removed but the tool results remain. The API rejects orphaned tool results.
-    const cleaned = removeOrphanedToolResults(messages);
-    if (cleaned.changed) {
+    // 2. Remove hallucinated tool calls + orphaned tool results
+    // Models sometimes invent tool names; the API rejects the whole request until
+    // those calls (and their results) are gone. Orphaned results have the same effect.
+    const invalid = removeInvalidToolCalls(messages, validToolNames);
+    const cleaned = removeOrphanedToolResults(invalid.messages);
+    if (invalid.removed.length > 0 || cleaned.changed) {
         messages.length = 0;
         messages.push(...cleaned.messages);
-        logger.warn('400 response: removed orphaned tool results');
+        if (invalid.removed.length > 0) {
+            logger.warn('400 response: removed hallucinated tool calls', { names: invalid.removed });
+        }
+        if (cleaned.changed) {
+            logger.warn('400 response: removed orphaned tool results');
+        }
         return { handled: true, shouldAbort: false, silentRetry: true };
     }
     // 3. Truncate messages progressively
@@ -195,4 +242,94 @@ function removeOrphanedToolResults(messages) {
         return true;
     });
     return { messages: filtered, changed: filtered.length !== messages.length };
+}
+// Parse Retry-After per RFC 7231: delta-seconds or an HTTP date.
+// Always returns a finite number of milliseconds clamped to 1-60s.
+function parseRetryAfterMs(headers) {
+    if (!headers)
+        return 5_000;
+    const headerObj = headers;
+    // OpenAI SDK errors expose a Headers instance; hand-rolled clients use a plain object.
+    const value = typeof headerObj.get === 'function'
+        ? headerObj.get('retry-after')
+        : headerObj['retry-after'];
+    const raw = Array.isArray(value) ? value[0] : value;
+    if (typeof raw !== 'string' && typeof raw !== 'number')
+        return 5_000;
+    const str = String(raw).trim();
+    if (!str)
+        return 5_000;
+    let seconds;
+    if (/^-?\d+(?:\.\d+)?$/.test(str)) {
+        seconds = Number(str);
+    }
+    else {
+        const parsed = Date.parse(str);
+        if (Number.isNaN(parsed))
+            return 5_000;
+        seconds = (parsed - Date.now()) / 1000;
+    }
+    if (!Number.isFinite(seconds) || seconds < 1)
+        seconds = 1;
+    if (seconds > 60)
+        seconds = 60;
+    return seconds * 1000;
+}
+// Keep error messages short and user-facing; never echo raw response bodies.
+function safeErrorMessage(errMsg, status) {
+    const fallback = status ? `Request failed (status ${status}).` : 'Request failed.';
+    if (typeof errMsg !== 'string')
+        return fallback;
+    const text = errMsg.replace(/\s+/g, ' ').trim();
+    const singleLine = text.startsWith('{') || text.startsWith('[')
+        ? 'Unexpected response from provider.'
+        : text;
+    const short = singleLine.length > 160 ? `${singleLine.slice(0, 160)}…` : singleLine;
+    return status ? `${short} (status ${status})` : short;
+}
+// Drop tool calls whose function name isn't a registered tool, plus their results.
+// Guards against an empty registry (would drop everything) and never strips the
+// system prompt or the last user message.
+function removeInvalidToolCalls(messages, validToolNames) {
+    if (validToolNames.size === 0)
+        return { messages, removed: [] };
+    const removedIds = new Set();
+    const removedNames = new Set();
+    const keptMessages = [];
+    for (const msg of messages) {
+        const msgAny = msg;
+        if (msg.role === 'assistant' && Array.isArray(msgAny.tool_calls)) {
+            const kept = msgAny.tool_calls.filter((tc) => {
+                const name = tc?.function?.name;
+                if (!name || !validToolNames.has(name)) {
+                    removedNames.add(name || '(unnamed)');
+                    if (tc?.id)
+                        removedIds.add(tc.id);
+                    return false;
+                }
+                return true;
+            });
+            if (kept.length === msgAny.tool_calls.length) {
+                keptMessages.push(msg);
+                continue;
+            }
+            const hasContent = (typeof msgAny.content === 'string' && msgAny.content.trim().length > 0) ||
+                (Array.isArray(msgAny.content) && msgAny.content.length > 0);
+            if (hasContent || kept.length > 0) {
+                keptMessages.push({ ...msg, tool_calls: kept });
+            }
+            continue;
+        }
+        keptMessages.push(msg);
+    }
+    if (removedIds.size === 0)
+        return { messages, removed: [] };
+    const result = keptMessages.filter((msg) => {
+        const msgAny = msg;
+        return !(msg.role === 'tool' && msgAny.tool_call_id && removedIds.has(msgAny.tool_call_id));
+    });
+    if (!result.some((m) => m.role === 'system') || !result.some((m) => m.role === 'user')) {
+        return { messages, removed: [] };
+    }
+    return { messages: result, removed: [...removedNames] };
 }

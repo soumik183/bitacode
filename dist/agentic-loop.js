@@ -26,10 +26,16 @@ import { logger } from './utils/logger.js';
 import { processStream } from './agentic-loop/stream.js';
 import { executeToolCalls } from './agentic-loop/executor.js';
 import { handleApiError } from './agentic-loop/errors.js';
-function emitAbortAndFinish(onEvent) {
-    onEvent({ type: 'done' });
+function emitAbortAndFinish(handler) {
+    handler({ type: 'done' });
 }
-function getValidToolNames() {
+/**
+ * Names the model may emit: all built-ins, dynamic tools (MCP/skills) and the
+ * sub-agent tool, refreshed each iteration. A Set dedupes registrations.
+ * Aliases are intentionally absent — they share implementations with a
+ * canonical tool, so advertising them would only confuse the model.
+ */
+export function getValidToolNames() {
     return new Set([...getAllTools(), subAgentTool]
         .map((tool) => tool.function?.name)
         .filter((name) => Boolean(name)));
@@ -49,6 +55,19 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
     const abortSignal = options.abortSignal;
     const sessionId = options.sessionId;
     const requestDefaults = options.requestDefaults || {};
+    const timeoutMs = options.timeoutMs ?? 0;
+    // Wrap the UI handler once: a throwing listener must never abort the run.
+    const emit = (event) => {
+        try {
+            onEvent(event);
+        }
+        catch (err) {
+            logger.warn('Agent event handler threw', {
+                eventType: event.type,
+                error: err instanceof Error ? err.message : String(err),
+            });
+        }
+    };
     // The same AbortSignal is passed into every OpenAI SDK call and every
     // sleep across all loop iterations and sub-agent calls.
     // The SDK attaches an 'abort' listener per request, so on a long run
@@ -78,12 +97,24 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
         retriggerCount: 0,
     };
     const MAX_RETRIGGERS = 3;
-    const validToolNames = getValidToolNames();
+    const MAX_CONSECUTIVE_INVALID_JSON = 3;
+    let consecutiveInvalidJson = 0;
+    let validToolNames = getValidToolNames();
+    const startTime = Date.now();
     while (iterationCount < maxIterations) {
         // Check if abort was requested
         if (abortSignal?.aborted) {
             logger.debug('Agentic loop aborted by user');
-            emitAbortAndFinish(onEvent);
+            emitAbortAndFinish(emit);
+            return updatedMessages;
+        }
+        // Dynamic tools (MCP/skills) may register after the loop starts.
+        validToolNames = getValidToolNames();
+        // Wall-clock guard: a model can stall even while bounded by maxIterations.
+        if (timeoutMs > 0 && Date.now() - startTime >= timeoutMs) {
+            logger.warn('Agentic loop timed out', { timeoutMs, iterationCount });
+            emit({ type: 'error', error: 'Agentic loop timed out.', transient: true });
+            emit({ type: 'done' });
             return updatedMessages;
         }
         iterationCount++;
@@ -119,7 +150,14 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
             const stream = await client.chat.completions.create({
                 ...requestDefaults,
                 model,
-                messages: updatedMessages,
+                // `reasoning` is a UI-only field kept for session replay. Providers
+                // reject unknown assistant fields, so never send it back.
+                messages: updatedMessages.map((message) => {
+                    if (message?.role !== 'assistant' || !message.reasoning)
+                        return message;
+                    const { reasoning: _reasoning, ...rest } = message;
+                    return rest;
+                }),
                 tools: allTools,
                 tool_choice: 'auto',
                 stream: true,
@@ -128,7 +166,7 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
                 signal: abortSignal,
             });
             // Process the streaming response
-            const streamResult = await processStream(stream, updatedMessages, model, pricing, onEvent);
+            const streamResult = await processStream(stream, updatedMessages, model, pricing, emit);
             assistantMessage = streamResult.assistantMessage;
             // Handle tool calls
             if (streamResult.hasToolCalls) {
@@ -150,6 +188,15 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
                     }
                 });
                 if (invalidToolCalls.length > 0) {
+                    consecutiveInvalidJson++;
+                    if (consecutiveInvalidJson >= MAX_CONSECUTIVE_INVALID_JSON) {
+                        logger.warn('Model repeatedly produced invalid tool arguments; stopping', {
+                            count: consecutiveInvalidJson,
+                        });
+                        emit({ type: 'error', error: 'Model repeatedly produced invalid tool arguments.' });
+                        emit({ type: 'done' });
+                        return updatedMessages;
+                    }
                     logger.warn('Assistant produced tool calls with invalid JSON, skipping this turn', {
                         invalidToolCalls: invalidToolCalls.map((tc) => ({
                             name: tc.function?.name,
@@ -160,6 +207,22 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
                     // The loop will continue and retry
                     continue;
                 }
+                // A well-formed response breaks the consecutive-invalid streak.
+                consecutiveInvalidJson = 0;
+                // Drop duplicate tool_call ids (keep the first). Duplicates would
+                // produce duplicate tool results and corrupt provider history.
+                const seenToolCallIds = new Set();
+                assistantMessage.tool_calls = assistantMessage.tool_calls.filter((tc) => {
+                    const id = tc?.id;
+                    if (typeof id === 'string' && id.length > 0) {
+                        if (seenToolCallIds.has(id)) {
+                            logger.warn('Dropping duplicate tool call id', { id, tool: tc.function?.name });
+                            return false;
+                        }
+                        seenToolCallIds.add(id);
+                    }
+                    return true;
+                });
                 logger.info('Model returned tool calls', {
                     count: assistantMessage.tool_calls.length,
                     tools: assistantMessage.tool_calls.map((tc) => tc.function?.name).join(', '),
@@ -174,14 +237,14 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
                     model,
                     pricing,
                 };
-                const executionResult = await executeToolCalls(assistantMessage.tool_calls, updatedMessages, onEvent, toolContext);
+                const executionResult = await executeToolCalls(assistantMessage.tool_calls, updatedMessages, emit, toolContext);
                 if (executionResult.shouldAbort) {
-                    emitAbortAndFinish(onEvent);
+                    emitAbortAndFinish(emit);
                     return updatedMessages;
                 }
                 // Signal UI that this iteration's tool calls are all done,
                 // so it can flush completed messages to static output.
-                onEvent({ type: 'iteration_done' });
+                emit({ type: 'iteration_done' });
                 // Continue loop — let the LLM process tool results
                 continue;
             }
@@ -190,9 +253,11 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
                 updatedMessages.push({
                     role: 'assistant',
                     content: assistantMessage.content,
+                    ...(assistantMessage.reasoning ? { reasoning: assistantMessage.reasoning } : {}),
                 });
-                // Reset retrigger count on valid content response
+                // Reset retry counts on valid content response
                 retryState.retriggerCount = 0;
+                consecutiveInvalidJson = 0;
             }
             // Check if we need to retrigger: if the last message is a tool result
             // but we got no assistant response (empty content, no tool_calls), the AI
@@ -217,7 +282,7 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
             // Reset retry counts on successful completion
             retryState.repairCount = 0;
             retryState.retriggerCount = 0;
-            onEvent({ type: 'done' });
+            emit({ type: 'done' });
             return updatedMessages;
         }
         catch (apiError) {
@@ -253,36 +318,36 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
                         updatedMessages.push(assistantMessage);
                     }
                 }
-                emitAbortAndFinish(onEvent);
+                emitAbortAndFinish(emit);
                 return updatedMessages;
             }
             // Handle API errors with retry strategies
-            const errorResult = await handleApiError(apiError, updatedMessages, validToolNames, pricing, retryState, iterationCount, onEvent, client, model, requestDefaults, sessionId);
+            const errorResult = await handleApiError(apiError, updatedMessages, validToolNames, pricing, retryState, iterationCount, emit, client, model, requestDefaults, sessionId, abortSignal);
             if (errorResult.shouldAbort) {
-                emitAbortAndFinish(onEvent);
+                emitAbortAndFinish(emit);
                 return updatedMessages;
             }
             if (!errorResult.handled) {
                 // Non-retryable error
-                onEvent({
+                emit({
                     type: 'error',
                     error: errorResult.errorMessage || 'Unknown error',
                     transient: errorResult.transient,
                 });
-                onEvent({ type: 'done' });
+                emit({ type: 'done' });
                 return updatedMessages;
             }
             // If handled but not silently, the error was already emitted
             if (!errorResult.silentRetry) {
-                onEvent({ type: 'done' });
+                emit({ type: 'done' });
                 return updatedMessages;
             }
             // Silent retry - continue the loop
             continue;
         }
     }
-    onEvent({ type: 'error', error: 'Maximum iteration limit reached.' });
-    onEvent({ type: 'done' });
+    emit({ type: 'error', error: 'Maximum iteration limit reached.' });
+    emit({ type: 'done' });
     return updatedMessages;
 }
 /**

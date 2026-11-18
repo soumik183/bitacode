@@ -9,9 +9,9 @@
 
 import { spawn } from 'node:child_process';
 import path from 'node:path';
-import { requestApproval } from '../utils/approval.js';
+import { isDangerouslySkipPermissions, requestApproval } from '../utils/approval.js';
 import { logger } from '../utils/logger.js';
-import { getWorkingDirectory, validatePath } from '../utils/path-validation.js';
+import { validatePath } from '../utils/path-validation.js';
 
 export const bashTool = {
   type: 'function' as const,
@@ -25,6 +25,7 @@ export const bashTool = {
       properties: {
         command: { type: 'string', description: 'The shell command to execute.' },
         timeout_ms: { type: 'number', description: 'Timeout in milliseconds. Defaults to 30000 (30s).' },
+        cwd: { type: 'string', description: 'Working directory for the command. Must be within the allowed roots. Defaults to the current directory.' },
       },
       required: ['command'],
     },
@@ -197,7 +198,8 @@ export async function runBash(
   command: string,
   timeoutMs = 30_000,
   sessionId?: string,
-  abortSignal?: AbortSignal
+  abortSignal?: AbortSignal,
+  cwd?: string
 ): Promise<string> {
   if (typeof command !== 'string' || command.trim().length === 0) {
     return 'Error: command is required.';
@@ -208,9 +210,28 @@ export async function runBash(
     ? Math.min(Math.max(requestedTimeout, 1000), 600_000)
     : 30_000;
 
-  // Layer 1: hard block
+  // Layer 1: hard block — runs before any approval mode, so approval can never bypass it.
   if (isDangerous(command)) {
     return `Error: Command blocked for safety. "${command}" contains a dangerous pattern that cannot be executed.`;
+  }
+
+  // Per-call cwd is validated like any other path; default to the process cwd.
+  let effectiveCwd: string;
+  try {
+    effectiveCwd = await validatePath(cwd ?? process.cwd());
+  } catch (err) {
+    return `Error: Invalid working directory. ${(err as Error).message}`;
+  }
+
+  // Execution-time path enforcement. Approval routing used to be the only place
+  // paths were checked, which meant auto mode never enforced them. yolo /
+  // --dangerously-skip-permissions is the intentional escape hatch for path
+  // restrictions ONLY — the dangerous-command block above still always applies.
+  if (!isDangerouslySkipPermissions()) {
+    const tokens = tokenizeCommand(command);
+    if (!tokens || !(await validateCommandPaths(tokens))) {
+      return `Command blocked: "${command}" references a path outside the allowed working directory.`;
+    }
   }
 
   // Layer 2: safe commands skip approval
@@ -220,9 +241,9 @@ export async function runBash(
       id: `bash-${Date.now()}`,
       type: 'shell_command',
       description: `Run command: ${command}`,
-      detail: `Working directory: ${getWorkingDirectory()}\nCommand: ${command}`,
+      detail: `Working directory: ${effectiveCwd}\nCommand: ${command}`,
       sessionId,
-      sessionScopeKey: `shell:${command}`,
+      sessionScopeKey: `shell:${effectiveCwd}:${command}`,
     });
 
     if (!approved) {
@@ -242,7 +263,7 @@ export async function runBash(
 
     const child = spawn(command, [], {
       shell: true,
-      cwd: process.cwd(),
+      cwd: effectiveCwd,
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'],
       // On POSIX, give the command its own process group so timeout/abort can

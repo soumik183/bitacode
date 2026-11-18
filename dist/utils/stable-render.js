@@ -29,11 +29,49 @@ export function installStableRenderer(stdout) {
             return originalWrite(chunk, encodingOrCallback, callback);
         const lines = body.slice(0, lastBreak).split('\n');
         const suffix = body.slice(lastBreak + 1);
-        // Clear rows that belonged to a taller previous frame so they cannot linger.
-        while (paintedRows > lines.length)
+        // A zoom-out can leave `paintedRows` far larger than the new terminal.
+        // Never write past the live screen height, or we scroll stale rows into
+        // view and leave a blank/black screen. App already renders at rows - 1.
+        const maxRows = Math.max(1, (stdout.rows || 24) - 1);
+        while (paintedRows > lines.length && lines.length < maxRows)
             lines.push('');
+        if (lines.length > maxRows)
+            lines.length = maxRows;
         paintedRows = lines.length;
         const rewritten = `\x1b[H${lines.map((line) => `${line}\x1b[K`).join('\n')}\n${suffix}`;
         return originalWrite(rewritten, encodingOrCallback, callback);
     };
+}
+/** Bytes that restore a sane terminal after the TUI entered the alt screen. */
+export function terminalRestoreSequence() {
+    return '\x1b[?1006l\x1b[?1000l\x1b]111\x07\x1b[?1049l\x1b[?25h';
+}
+const RESTORE_EVENTS = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'];
+let activeTerminalRestore = null;
+/**
+ * Restore the terminal on exit or a signal even when React never unmounts
+ * (Termux killing the app, terminal closing, native SIGTERM). The bytes are
+ * written at most once and this installer is idempotent. Ink's own signalExit
+ * handler is left alone — it still handles the actual process teardown.
+ */
+export function installTerminalRestore(stdout, emitter = process) {
+    if (activeTerminalRestore)
+        return activeTerminalRestore;
+    let restored = false;
+    const restore = () => {
+        if (restored)
+            return;
+        restored = true;
+        stdout.write(terminalRestoreSequence());
+    };
+    for (const event of RESTORE_EVENTS)
+        emitter.on(event, restore);
+    const dispose = () => {
+        for (const event of RESTORE_EVENTS)
+            emitter.off(event, restore);
+        if (activeTerminalRestore === dispose)
+            activeTerminalRestore = null;
+    };
+    activeTerminalRestore = dispose;
+    return dispose;
 }

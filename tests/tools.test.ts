@@ -17,6 +17,7 @@ import {
 } from '../src/tools/index.js';
 import { setApprovalHandler } from '../src/utils/approval.js';
 import { formatToolActivity } from '../src/utils/tool-display.js';
+import { getValidToolNames } from '../src/agentic-loop.js';
 
 // File-writing tests run without a UI; approve once so they can exercise the
 // real write path (path validation, atomic rename, permissions).
@@ -235,6 +236,140 @@ test('handleToolCall truncates oversized tool results', async () => {
   }
 });
 
+test('handleToolCall truncation preserves the tail of oversized results', async () => {
+  const toolName = 'tmp_big_tool_tail';
+  registerDynamicTool({
+    type: 'function',
+    function: { name: toolName, description: 'test', parameters: { type: 'object', properties: {} } },
+  });
+  registerDynamicHandler(toolName, async () => `HEAD_MARKER${'x'.repeat(60_000)}TAIL_ERROR_MARKER`);
+
+  try {
+    const result = await handleToolCall(toolName, {});
+    assert.ok(result.length < 51_000);
+    assert.match(result, /HEAD_MARKER/);
+    assert.match(result, /TAIL_ERROR_MARKER/);
+    assert.match(result, /truncated/i);
+  } finally {
+    unregisterDynamicHandler(toolName);
+    unregisterDynamicTool(toolName);
+  }
+});
+
+test('handleToolCall does not call sub_agent an unknown tool', async () => {
+  const result = await handleToolCall('sub_agent', {});
+  assert.doesNotMatch(result, /Unknown tool/i);
+  assert.match(result, /loop/i);
+});
+
 test('tool display survives a malformed webfetch URL', () => {
   assert.doesNotThrow(() => formatToolActivity('webfetch', { url: 'not a url' }));
+});
+
+test('aliases accept alias-style arg keys and map to canonical ones', async () => {
+  const dir = 'tests/tmp-alias-args';
+  await fs.rm(dir, { recursive: true, force: true });
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'needle.txt'), 'ALIAS_NEEDLE_MARKER\n', 'utf8');
+
+  try {
+    // `list` accepts path (alias) and directory_path (canonical) equally.
+    const viaPath = await handleToolCall('list', { path: dir });
+    const viaCanonical = await handleToolCall('list', { directory_path: dir });
+    assert.equal(viaPath, viaCanonical);
+    assert.match(viaPath, /needle\.txt/);
+
+    // `grep` accepts query/search_term for the term and path/directory_path for the dir.
+    const viaQuery = await handleToolCall('grep', { query: 'ALIAS_NEEDLE_MARKER', path: dir });
+    const viaSearchTerm = await handleToolCall('grep', { search_term: 'ALIAS_NEEDLE_MARKER', directory_path: dir });
+    assert.match(viaQuery, /ALIAS_NEEDLE_MARKER/);
+    assert.match(viaQuery, /needle\.txt/);
+    assert.equal(viaQuery, viaSearchTerm);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('unknown tool error suggests the closest tools, not a giant flat list', async () => {
+  const result = await handleToolCall('reed_file', {});
+  assert.match(result, /Unknown tool "reed_file"/);
+  assert.match(result, /Did you mean:/);
+  assert.match(result, /read_file/);
+  assert.doesNotMatch(result, /Available tools:/);
+  // One quoted tool name in the header + at most three suggestions.
+  const quoted = result.match(/"[a-z0-9_]+"/g) ?? [];
+  assert.ok(quoted.length <= 4, `expected <= 3 suggestions, got ${quoted.length - 1}: ${result}`);
+});
+
+test('required args are validated before dispatch with actionable errors', async () => {
+  assert.match(await handleToolCall('read_file', {}), /^Error: read_file requires file_path$/);
+  assert.match(await handleToolCall('write_file', { file_path: 'x' }), /^Error: write_file requires content$/);
+  assert.match(await handleToolCall('grep', {}), /^Error: grep requires search_term$/);
+  assert.match(await handleToolCall('bash', {}), /^Error: bash requires command$/);
+});
+
+test('handlers cannot leak undefined or non-string results', async () => {
+  const undefTool = 'tmp_undefined_result_tool';
+  const objTool = 'tmp_object_result_tool';
+  registerDynamicTool({
+    type: 'function',
+    function: { name: undefTool, description: 'test', parameters: { type: 'object', properties: {} } },
+  });
+  registerDynamicHandler(undefTool, async () => undefined as any);
+  registerDynamicTool({
+    type: 'function',
+    function: { name: objTool, description: 'test', parameters: { type: 'object', properties: {} } },
+  });
+  registerDynamicHandler(objTool, async () => ({ ok: true }) as any);
+
+  try {
+    const undefResult = await handleToolCall(undefTool, {});
+    assert.equal(typeof undefResult, 'string');
+    assert.match(undefResult, /returned no output/);
+
+    const objResult = await handleToolCall(objTool, {});
+    assert.equal(typeof objResult, 'string');
+    assert.equal(objResult, '{"ok":true}');
+  } finally {
+    unregisterDynamicHandler(undefTool);
+    unregisterDynamicTool(undefTool);
+    unregisterDynamicHandler(objTool);
+    unregisterDynamicTool(objTool);
+  }
+});
+
+test('handleToolCall strips NUL bytes from results', async () => {
+  const toolName = 'tmp_nul_tool';
+  registerDynamicTool({
+    type: 'function',
+    function: { name: toolName, description: 'test', parameters: { type: 'object', properties: {} } },
+  });
+  registerDynamicHandler(toolName, async () => 'a\0b\0c');
+
+  try {
+    assert.equal(await handleToolCall(toolName, {}), 'abc');
+  } finally {
+    unregisterDynamicHandler(toolName);
+    unregisterDynamicTool(toolName);
+  }
+});
+
+test('getValidToolNames includes built-ins, dynamic tools and sub_agent but not aliases', () => {
+  const name = 'tmp_registry_probe_tool';
+  registerDynamicTool({
+    type: 'function',
+    function: { name, description: 'test', parameters: { type: 'object', properties: {} } },
+  });
+
+  try {
+    const names = getValidToolNames();
+    assert.ok(names instanceof Set);
+    assert.ok(names.has('read_file'), 'built-ins included');
+    assert.ok(names.has('sub_agent'), 'sub-agent tool included');
+    assert.ok(names.has(name), 'dynamic tools included');
+    assert.ok(!names.has('grep'), 'aliases must not be advertised');
+    assert.ok(!names.has('list'), 'aliases must not be advertised');
+  } finally {
+    unregisterDynamicTool(name);
+  }
 });

@@ -64,12 +64,15 @@ export const TodoPanel = ({ todos, columns, maxVisible = 5 }) => {
     const { start, items: visible } = visibleTodoWindow(todos, maxVisible);
     const hiddenAbove = start;
     const hiddenBelow = Math.max(0, total - start - visible.length);
-    const barWidth = columns >= 80 ? 10 : 6;
+    const safeColumns = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+    const barWidth = safeColumns >= 80 ? 10 : 6;
     const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
     const digits = String(total).length;
-    // "  " indent + icon + space + index column + space
+    // "  " indent + icon + space + index column + space, plus the panel's own
+    // paddingX(2) on both sides. A tiny terminal cannot afford the old 10-col
+    // floor, so clamp all the way down to 1 instead of overflowing the frame.
     const reserved = 2 + 2 + digits + 1 + (hiddenAbove + hiddenBelow > 0 ? 2 : 0);
-    const contentWidth = Math.max(10, columns - reserved);
+    const contentWidth = Math.max(1, safeColumns - 4 - reserved);
     return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.text, bold: true, children: "Tasks" }), _jsx(Text, { color: theme.dim, children: `  ${done}/${total} done  ` }), _jsx(Text, { color: theme.success, children: '▰'.repeat(filled) }), _jsx(Text, { color: theme.border, children: '▱'.repeat(barWidth - filled) })] }), hiddenAbove > 0 && (_jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` })), visible.map((todo, index) => {
                 const dimmed = todo.status === 'completed' || todo.status === 'cancelled';
                 return (_jsxs(Box, { children: [_jsx(Text, { color: STATUS_COLOR[todo.status], children: `${STATUS_ICON[todo.status]} ` }), _jsx(Text, { color: dimmed
@@ -78,7 +81,7 @@ export const TodoPanel = ({ todos, columns, maxVisible = 5 }) => {
                                     ? theme.text
                                     : theme.muted, bold: todo.status === 'in_progress', strikethrough: dimmed, wrap: "truncate-end", children: todo.status === 'in_progress'
                                 ? truncateTodo(todo.content, contentWidth)
-                                : `(${todo.priority}) ${truncateTodo(todo.content, Math.max(8, contentWidth - todo.priority.length - 3))}` })] }, `${todo.id}-${start + index}`));
+                                : `(${todo.priority}) ${truncateTodo(todo.content, Math.max(1, contentWidth - todo.priority.length - 3))}` })] }, `${todo.id}-${start + index}`));
             }), hiddenBelow > 0 && (_jsx(Text, { color: theme.dim, children: `  ↓ ${hiddenBelow} more` }))] }));
 };
 /**

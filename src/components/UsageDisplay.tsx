@@ -15,6 +15,8 @@ export interface UsageDisplayProps {
   /** Narrow terminals drop the variant/cost cluster so the row never overflows. */
   compact?: boolean;
   gutter?: number;
+  /** Short terminals drop the bottom margin so the footer always fits. */
+  dense?: boolean;
 }
 
 // Bouncing equaliser: shifts one bar per frame so it reads as AI activity.
@@ -73,12 +75,13 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   frame,
   compact = false,
   gutter = 2,
+  dense = false,
 }) => {
   const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
 
   return (
-    <Box flexDirection="row" justifyContent="space-between" paddingX={gutter} marginBottom={1} flexShrink={0}>
-      <Box flexShrink={1} flexDirection="row">
+    <Box flexDirection="row" justifyContent="space-between" paddingX={gutter} marginBottom={dense ? 0 : 1} flexShrink={0}>
+      <Box flexShrink={1} minWidth={0} overflow="hidden" flexDirection="row">
         {busy ? (
           <>
             {wave(frame)

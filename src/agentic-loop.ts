@@ -52,6 +52,11 @@ export interface AgentEvent {
    *  Distinct from `tool_call` so the UI can show it as a nested progress indicator
    *  without adding it to the parent's tool-call message history. */
   subAgentTool?: { tool: string; status: 'running' | 'done' | 'error'; iteration: number; args?: Record<string, unknown> };
+  /** Optional per-child metadata for parallel sub-agent fan-out. */
+  subAgentId?: string;
+  subAgentLabel?: string;
+  subAgentStatus?: 'start' | 'done' | 'error';
+  subAgentTask?: string;
   usage?: { inputTokens: number; outputTokens: number; cost: number; contextPercent: number };
   /** Emitted when a sub-agent completes, carrying its accumulated usage. */
   subAgentUsage?: SubAgentUsage;
@@ -67,13 +72,21 @@ export interface AgenticLoopOptions {
   abortSignal?: AbortSignal;
   sessionId?: string;
   requestDefaults?: Record<string, unknown>;
+  /** Optional wall-clock budget in ms. 0/undefined = disabled (preserves legacy behavior). */
+  timeoutMs?: number;
 }
 
-function emitAbortAndFinish(onEvent: AgentEventHandler): void {
-  onEvent({ type: 'done' });
+function emitAbortAndFinish(handler: AgentEventHandler): void {
+  handler({ type: 'done' });
 }
 
-function getValidToolNames(): Set<string> {
+/**
+ * Names the model may emit: all built-ins, dynamic tools (MCP/skills) and the
+ * sub-agent tool, refreshed each iteration. A Set dedupes registrations.
+ * Aliases are intentionally absent — they share implementations with a
+ * canonical tool, so advertising them would only confuse the model.
+ */
+export function getValidToolNames(): Set<string> {
   return new Set(
     [...getAllTools(), subAgentTool]
       .map((tool: any) => tool.function?.name)
@@ -105,6 +118,19 @@ export async function runAgenticLoop(
   const abortSignal = options.abortSignal;
   const sessionId = options.sessionId;
   const requestDefaults = options.requestDefaults || {};
+  const timeoutMs = options.timeoutMs ?? 0;
+
+  // Wrap the UI handler once: a throwing listener must never abort the run.
+  const emit: AgentEventHandler = (event) => {
+    try {
+      onEvent(event);
+    } catch (err) {
+      logger.warn('Agent event handler threw', {
+        eventType: event.type,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   // The same AbortSignal is passed into every OpenAI SDK call and every
   // sleep across all loop iterations and sub-agent calls.
@@ -138,13 +164,27 @@ export async function runAgenticLoop(
     retriggerCount: 0,
   };
   const MAX_RETRIGGERS = 3;
-  const validToolNames = getValidToolNames();
+  const MAX_CONSECUTIVE_INVALID_JSON = 3;
+  let consecutiveInvalidJson = 0;
+  let validToolNames = getValidToolNames();
+  const startTime = Date.now();
 
   while (iterationCount < maxIterations) {
     // Check if abort was requested
     if (abortSignal?.aborted) {
       logger.debug('Agentic loop aborted by user');
-      emitAbortAndFinish(onEvent);
+      emitAbortAndFinish(emit);
+      return updatedMessages;
+    }
+
+    // Dynamic tools (MCP/skills) may register after the loop starts.
+    validToolNames = getValidToolNames();
+
+    // Wall-clock guard: a model can stall even while bounded by maxIterations.
+    if (timeoutMs > 0 && Date.now() - startTime >= timeoutMs) {
+      logger.warn('Agentic loop timed out', { timeoutMs, iterationCount });
+      emit({ type: 'error', error: 'Agentic loop timed out.', transient: true });
+      emit({ type: 'done' });
       return updatedMessages;
     }
 
@@ -194,7 +234,13 @@ export async function runAgenticLoop(
       const stream = await client.chat.completions.create({
         ...requestDefaults,
         model,
-        messages: updatedMessages,
+        // `reasoning` is a UI-only field kept for session replay. Providers
+        // reject unknown assistant fields, so never send it back.
+        messages: updatedMessages.map((message: any) => {
+          if (message?.role !== 'assistant' || !message.reasoning) return message;
+          const { reasoning: _reasoning, ...rest } = message;
+          return rest;
+        }),
         tools: allTools,
         tool_choice: 'auto',
         stream: true,
@@ -204,7 +250,7 @@ export async function runAgenticLoop(
       });
 
       // Process the streaming response
-      const streamResult = await processStream(stream, updatedMessages, model, pricing, onEvent);
+      const streamResult = await processStream(stream, updatedMessages, model, pricing, emit);
       assistantMessage = streamResult.assistantMessage;
 
       // Handle tool calls
@@ -228,6 +274,15 @@ export async function runAgenticLoop(
         });
 
         if (invalidToolCalls.length > 0) {
+          consecutiveInvalidJson++;
+          if (consecutiveInvalidJson >= MAX_CONSECUTIVE_INVALID_JSON) {
+            logger.warn('Model repeatedly produced invalid tool arguments; stopping', {
+              count: consecutiveInvalidJson,
+            });
+            emit({ type: 'error', error: 'Model repeatedly produced invalid tool arguments.' });
+            emit({ type: 'done' });
+            return updatedMessages;
+          }
           logger.warn('Assistant produced tool calls with invalid JSON, skipping this turn', {
             invalidToolCalls: invalidToolCalls.map((tc: any) => ({
               name: tc.function?.name,
@@ -238,6 +293,24 @@ export async function runAgenticLoop(
           // The loop will continue and retry
           continue;
         }
+
+        // A well-formed response breaks the consecutive-invalid streak.
+        consecutiveInvalidJson = 0;
+
+        // Drop duplicate tool_call ids (keep the first). Duplicates would
+        // produce duplicate tool results and corrupt provider history.
+        const seenToolCallIds = new Set<string>();
+        assistantMessage.tool_calls = assistantMessage.tool_calls.filter((tc: any) => {
+          const id = tc?.id;
+          if (typeof id === 'string' && id.length > 0) {
+            if (seenToolCallIds.has(id)) {
+              logger.warn('Dropping duplicate tool call id', { id, tool: tc.function?.name });
+              return false;
+            }
+            seenToolCallIds.add(id);
+          }
+          return true;
+        });
 
         logger.info('Model returned tool calls', {
           count: assistantMessage.tool_calls.length,
@@ -259,18 +332,18 @@ export async function runAgenticLoop(
         const executionResult = await executeToolCalls(
           assistantMessage.tool_calls,
           updatedMessages,
-          onEvent,
+          emit,
           toolContext
         );
 
         if (executionResult.shouldAbort) {
-          emitAbortAndFinish(onEvent);
+          emitAbortAndFinish(emit);
           return updatedMessages;
         }
 
         // Signal UI that this iteration's tool calls are all done,
         // so it can flush completed messages to static output.
-        onEvent({ type: 'iteration_done' });
+        emit({ type: 'iteration_done' });
 
         // Continue loop — let the LLM process tool results
         continue;
@@ -281,9 +354,11 @@ export async function runAgenticLoop(
         updatedMessages.push({
           role: 'assistant',
           content: assistantMessage.content,
+          ...(assistantMessage.reasoning ? { reasoning: assistantMessage.reasoning } : {}),
         } as Message);
-        // Reset retrigger count on valid content response
+        // Reset retry counts on valid content response
         retryState.retriggerCount = 0;
+        consecutiveInvalidJson = 0;
       }
 
       // Check if we need to retrigger: if the last message is a tool result
@@ -310,7 +385,7 @@ export async function runAgenticLoop(
       // Reset retry counts on successful completion
       retryState.repairCount = 0;
       retryState.retriggerCount = 0;
-      onEvent({ type: 'done' });
+      emit({ type: 'done' });
       return updatedMessages;
 
     } catch (apiError: any) {
@@ -344,7 +419,7 @@ export async function runAgenticLoop(
             updatedMessages.push(assistantMessage);
           }
         }
-        emitAbortAndFinish(onEvent);
+        emitAbortAndFinish(emit);
         return updatedMessages;
       }
 
@@ -356,32 +431,33 @@ export async function runAgenticLoop(
         pricing,
         retryState,
         iterationCount,
-        onEvent,
+        emit,
         client,
         model,
         requestDefaults,
-        sessionId
+        sessionId,
+        abortSignal
       );
 
       if (errorResult.shouldAbort) {
-        emitAbortAndFinish(onEvent);
+        emitAbortAndFinish(emit);
         return updatedMessages;
       }
 
       if (!errorResult.handled) {
         // Non-retryable error
-        onEvent({
+        emit({
           type: 'error',
           error: errorResult.errorMessage || 'Unknown error',
           transient: errorResult.transient,
         });
-        onEvent({ type: 'done' });
+        emit({ type: 'done' });
         return updatedMessages;
       }
 
       // If handled but not silently, the error was already emitted
       if (!errorResult.silentRetry) {
-        onEvent({ type: 'done' });
+        emit({ type: 'done' });
         return updatedMessages;
       }
 
@@ -390,8 +466,8 @@ export async function runAgenticLoop(
     }
   }
 
-  onEvent({ type: 'error', error: 'Maximum iteration limit reached.' });
-  onEvent({ type: 'done' });
+  emit({ type: 'error', error: 'Maximum iteration limit reached.' });
+  emit({ type: 'done' });
   return updatedMessages;
 }
 

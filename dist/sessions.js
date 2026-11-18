@@ -87,16 +87,21 @@ export function sanitizeCompletionMessages(messages) {
                     call.function &&
                     typeof call.function.name === 'string')
                 : [];
+            // Reasoning is a UI-only field, but it must survive save/load so a
+            // resumed session can replay the thought above its answer.
+            const reasoning = typeof message.reasoning === 'string'
+                ? { reasoning: message.reasoning.slice(0, 20_000) }
+                : {};
             if (toolCalls.length === 0) {
                 // An empty assistant message is not valid history.
                 if (hasContent) {
-                    const { tool_calls: _ignored, ...rest } = message;
-                    sanitized.push(rest);
+                    const { tool_calls: _ignored, reasoning: _savedReasoning, ...rest } = message;
+                    sanitized.push({ ...rest, ...reasoning });
                 }
                 index++;
                 continue;
             }
-            sanitized.push({ ...message, tool_calls: toolCalls });
+            sanitized.push({ ...message, ...reasoning, tool_calls: toolCalls });
             index++;
             const answered = new Set();
             while (index < messages.length && messages[index].role === 'tool') {
@@ -167,6 +172,57 @@ function sanitizeTodos(value) {
     }
     return todos;
 }
+const SUB_AGENT_STATUSES = new Set(['start', 'done', 'error']);
+const MAX_SUB_AGENT_ACTIVITIES = 50;
+/**
+ * Drop malformed persisted sub-agent activity instead of crashing a resumed
+ * session. Missing/invalid input stays undefined so old sessions are unchanged.
+ */
+function sanitizeSubAgentActivities(value) {
+    if (!Array.isArray(value))
+        return undefined;
+    const activities = [];
+    for (const item of value) {
+        if (activities.length >= MAX_SUB_AGENT_ACTIVITIES)
+            break;
+        if (!item || typeof item !== 'object' || Array.isArray(item))
+            continue;
+        const activity = item;
+        const endedAtOk = activity.endedAt === undefined ||
+            (typeof activity.endedAt === 'number' && Number.isFinite(activity.endedAt));
+        const toolCallsOk = activity.toolCalls === undefined ||
+            (typeof activity.toolCalls === 'number' &&
+                Number.isInteger(activity.toolCalls) &&
+                activity.toolCalls >= 0);
+        const summaryOk = activity.summary === undefined || typeof activity.summary === 'string';
+        if (typeof activity.id !== 'string' ||
+            activity.id.length === 0 ||
+            typeof activity.task !== 'string' ||
+            activity.task.length === 0 ||
+            !SUB_AGENT_STATUSES.has(activity.status) ||
+            typeof activity.startedAt !== 'number' ||
+            !Number.isFinite(activity.startedAt) ||
+            !endedAtOk ||
+            !toolCallsOk ||
+            !summaryOk) {
+            continue;
+        }
+        const sanitized = {
+            id: activity.id,
+            task: activity.task,
+            status: activity.status,
+            startedAt: activity.startedAt,
+        };
+        if (typeof activity.endedAt === 'number')
+            sanitized.endedAt = activity.endedAt;
+        if (typeof activity.toolCalls === 'number')
+            sanitized.toolCalls = activity.toolCalls;
+        if (typeof activity.summary === 'string')
+            sanitized.summary = activity.summary;
+        activities.push(sanitized);
+    }
+    return activities;
+}
 async function ensureSessionsDir() {
     const dir = getSessionsDir();
     await fs.mkdir(dir, { recursive: true, mode: SESSION_DIR_MODE });
@@ -214,6 +270,7 @@ export async function loadSession(id) {
             variant: typeof session.variant === 'string' ? session.variant : undefined,
             todos: sanitizeTodos(session.todos),
             completionMessages: sanitizeCompletionMessages(Array.isArray(session.completionMessages) ? session.completionMessages : []),
+            subAgentActivities: sanitizeSubAgentActivities(session.subAgentActivities),
         };
     }
     catch {

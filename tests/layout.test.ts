@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampIndex, composerTextWidth, frameRows, resolveLayout, splitLiveArea } from '../src/utils/layout.js';
+import {
+  clampIndex,
+  composerTextWidth,
+  finiteDim,
+  frameRows,
+  resolveLayout,
+  splitLiveArea,
+} from '../src/utils/layout.js';
 
 test('classifies compact, regular and wide terminals', () => {
   assert.equal(resolveLayout(40, 15).size, 'compact');
@@ -112,4 +119,63 @@ test('clampIndex keeps a picker selection inside a list that just shrank', () =>
   assert.equal(clampIndex(-1, 3), 0);
   assert.equal(clampIndex(5, 0), 0, 'an empty list has no selection');
   assert.equal(clampIndex(Number.NaN, 3), 0);
+});
+
+// ─── Resize/zoom safety: no dimension may ever become 0/undefined/NaN ───
+test('finiteDim turns transient resize values into a positive integer', () => {
+  assert.equal(finiteDim(40, 80), 40);
+  assert.equal(finiteDim(40.9, 80), 40, 'floors fractional columns');
+  assert.equal(finiteDim(0, 80), 80, '0 falls back to the previous size');
+  assert.equal(finiteDim(-5, 80), 80);
+  assert.equal(finiteDim(Number.NaN, 80), 80);
+  assert.equal(finiteDim(undefined, 80), 80);
+  assert.equal(finiteDim(1, 80), 1, 'never returns zero');
+});
+
+test('layout helpers never emit NaN/0 dimensions during a resize burst', () => {
+  const bad = [0, -1, Number.NaN, undefined] as const;
+  for (const value of bad) {
+    const layout = resolveLayout(value as number, 24);
+    assert.ok(Number.isFinite(layout.inputWidth) && layout.inputWidth >= 1, `inputWidth at ${value}`);
+    assert.ok(Number.isFinite(layout.paletteWindow) && layout.paletteWindow >= 1);
+    assert.ok(Number.isFinite(layout.visibleTodos) && layout.visibleTodos >= 1);
+    assert.ok(Number.isFinite(layout.gutter) && layout.gutter >= 1);
+
+    const frame = frameRows(value as number);
+    assert.ok(Number.isFinite(frame) && frame >= 1, `frameRows at ${value}`);
+
+    const text = composerTextWidth(value as number, true);
+    assert.ok(Number.isFinite(text) && text >= 1, `composerTextWidth at ${value}`);
+
+    const split = splitLiveArea(value as number, {
+      todos: value as number,
+      thinking: 0,
+      help: 0,
+      streaming: 0,
+    });
+    assert.ok(Number.isFinite(split.transcriptRows) && split.transcriptRows >= 1);
+    assert.ok(Number.isFinite(split.liveRows) && split.liveRows >= 0);
+  }
+});
+
+test('dense chrome only kicks in on very short terminals', () => {
+  assert.equal(resolveLayout(80, 8).dense, true);
+  assert.equal(resolveLayout(80, 9).dense, true);
+  assert.equal(resolveLayout(80, 10).dense, false);
+  assert.equal(resolveLayout(80, 24).dense, false);
+});
+
+test('every layout field stays finite across a grid of zoom sizes', () => {
+  for (const columns of [1, 4, 8, 20, 30, 40, 80, 200, 400]) {
+    for (const rows of [1, 4, 6, 8, 10, 24, 60, 200]) {
+      const layout = resolveLayout(columns, rows);
+      for (const [key, value] of Object.entries(layout)) {
+        if (typeof value === 'number') {
+          assert.ok(Number.isFinite(value) && value >= 1, `${key} at ${columns}x${rows}: ${value}`);
+        }
+      }
+      assert.ok(layout.inputWidth <= columns, `composer fits ${columns}x${rows}`);
+      assert.ok(frameRows(rows) <= Math.max(1, rows - 1));
+    }
+  }
 });

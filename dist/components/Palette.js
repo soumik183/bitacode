@@ -24,10 +24,10 @@ export const Palette = ({ title, items, selected, hint, maxVisible }) => {
     const window = Math.max(3, Math.min(MAX_VISIBLE, maxVisible ?? MAX_VISIBLE));
     const start = Math.max(0, Math.min(selected - Math.floor(window / 2), items.length - window));
     const visible = items.slice(start, start + window);
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [title && _jsx(Text, { color: theme.dim, children: title }), visible.map((item, i) => {
+    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [title && _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: title }), visible.map((item, i) => {
                 const index = start + i;
                 const active = index === selected;
                 const labelColor = item.color ?? (active ? theme.text : theme.muted);
-                return (_jsxs(Box, { children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Text, { color: labelColor, bold: active || item.bold, children: item.label }), item.description && _jsxs(Text, { color: theme.dim, children: ["  ", item.description] })] }, item.id));
-            }), _jsx(Text, { color: theme.dim, children: hint ?? '↑↓ select · enter run · esc close' })] }));
+                return (_jsxs(Box, { children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Text, { color: labelColor, bold: active || item.bold, wrap: "truncate-end", children: item.label }), item.description && _jsxs(Text, { color: theme.dim, wrap: "truncate-end", children: ["  ", item.description] })] }, item.id));
+            }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint ?? '↑↓ select · enter run · esc close' })] }));
 };

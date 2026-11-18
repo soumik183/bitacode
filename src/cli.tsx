@@ -17,7 +17,7 @@ import { App } from './App.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { theme } from './theme.js';
 import { logger } from './utils/logger.js';
-import { installStableRenderer } from './utils/stable-render.js';
+import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
 import { ConfigureComponent, InitComponent, readConfig, writeConfig, writeInitConfig } from './config.js';
 
 // A rejected promise in a background fetch should be logged, not kill the TUI.
@@ -50,11 +50,14 @@ program
   .option('--log-level <level>', 'Log level: TRACE, DEBUG, INFO, WARN, ERROR', 'DEBUG')
   .option('--session <id>', 'Resume a previous session by ID')
   .action((options) => {
+    // If the process is killed without a React unmount (Termux, terminal
+    // closing, SIGTERM), App's cleanup never runs. Restore at process level.
+    installTerminalRestore(process.stdout);
     // Enter the alternate screen and clear BEFORE Ink's first render so the
-    // terminal starts from a known state.
+    // terminal starts from a known state. Hide the cursor while we own it.
     process.stdout.write('\x1b[?1049h');
     process.stdout.write(`\x1b]11;${theme.bg}\x07`);
-    process.stdout.write('\x1b[2J\x1b[H');
+    process.stdout.write('\x1b[2J\x1b[H\x1b[?25l');
 
     // Default action - start the main app
     render(

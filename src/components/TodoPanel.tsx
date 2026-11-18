@@ -79,12 +79,15 @@ export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible
   const hiddenAbove = start;
   const hiddenBelow = Math.max(0, total - start - visible.length);
 
-  const barWidth = columns >= 80 ? 10 : 6;
+  const safeColumns = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+  const barWidth = safeColumns >= 80 ? 10 : 6;
   const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
   const digits = String(total).length;
-  // "  " indent + icon + space + index column + space
+  // "  " indent + icon + space + index column + space, plus the panel's own
+  // paddingX(2) on both sides. A tiny terminal cannot afford the old 10-col
+  // floor, so clamp all the way down to 1 instead of overflowing the frame.
   const reserved = 2 + 2 + digits + 1 + (hiddenAbove + hiddenBelow > 0 ? 2 : 0);
-  const contentWidth = Math.max(10, columns - reserved);
+  const contentWidth = Math.max(1, safeColumns - 4 - reserved);
 
   return (
     <Box flexDirection="column" paddingX={2} marginBottom={1}>
@@ -120,7 +123,7 @@ export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible
             >
               {todo.status === 'in_progress'
                 ? truncateTodo(todo.content, contentWidth)
-                : `(${todo.priority}) ${truncateTodo(todo.content, Math.max(8, contentWidth - todo.priority.length - 3))}`}
+                : `(${todo.priority}) ${truncateTodo(todo.content, Math.max(1, contentWidth - todo.priority.length - 3))}`}
             </Text>
           </Box>
         );

@@ -12,6 +12,7 @@ import {
   loadSession,
   sanitizeCompletionMessages,
   saveSession,
+  type SubAgentActivity,
 } from '../src/sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession, type TodoItem } from '../src/tools/todo.js';
 
@@ -31,6 +32,36 @@ test.afterEach(() => {
   if (originalHome === undefined) delete process.env.HOME;
   else process.env.HOME = originalHome;
   fs.rmSync(tempHome, { recursive: true, force: true });
+});
+
+test('assistant reasoning survives save and load for replay', async () => {
+  const session = createSession('model', 'provider');
+  session.completionMessages = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'question' },
+    { role: 'assistant', content: 'answer', reasoning: 'secret chain of thought' } as any,
+  ];
+  await saveSession(session);
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  const assistant = loaded!.completionMessages.find((m) => m.role === 'assistant') as any;
+  assert.equal(assistant.reasoning, 'secret chain of thought');
+  assert.equal(assistant.content, 'answer');
+});
+
+test('sanitizeCompletionMessages keeps reasoning on tool-call assistant messages', () => {
+  const result = sanitizeCompletionMessages([
+    {
+      role: 'assistant',
+      content: '',
+      reasoning: 'tool thought',
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: '{}' } }],
+    },
+    { role: 'tool', tool_call_id: 'c1', content: 'ok' },
+  ] as any);
+  assert.equal((result[0] as any).reasoning, 'tool thought');
+  assert.equal(result[1]?.role, 'tool');
 });
 
 test('ensureSystemPromptAtTop prepends a system prompt when missing', () => {
@@ -254,4 +285,124 @@ test('corrupt session files are skipped and do not break deletion of valid sessi
   assert.deepEqual((await listSessions()).map((s) => s.id), [valid.id]);
   assert.equal(await deleteSession(valid.id), true);
   assert.deepEqual(await listSessions(), []);
+});
+
+/* ----------------------- sub-agent activity ----------------------- */
+
+test('sub-agent activities round-trip through save and load', async () => {
+  const session = createSession('m', 'p');
+  const activities: SubAgentActivity[] = [
+    { id: 'a1', task: 'explore src', status: 'start', startedAt: 1000 },
+    {
+      id: 'a2',
+      task: 'run tests',
+      status: 'done',
+      toolCalls: 3,
+      summary: 'all green',
+      startedAt: 1000,
+      endedAt: 2500,
+    },
+    { id: 'a3', task: 'build', status: 'error', summary: 'tsc failed', startedAt: 1100, endedAt: 1200 },
+  ];
+  session.subAgentActivities = activities;
+  await saveSession(session);
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  assert.deepEqual(loaded!.subAgentActivities, activities);
+});
+
+test('malformed sub-agent activities are dropped, valid ones kept', async () => {
+  const session = createSession('m', 'p');
+  const valid: SubAgentActivity = {
+    id: 'good',
+    task: 'work',
+    status: 'done',
+    toolCalls: 2,
+    summary: 'ok',
+    startedAt: 100,
+    endedAt: 200,
+  };
+  // Write raw JSON so malformed entries survive the save step.
+  const filePath = path.join(sessionsDir, `${session.id}.json`);
+  fs.writeFileSync(
+    filePath,
+    JSON.stringify({
+      ...session,
+      subAgentActivities: [
+        null,
+        42,
+        'nope',
+        {},
+        { id: '', task: 'empty id', status: 'start', startedAt: 1 },
+        { id: 'x', task: '', status: 'start', startedAt: 1 },
+        { id: 'x', task: 'bad status', status: 'running', startedAt: 1 },
+        { id: 'x', task: 'bad time', status: 'start', startedAt: 'now' },
+        { id: 'x', task: 'neg calls', status: 'start', startedAt: 1, toolCalls: -1 },
+        { id: 'x', task: 'float calls', status: 'start', startedAt: 1, toolCalls: 1.5 },
+        { id: 'x', task: 'bad ended', status: 'start', startedAt: 1, endedAt: 'later' },
+        valid,
+      ],
+    })
+  );
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  assert.deepEqual(loaded!.subAgentActivities, [valid]);
+});
+
+test('old sessions without subAgentActivities load with undefined', async () => {
+  const session = createSession('m', 'p');
+  await saveSession(session);
+
+  const raw = JSON.parse(fs.readFileSync(path.join(sessionsDir, `${session.id}.json`), 'utf8'));
+  assert.equal('subAgentActivities' in raw, false);
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  assert.equal(loaded!.subAgentActivities, undefined);
+});
+
+test('invalid subAgentActivities value loads as undefined', async () => {
+  const session = createSession('m', 'p');
+  fs.writeFileSync(
+    path.join(sessionsDir, `${session.id}.json`),
+    JSON.stringify({ ...session, subAgentActivities: 'not an array' })
+  );
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  assert.equal(loaded!.subAgentActivities, undefined);
+});
+
+test('sub-agent activities are capped at 50 entries', async () => {
+  const session = createSession('m', 'p');
+  const many: SubAgentActivity[] = Array.from({ length: 60 }, (_, i) => ({
+    id: `a${i}`,
+    task: `task ${i}`,
+    status: 'done' as const,
+    startedAt: i,
+  }));
+  session.subAgentActivities = many;
+  await saveSession(session);
+
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded);
+  assert.equal(loaded!.subAgentActivities!.length, 50);
+  assert.deepEqual(
+    loaded!.subAgentActivities!.map((a) => a.id),
+    many.slice(0, 50).map((a) => a.id)
+  );
+});
+
+test('deleteSession removes a session that has sub-agent activities', async () => {
+  const session = createSession('m', 'p');
+  session.subAgentActivities = [{ id: 'a1', task: 'work', status: 'done', startedAt: 1 }];
+  await saveSession(session);
+
+  const filePath = path.join(sessionsDir, `${session.id}.json`);
+  assert.ok(fs.existsSync(filePath));
+  assert.equal(await deleteSession(session.id), true);
+  assert.ok(!fs.existsSync(filePath));
+  assert.equal(await loadSession(session.id), null);
 });

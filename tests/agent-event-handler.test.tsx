@@ -171,3 +171,71 @@ test('reasoning archives once above the reply with its elapsed time', async () =
   assert.match(frame, /Thought.*<1s · 16 chars/s);
   assert.ok(frame.indexOf('Thought') < frame.indexOf('Hello back'));
 });
+
+test('multi-line reasoning is archived line by line above the reply, exactly once', async () => {
+  const Harness = () => {
+    const [items, setItems] = useState<React.ReactNode[]>([]);
+    const [, setIsStreaming] = useState(false);
+    const [, setStreamingText] = useState('');
+    const [, setMessages] = useState<Message[]>([]);
+    const [, setThinking] = useState('');
+    const [, setThinkingArchived] = useState(false);
+    const [, setThinkingStartedAt] = useState<number | null>(null);
+    const [, setActiveTool] = useState<string | null>(null);
+    const [, setUsage] = useState<AgentEvent['usage'] | null>(null);
+    const [, setCost] = useState(0);
+    const [, setThreadErrors] = useState<InlineThreadError[]>([]);
+    const [, setError] = useState<string | null>(null);
+    const reasoningRef = useRef('');
+    const assistantMessageRef = useRef<AssistantMessageRef | null>(null);
+    const streamingBufferRef = useRef<StreamingBuffer>({
+      unflushedContent: '',
+      hasFlushedAnyLine: false,
+      lastUiUpdate: 0,
+    });
+
+    const addStatic = useCallback((node: React.ReactNode) => {
+      setItems((prev) => [...prev, node]);
+    }, []);
+
+    const handleAgentEvent = useAgentEventHandler({
+      addStatic,
+      setCompletionMessages: setMessages,
+      setIsStreaming,
+      setStreamingText,
+      setThinkingText: setThinking,
+      setThinkingArchived,
+      setThinkingStartedAt,
+      reasoningRef,
+      setActiveTool,
+      setLastUsage: setUsage,
+      setTotalCost: setCost,
+      setThreadErrors,
+      setError,
+      assistantMessageRef,
+      streamingBufferRef,
+    });
+
+    const ran = useRef(false);
+    useEffect(() => {
+      if (ran.current) return;
+      ran.current = true;
+      handleAgentEvent({ type: 'reasoning_delta', content: 'THOUGHT-A\nTHOUGHT-B\nTHOUGHT-C' });
+      handleAgentEvent({ type: 'text_delta', content: 'THE-ANSWER' });
+      handleAgentEvent({ type: 'done' });
+    }, [handleAgentEvent]);
+
+    return <Box flexDirection="column">{items}</Box>;
+  };
+
+  const { lastFrame } = render(<Harness />);
+  const frame = await waitForFrame(lastFrame, (f) => /Thought/.test(f) && /THE-ANSWER/.test(f));
+
+  assert.equal((frame.match(/Thought/g) ?? []).length, 1, 'the thought card is emitted once');
+  const rows = frame.split('\n').map((row) => row.trim());
+  for (const step of ['THOUGHT-A', 'THOUGHT-B', 'THOUGHT-C']) {
+    assert.ok(rows.includes(step), `archived reasoning is missing the line "${step}"`);
+  }
+  assert.doesNotMatch(frame, /THOUGHT-A THOUGHT-B/, 'reasoning is not flattened into one line');
+  assert.ok(frame.indexOf('THOUGHT-A') < frame.indexOf('THE-ANSWER'), 'thought precedes the answer');
+});

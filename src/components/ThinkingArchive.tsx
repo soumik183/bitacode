@@ -15,16 +15,21 @@ export interface ThinkingArchiveProps {
 /** Fixed slice used only when no terminal width is known. */
 const FALLBACK_PREVIEW_CHARS = 240;
 
+/** How many reasoning lines the collapsed preview keeps before the "more" note. */
+const PREVIEW_LINE_BUDGET = 6;
+
 /** Characters that fit on one archive line, allowing for the indent and ellipsis. */
 export function archivePreviewChars(columns?: number): number {
   if (!columns || columns <= 0) return FALLBACK_PREVIEW_CHARS;
-  return Math.max(40, columns - 6);
+  // Never exceed the screen: an old 40-column floor wrapped long thought lines
+  // into a dozen rows on narrow/zoomed terminals.
+  return Math.max(1, Math.floor(columns) - 6);
 }
 
 /**
- * Record of a completed reasoning phase. Collapsed it keeps one preview line;
- * clicking it expands the full reasoning in place, and clicking again folds it
- * back.
+ * Record of a completed reasoning phase. The collapsed view keeps the first
+ * few lines of thought intact — one line per row — instead of flattening them
+ * into a single unreadable string. Clicking expands every line in place.
  */
 export const ThinkingArchive: React.FC<ThinkingArchiveProps> = ({
   text,
@@ -35,10 +40,11 @@ export const ThinkingArchive: React.FC<ThinkingArchiveProps> = ({
   const reasoning = text.trim();
   if (!reasoning) return null;
 
-  const singleLine = reasoning.replace(/\s+/g, ' ');
-  const limit = archivePreviewChars(columns);
-  const preview = singleLine.length > limit ? singleLine.slice(0, limit).trimEnd() : singleLine;
-  const cutoff = singleLine.length > limit;
+  // Keep the original line structure: no `/\s+/g` flattening.
+  const lines = reasoning.split('\n').map((line) => line.trimEnd());
+  const lineCap = archivePreviewChars(columns);
+  const shownLines = expanded ? lines : lines.slice(0, PREVIEW_LINE_BUDGET);
+  const hiddenLines = lines.length - shownLines.length;
   const hint = expanded ? 'click to collapse' : 'click to expand';
 
   return (
@@ -51,14 +57,20 @@ export const ThinkingArchive: React.FC<ThinkingArchiveProps> = ({
         </Text>
         <Text color={theme.dim}>{`  ${hint}`}</Text>
       </Text>
-      {expanded ? (
-        <Text color={theme.muted} wrap="wrap">
-          {reasoning}
-        </Text>
-      ) : (
-        <Text color={theme.dim} wrap="truncate-end">
-          {preview}
-          {cutoff ? '…' : ''}
+      {shownLines.map((line, index) => {
+        // Bound each collapsed line to one row so the card can't grow the frame.
+        const clipped = !expanded && line.length > lineCap
+          ? `${line.slice(0, lineCap).trimEnd()}…`
+          : line;
+        return (
+          <Text key={index} color={theme.muted} wrap={expanded ? 'wrap' : 'truncate-end'}>
+            {clipped || ' '}
+          </Text>
+        );
+      })}
+      {hiddenLines > 0 && (
+        <Text color={theme.dim}>
+          {`… ${hiddenLines} more line${hiddenLines === 1 ? '' : 's'} · click to expand`}
         </Text>
       )}
     </Box>

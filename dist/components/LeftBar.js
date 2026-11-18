@@ -27,5 +27,5 @@ export const LeftBar = ({ color = theme.border, children, marginTop = 0, marginB
         }
     });
     const bar = Array.from({ length: height }, () => '│').join('\n');
-    return (_jsxs(Box, { flexDirection: "row", marginTop: marginTop, marginBottom: marginBottom, children: [_jsx(Box, { flexDirection: "column", marginRight: 1, children: _jsx(Text, { color: color, bold: true, children: bar }) }), _jsx(Box, { ref: contentRef, flexDirection: "column", flexGrow: 1, children: children })] }));
+    return (_jsxs(Box, { flexDirection: "row", marginTop: marginTop, marginBottom: marginBottom, overflow: "hidden", children: [_jsx(Box, { flexDirection: "column", marginRight: 1, children: _jsx(Text, { color: color, bold: true, children: bar }) }), _jsx(Box, { ref: contentRef, flexDirection: "column", flexGrow: 1, children: children })] }));
 };

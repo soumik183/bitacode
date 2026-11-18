@@ -47,6 +47,17 @@ function generateSessionId(): string {
   return id;
 }
 
+/** One step of a parallel sub-agent, persisted so resumed sessions can replay it. */
+export interface SubAgentActivity {
+  id: string;
+  task: string;
+  status: 'start' | 'done' | 'error';
+  toolCalls?: number;
+  summary?: string;
+  startedAt: number;
+  endedAt?: number;
+}
+
 export interface Session {
   id: string;
   title: string;
@@ -58,6 +69,8 @@ export interface Session {
   variant?: string;
   todos: TodoItem[];
   completionMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
+  /** Parallel sub-agent steps recorded during the session. */
+  subAgentActivities?: SubAgentActivity[];
 }
 
 export interface SessionSummary {
@@ -137,17 +150,23 @@ export function sanitizeCompletionMessages(
           )
         : [];
 
+      // Reasoning is a UI-only field, but it must survive save/load so a
+      // resumed session can replay the thought above its answer.
+      const reasoning: Record<string, string> = typeof message.reasoning === 'string'
+        ? { reasoning: message.reasoning.slice(0, 20_000) }
+        : {};
+
       if (toolCalls.length === 0) {
         // An empty assistant message is not valid history.
         if (hasContent) {
-          const { tool_calls: _ignored, ...rest } = message;
-          sanitized.push(rest as OpenAI.Chat.Completions.ChatCompletionMessageParam);
+          const { tool_calls: _ignored, reasoning: _savedReasoning, ...rest } = message;
+          sanitized.push({ ...rest, ...reasoning } as OpenAI.Chat.Completions.ChatCompletionMessageParam);
         }
         index++;
         continue;
       }
 
-      sanitized.push({ ...message, tool_calls: toolCalls });
+      sanitized.push({ ...message, ...reasoning, tool_calls: toolCalls });
       index++;
 
       const answered = new Set<string>();
@@ -228,6 +247,57 @@ function sanitizeTodos(value: unknown): TodoItem[] {
   return todos;
 }
 
+const SUB_AGENT_STATUSES = new Set<SubAgentActivity['status']>(['start', 'done', 'error']);
+const MAX_SUB_AGENT_ACTIVITIES = 50;
+
+/**
+ * Drop malformed persisted sub-agent activity instead of crashing a resumed
+ * session. Missing/invalid input stays undefined so old sessions are unchanged.
+ */
+function sanitizeSubAgentActivities(value: unknown): SubAgentActivity[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const activities: SubAgentActivity[] = [];
+  for (const item of value) {
+    if (activities.length >= MAX_SUB_AGENT_ACTIVITIES) break;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const activity = item as Partial<SubAgentActivity>;
+    const endedAtOk =
+      activity.endedAt === undefined ||
+      (typeof activity.endedAt === 'number' && Number.isFinite(activity.endedAt));
+    const toolCallsOk =
+      activity.toolCalls === undefined ||
+      (typeof activity.toolCalls === 'number' &&
+        Number.isInteger(activity.toolCalls) &&
+        activity.toolCalls >= 0);
+    const summaryOk = activity.summary === undefined || typeof activity.summary === 'string';
+    if (
+      typeof activity.id !== 'string' ||
+      activity.id.length === 0 ||
+      typeof activity.task !== 'string' ||
+      activity.task.length === 0 ||
+      !SUB_AGENT_STATUSES.has(activity.status as SubAgentActivity['status']) ||
+      typeof activity.startedAt !== 'number' ||
+      !Number.isFinite(activity.startedAt) ||
+      !endedAtOk ||
+      !toolCallsOk ||
+      !summaryOk
+    ) {
+      continue;
+    }
+    const sanitized: SubAgentActivity = {
+      id: activity.id,
+      task: activity.task,
+      status: activity.status as SubAgentActivity['status'],
+      startedAt: activity.startedAt,
+    };
+    if (typeof activity.endedAt === 'number') sanitized.endedAt = activity.endedAt;
+    if (typeof activity.toolCalls === 'number') sanitized.toolCalls = activity.toolCalls;
+    if (typeof activity.summary === 'string') sanitized.summary = activity.summary;
+    activities.push(sanitized);
+  }
+  return activities;
+}
+
 async function ensureSessionsDir(): Promise<string> {
   const dir = getSessionsDir();
   await fs.mkdir(dir, { recursive: true, mode: SESSION_DIR_MODE });
@@ -281,6 +351,7 @@ export async function loadSession(id: string): Promise<Session | null> {
       completionMessages: sanitizeCompletionMessages(
         Array.isArray(session.completionMessages) ? session.completionMessages : []
       ),
+      subAgentActivities: sanitizeSubAgentActivities(session.subAgentActivities),
     };
   } catch {
     return null;

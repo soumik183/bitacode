@@ -48,7 +48,7 @@ export const Palette: React.FC<PaletteProps> = ({ title, items, selected, hint, 
 
   return (
     <Box flexDirection="column" paddingX={2} marginBottom={1}>
-      {title && <Text color={theme.dim}>{title}</Text>}
+      {title && <Text color={theme.dim} wrap="truncate-end">{title}</Text>}
       {visible.map((item, i) => {
         const index = start + i;
         const active = index === selected;
@@ -56,14 +56,14 @@ export const Palette: React.FC<PaletteProps> = ({ title, items, selected, hint, 
         return (
           <Box key={item.id}>
             <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
-            <Text color={labelColor} bold={active || item.bold}>
+            <Text color={labelColor} bold={active || item.bold} wrap="truncate-end">
               {item.label}
             </Text>
-            {item.description && <Text color={theme.dim}>  {item.description}</Text>}
+            {item.description && <Text color={theme.dim} wrap="truncate-end">  {item.description}</Text>}
           </Box>
         );
       })}
-      <Text color={theme.dim}>{hint ?? '↑↓ select · enter run · esc close'}</Text>
+      <Text color={theme.dim} wrap="truncate-end">{hint ?? '↑↓ select · enter run · esc close'}</Text>
     </Box>
   );
 };

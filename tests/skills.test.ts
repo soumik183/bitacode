@@ -4,9 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { generateSystemPrompt } from '../src/system-prompt.js';
-import { activateSkill, buildSkillsCatalogSection, initializeSkillsSupport, loadSkills } from '../src/skills.js';
+import { activateSkill, buildSkillsCatalogSection, clearSkillsCache, initializeSkillsSupport, loadSkills } from '../src/skills.js';
 import { getAllTools } from '../src/tools/index.js';
 import { getAllowedPathRoots, validatePath } from '../src/utils/path-validation.js';
+import { onLog } from '../src/utils/logger.js';
 
 async function makeTempDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -201,4 +202,109 @@ test('validatePath allows access to activated skill resources via allowlisted ro
   const validated = await validatePath(resourcePath);
 
   assert.match(validated, /REFERENCE\.md$/);
+});
+
+test('loadSkills caches discovery per root signature until clearSkillsCache is called', async () => {
+  const cwd = await makeTempDir('bitacode-skills-cache-cwd-');
+  const homeDir = await makeTempDir('bitacode-skills-cache-home-');
+  const options = { cwd, homeDir };
+
+  await writeFile(
+    path.join(homeDir, '.agents', 'skills', 'alpha', 'SKILL.md'),
+    skillDoc('alpha', 'First cached skill.', 'body')
+  );
+
+  const first = await loadSkills(options);
+  assert.deepEqual(first.map((skill) => skill.name), ['alpha']);
+
+  // A new skill appears on disk, but the cached discovery is reused.
+  await writeFile(
+    path.join(homeDir, '.agents', 'skills', 'beta', 'SKILL.md'),
+    skillDoc('beta', 'Second cached skill.', 'body')
+  );
+  const cached = await loadSkills(options);
+  assert.deepEqual(cached.map((skill) => skill.name), ['alpha']);
+
+  // Mutating a returned array must not corrupt the cached result.
+  cached.push(first[0]);
+  const afterMutation = await loadSkills(options);
+  assert.deepEqual(afterMutation.map((skill) => skill.name), ['alpha']);
+
+  clearSkillsCache();
+  const reloaded = await loadSkills(options);
+  assert.deepEqual(reloaded.map((skill) => skill.name), ['alpha', 'beta']);
+});
+
+test('loadSkills skips an oversized SKILL.md with a warning and does not throw', async () => {
+  const cwd = await makeTempDir('bitacode-skills-oversized-cwd-');
+  const homeDir = await makeTempDir('bitacode-skills-oversized-home-');
+  const location = path.join(cwd, '.agents', 'skills', 'huge', 'SKILL.md');
+
+  await writeFile(location, skillDoc('huge', 'A valid description.', 'body'));
+  await fs.appendFile(location, 'x'.repeat(257 * 1024));
+
+  const warnings: string[] = [];
+  const unsubscribe = onLog((entry) => {
+    if (entry.message.includes('oversized')) warnings.push(entry.message);
+  });
+  try {
+    const skills = await loadSkills({ cwd, homeDir });
+    assert.deepEqual(skills, []);
+    assert.ok(warnings.some((message) => message.includes('oversized SKILL.md')));
+  } finally {
+    unsubscribe();
+  }
+});
+
+test('activateSkill does not list resource symlinks that resolve outside the skill directory', async () => {
+  const cwd = await makeTempDir('bitacode-skills-symlink-cwd-');
+  const homeDir = await makeTempDir('bitacode-skills-symlink-home-');
+  const skillDir = path.join(cwd, '.agents', 'skills', 'symlink-skill');
+  const outsideDir = path.join(cwd, 'outside');
+
+  await writeFile(
+    path.join(skillDir, 'SKILL.md'),
+    skillDoc('symlink-skill', 'Use for symlink escape tests.', '# Body')
+  );
+  await writeFile(path.join(skillDir, 'scripts', 'real.py'), 'print("real")\n');
+  await fs.mkdir(path.join(skillDir, 'references'), { recursive: true });
+  await writeFile(path.join(outsideDir, 'secret.txt'), 'top secret\n');
+  await writeFile(path.join(outsideDir, 'nested.txt'), 'nested secret\n');
+
+  // A symlinked file pointing outside the skill.
+  await fs.symlink(path.join(outsideDir, 'secret.txt'), path.join(skillDir, 'scripts', 'leak.txt'));
+  // A symlinked directory pointing outside the skill.
+  await fs.symlink(outsideDir, path.join(skillDir, 'references', 'leakdir'), 'dir');
+  // A top-level resource directory symlinked outside the skill.
+  await fs.symlink(outsideDir, path.join(skillDir, 'assets'), 'dir');
+
+  const content = await activateSkill('symlink-skill', { cwd, homeDir });
+
+  assert.match(content, /<file>scripts\/real\.py<\/file>/);
+  assert.doesNotMatch(content, /leak\.txt/);
+  assert.doesNotMatch(content, /leakdir/);
+  assert.doesNotMatch(content, /assets\//);
+  assert.doesNotMatch(content, /secret\.txt|nested\.txt/);
+});
+
+test('activateSkill lists resources sorted and deduped', async () => {
+  const cwd = await makeTempDir('bitacode-skills-sorted-cwd-');
+  const homeDir = await makeTempDir('bitacode-skills-sorted-home-');
+  const skillDir = path.join(cwd, '.agents', 'skills', 'sorted-skill');
+
+  await writeFile(
+    path.join(skillDir, 'SKILL.md'),
+    skillDoc('sorted-skill', 'Use for sorted resource tests.', '# Body')
+  );
+  await writeFile(path.join(skillDir, 'scripts', 'z.py'), 'z\n');
+  await writeFile(path.join(skillDir, 'scripts', 'a.py'), 'a\n');
+  await writeFile(path.join(skillDir, 'references', 'm.md'), 'm\n');
+  await writeFile(path.join(skillDir, 'assets', 'b.txt'), 'b\n');
+
+  const content = await activateSkill('sorted-skill', { cwd, homeDir });
+  const files = Array.from(content.matchAll(/<file>([^<]+)<\/file>/g), (match) => match[1]);
+  const expected = ['assets/b.txt', 'references/m.md', 'scripts/a.py', 'scripts/z.py'];
+
+  assert.deepEqual(files, expected);
+  assert.equal(new Set(files).size, files.length);
 });

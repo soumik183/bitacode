@@ -13,6 +13,8 @@
  * - Charset-aware content decoding
  */
 import { convert } from "html-to-text";
+import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024; // 5MB
 const MAX_OUTPUT_SIZE = 2 * 1024 * 1024; // 2MB
 const MAX_REDIRECTS = 10;
@@ -37,6 +39,112 @@ const TEXT_MIME_TYPES = [
     "application/javascript",
     "application/typescript",
 ];
+// ─── SSRF protection (pure helpers are exported for offline tests) ───
+/** Strip IPv6 brackets from a URL hostname. */
+function stripBrackets(host) {
+    return host.replace(/^\[|\]$/g, "");
+}
+/**
+ * True for IPs that must never be fetched: loopback, link-local (including the
+ * 169.254.169.254 cloud metadata endpoint), private ranges, and IPv6
+ * loopback / link-local / unique-local / multicast / unspecified addresses.
+ */
+export function isUnsafeAddress(address) {
+    const ip = stripBrackets(address).toLowerCase();
+    const version = isIP(ip);
+    if (version === 4) {
+        const [a, b] = ip.split(".").map(Number);
+        if (a === 0 || a === 10 || a === 127)
+            return true; // this-net, private, loopback
+        if (a === 169 && b === 254)
+            return true; // link-local / cloud metadata
+        if (a === 172 && b >= 16 && b <= 31)
+            return true; // private
+        if (a === 192 && b === 168)
+            return true; // private
+        if (a === 100 && b >= 64 && b <= 127)
+            return true; // CGNAT
+        if (a >= 224)
+            return true; // multicast / reserved
+        return false;
+    }
+    if (version === 6) {
+        if (ip === "::" || ip === "::1")
+            return true; // unspecified / loopback
+        if (/^fe[89ab][0-9a-f]/.test(ip))
+            return true; // fe80::/10 link-local
+        if (/^f[cd][0-9a-f]{2}/.test(ip))
+            return true; // fc00::/7 unique local
+        if (/^ff/.test(ip))
+            return true; // ff00::/8 multicast
+        const mapped = ip.match(/^::ffff:(.+)$/);
+        if (mapped) {
+            const rest = mapped[1];
+            if (rest.includes("."))
+                return isUnsafeAddress(rest);
+            const parts = rest.split(":");
+            if (parts.length === 2) {
+                const hi = parseInt(parts[0], 16);
+                const lo = parseInt(parts[1], 16);
+                return isUnsafeAddress([(hi >> 8) & 255, hi & 255, (lo >> 8) & 255, lo & 255].join("."));
+            }
+        }
+        return false;
+    }
+    return false; // not a literal IP — resolved via DNS below
+}
+/** Reject a URL whose hostname is (or resolves to) a private/loopback address. */
+async function assertPublicUrl(url) {
+    const parsed = new URL(url);
+    const host = stripBrackets(parsed.hostname);
+    if (isUnsafeAddress(host)) {
+        throw new Error(`Refusing to fetch '${url}': host '${host}' is a private, loopback, or link-local address.`);
+    }
+    try {
+        const addresses = await lookup(host, { all: true, verbatim: true });
+        if (addresses.length === 0)
+            throw new Error("no addresses found");
+        for (const { address } of addresses) {
+            if (isUnsafeAddress(address)) {
+                throw new Error(`resolves to private/loopback/link-local address ${address}`);
+            }
+        }
+    }
+    catch (err) {
+        const msg = err.message;
+        throw new Error(`Refusing to fetch '${url}': host '${host}' ${msg === "no addresses found" || msg.startsWith("resolves to") ? msg : `could not be resolved (${msg})`}.`);
+    }
+}
+// ─── Noise removal (exported for offline tests) ───
+const NOISE_TAGS = ["nav", "header", "footer", "aside", "form", "script", "style", "noscript", "svg"];
+/** Remove navigation/chrome/script blocks so the model isn't fed page furniture. */
+export function stripNoiseTags(html) {
+    let out = html;
+    for (const tag of NOISE_TAGS) {
+        out = out.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}\\s*>`, "gi"), " ");
+        out = out.replace(new RegExp(`<${tag}\\b[^>]*\\/>`, "gi"), " ");
+    }
+    return out;
+}
+/** Minimal CSS-like filter: tag, #id, or .class. Returns input if nothing matched. */
+export function filterBySelector(html, selector) {
+    if (!selector)
+        return html;
+    const s = selector.trim();
+    const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    let re;
+    if (s.startsWith("#")) {
+        re = new RegExp(`<\\w+\\b[^>]*\\bid=["']${esc(s.slice(1))}["'][^>]*>[\\s\\S]*?<\\/\\w+\\s*>`, "gi");
+    }
+    else if (s.startsWith(".")) {
+        re = new RegExp(`<\\w+\\b[^>]*\\bclass=["'][^"']*\\b${esc(s.slice(1))}\\b[^"']*["'][^>]*>[\\s\\S]*?<\\/\\w+\\s*>`, "gi");
+    }
+    else {
+        re = new RegExp(`<${esc(s)}\\b[^>]*>[\\s\\S]*?<\\/${esc(s)}\\s*>`, "gi");
+    }
+    const found = html.match(re);
+    return found ? found.join("\n") : html;
+}
 // Lazy-loaded Turndown instance — converts HTML to Markdown
 // We lazy-load because Turndown is a CommonJS module; dynamic import keeps our
 // ESM output clean without forcing esbuild to bundle everything as CJS.
@@ -53,7 +161,10 @@ async function getTurndownService() {
             emDelimiter: "*",
         });
         // Remove noise that doesn't help LLM understanding
-        _turndownService.remove(["script", "style", "meta", "link"]);
+        _turndownService.remove([
+            "script", "style", "meta", "link",
+            "nav", "header", "footer", "aside", "form", "noscript", "svg",
+        ]);
     }
     return _turndownService;
 }
@@ -176,6 +287,10 @@ export const webfetchTool = {
                     type: "number",
                     description: "Timeout in seconds (default 30, min 1, max 120)",
                 },
+                selector: {
+                    type: "string",
+                    description: "Optional simple CSS-like filter (tag, #id, or .class) to limit extracted content.",
+                },
             },
             required: ["url", "format"],
         },
@@ -238,8 +353,10 @@ async function fetchWithRedirectLimit(url, signal) {
             const location = response.headers.get("location");
             if (location) {
                 redirectCount++;
-                // Resolve relative URLs
+                // Resolve relative URLs, but never follow a redirect into a private
+                // network (DNS rebinding / internal-service pivot).
                 currentUrl = new URL(location, currentUrl).href;
+                await assertPublicUrl(currentUrl);
                 await discardBody(response);
                 continue;
             }
@@ -254,10 +371,11 @@ async function fetchWithRedirectLimit(url, signal) {
  * @param url - HTTP(S) URL to fetch
  * @param format - Output format: 'text', 'markdown', or 'html'
  * @param timeout - Optional timeout in seconds (default 30, max 120)
+ * @param selector - Optional simple CSS-like filter (tag, #id, or .class)
  * @returns Object with output, title, and metadata
  * @throws Error on validation, network, or processing failures
  */
-export async function webfetch(url, format, timeout) {
+export async function webfetch(url, format, timeout, selector) {
     if (typeof url !== "string" || url.length === 0) {
         throw new Error("A URL is required.");
     }
@@ -275,6 +393,8 @@ export async function webfetch(url, format, timeout) {
     if (url.length > MAX_URL_LENGTH) {
         throw new Error(`URL too long (${url.length} characters, max ${MAX_URL_LENGTH})`);
     }
+    // SSRF guard: reject private/loopback/link-local targets before any network call
+    await assertPublicUrl(url);
     // Validate format
     if (!["text", "markdown", "html"].includes(format)) {
         throw new Error("Invalid format. Must be 'text', 'markdown', or 'html'");
@@ -319,14 +439,17 @@ export async function webfetch(url, format, timeout) {
         const decoder = new TextDecoder(charset, { fatal: false });
         const content = decoder.decode(bytes);
         const isHTML = detectHTML(content, contentType);
+        // Narrow to the requested region (if any), then drop navigation chrome
+        // before text/markdown conversion so the model isn't fed page furniture.
+        const cleaned = isHTML ? stripNoiseTags(filterBySelector(content, selector)) : content;
         // Format content based on requested format
         let output;
         if (format === "text") {
-            output = isHTML ? htmlToText(content) : content;
+            output = isHTML ? htmlToText(cleaned) : content;
         }
         else if (format === "markdown") {
             output = isHTML
-                ? await htmlToMarkdown(content)
+                ? await htmlToMarkdown(cleaned)
                 : `\`\`\`\n${content}\n\`\`\``;
         }
         else {

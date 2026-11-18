@@ -8,6 +8,8 @@ import type { AskQuestion, AskResponse } from '../tools/ask.js';
 export interface AskPromptProps {
   questions: AskQuestion[];
   columns: number;
+  /** Short terminals drop the decorative margins so every option stays visible. */
+  compact?: boolean;
   onRespond: (response: AskResponse) => void;
 }
 
@@ -20,6 +22,13 @@ const RECOMMENDED_TAG = 'recommended';
 /** Marker shown for a chosen option in multi-select mode. */
 const CHECKED = '◉';
 const UNCHECKED = '◯';
+
+// Fixed columns an option line spends before its label: the LeftBar gutter,
+// the cursor, the optional multi-select marker and the "N. " index.
+const GUTTER = 2;
+const CURSOR = 2;
+const NUMBER = 3;
+const indentFor = (multiple: boolean) => CURSOR + (multiple ? 2 : 0) + NUMBER;
 
 function clampText(text: string, width: number): string {
   const single = text.replace(/\s+/g, ' ').trim();
@@ -38,7 +47,7 @@ function clampText(text: string, width: number): string {
  *  - typing is always allowed unless the question sets allow_free_text false
  *  - a progress line makes a multi-question ask feel bounded
  */
-export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, onRespond }) => {
+export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compact = false, onRespond }) => {
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Answered>({});
   const [cursor, setCursor] = useState(0);
@@ -68,7 +77,9 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, onResp
   const options = question?.options ?? [];
   const canType = question?.allow_free_text !== false;
   const hasOptions = options.length > 0;
-  const width = Math.max(20, columns - 8);
+  // Fit the terminal: an old 20-column floor overflowed narrow/zoomed screens.
+  const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+  const width = Math.max(1, cols - 8);
 
   const currentAnswer = (): string => {
     if (question?.multiple && pickedRef.current.length > 0) {
@@ -198,8 +209,15 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, onResp
 
   if (!question) return null;
 
+  const multiple = Boolean(question.multiple);
+  const indent = indentFor(multiple);
+  // Long "recommended" labels eat the whole row on narrow terminals; collapse
+  // them to a single star there while keeping the word on roomy screens.
+  const showRecommendedText = cols >= 48;
+  const gap = compact ? 0 : 1;
+
   return (
-    <LeftBar color={theme.accent} marginTop={1} marginBottom={1}>
+    <LeftBar color={theme.accent} marginTop={gap} marginBottom={gap}>
       <Box flexDirection="column">
         <Text>
           <Text color={theme.accent} bold>
@@ -210,38 +228,47 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, onResp
           )}
         </Text>
 
-        <Text color={theme.text} bold wrap="wrap">
+        <Text color={theme.text} bold wrap="truncate-end">
           {question.question}
         </Text>
         {question.context && (
-          <Text color={theme.dim} wrap="wrap">
-            {clampText(question.context, width * 2)}
+          <Text color={theme.dim} wrap="truncate-end">
+            {clampText(question.context, width)}
           </Text>
         )}
 
         {hasOptions && (
-          <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="column" marginTop={gap}>
             {options.map((option, optionIndex) => {
               const active = !typing && optionIndex === cursor;
               const isPicked = question.multiple ? picked.includes(optionIndex) : active;
-              const marker = question.multiple ? (isPicked ? CHECKED : UNCHECKED) : active ? '❯' : ' ';
+              const recWidth = option.recommended
+                ? showRecommendedText ? RECOMMENDED_TAG.length + 2 : 2
+                : 0;
+              // Reserve only what this specific line actually draws, so long
+              // labels keep as much room as the terminal allows.
+              const labelMax = Math.max(1, cols - GUTTER - indent - recWidth);
               return (
                 <Box key={`${option.label}-${optionIndex}`} flexDirection="column">
                   <Text wrap="truncate-end">
                     <Text color={isPicked ? theme.accent : theme.dim}>{`${active ? '❯' : ' '} `}</Text>
-                    {question.multiple && (
-                      <Text color={isPicked ? theme.accent : theme.dim}>{`${marker} `}</Text>
+                    {multiple && (
+                      <Text color={isPicked ? theme.accent : theme.dim}>
+                        {`${isPicked ? CHECKED : UNCHECKED} `}
+                      </Text>
                     )}
                     <Text color={active ? theme.text : theme.muted} bold={active}>
-                      {`${optionIndex + 1}. ${clampText(option.label, width - 8)}`}
+                      {`${optionIndex + 1}. ${clampText(option.label, labelMax)}`}
                     </Text>
                     {option.recommended && (
-                      <Text color={theme.success}>{`  ${RECOMMENDED_TAG}`}</Text>
+                      <Text color={theme.success}>
+                        {showRecommendedText ? `  ${RECOMMENDED_TAG}` : ' ★'}
+                      </Text>
                     )}
                   </Text>
                   {active && option.description && (
                     <Text color={theme.dim} wrap="truncate-end">
-                      {`     ${clampText(option.description, width - 8)}`}
+                      {`${' '.repeat(indent)}${clampText(option.description, Math.max(1, cols - GUTTER - indent))}`}
                     </Text>
                   )}
                 </Box>
@@ -251,7 +278,7 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, onResp
         )}
 
         {typing && (
-          <Box marginTop={1}>
+          <Box marginTop={gap}>
             <Text>
               <Text color={theme.accent}>{'> '}</Text>
               <Text color={theme.text}>{draft}</Text>
@@ -260,7 +287,7 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, onResp
           </Box>
         )}
 
-        <Box marginTop={1}>
+        <Box marginTop={gap}>
           <Text color={theme.dim} wrap="truncate-end">
             {typing
               ? 'type your answer · enter send · esc skip'

@@ -34,9 +34,9 @@ const Shimmer = ({ text, frame }) => {
  * Footer under the prompt: folder on the left — swapped for a live activity
  * wave while the agent works — and model · variant · context on the right.
  */
-export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, }) => {
+export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, }) => {
     const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
-    return (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", paddingX: gutter, marginBottom: 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, flexDirection: "row", children: busy ? (_jsxs(_Fragment, { children: [wave(frame)
+    return (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: busy ? (_jsxs(_Fragment, { children: [wave(frame)
                             .split('')
                             .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] }))] })) : (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: modelLabel }), !compact && (_jsxs(_Fragment, { children: [_jsx(Text, { color: theme.dim, children: " \u00B7 " }), _jsx(Text, { color: variantColor, children: variantLabel })] })), _jsxs(Text, { color: theme.dim, children: [" \u00B7 ctx ", context] }), !compact && totalCost > 0 && _jsxs(Text, { color: theme.dim, children: [" \u00B7 $", totalCost.toFixed(2)] })] }) })] }));
 };

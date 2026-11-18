@@ -10,6 +10,11 @@ export type LayoutSize = 'compact' | 'regular' | 'wide';
 
 export interface Layout {
   size: LayoutSize;
+  /**
+   * Very short terminal (< 10 rows). Drops optional vertical padding so the
+   * composer and footer both fit instead of being pushed off-screen.
+   */
+  dense: boolean;
   /** Composer width, clamped so it never touches the screen edges. */
   inputWidth: number;
   /** Rows a palette/picker may use before it starts scrolling. */
@@ -24,9 +29,18 @@ export interface Layout {
   showSubmitHint: boolean;
 }
 
+/**
+ * Turn a terminal dimension into a finite positive integer. A resize burst can
+ * briefly report 0/undefined/NaN (especially under zoom); letting those through
+ * would poison every downstream width/height with NaN and tear the frame.
+ */
+export function finiteDim(value: number | undefined, fallback: number): number {
+  return Number.isFinite(value) && value! > 0 ? Math.max(1, Math.floor(value!)) : fallback;
+}
+
 export function resolveLayout(columns: number, rows: number): Layout {
-  const cols = Math.max(1, Math.floor(columns));
-  const lines = Math.max(1, Math.floor(rows));
+  const cols = finiteDim(columns, 1);
+  const lines = finiteDim(rows, 1);
 
   const size: LayoutSize = cols < 60 || lines < 20 ? 'compact' : cols < 100 ? 'regular' : 'wide';
 
@@ -50,6 +64,7 @@ export function resolveLayout(columns: number, rows: number): Layout {
 
   return {
     size,
+    dense: lines < 10,
     inputWidth,
     paletteWindow,
     visibleTodos,
@@ -69,7 +84,7 @@ export function resolveLayout(columns: number, rows: number): Layout {
  * is what makes scrolling and streaming stable instead of blinking.
  */
 export function frameRows(terminalRows: number): number {
-  const rows = Math.max(1, Math.floor(terminalRows));
+  const rows = finiteDim(terminalRows, 1);
   // Stay below the terminal height even on tiny screens, otherwise Ink takes
   // its full-screen erase path and the frame blinks on every update.
   return rows > 1 ? rows - 1 : 1;
@@ -82,7 +97,7 @@ export function frameRows(terminalRows: number): number {
  * right padding) columns, plus 2 more for the ↵ hint when it is shown.
  */
 export function composerTextWidth(inputWidth: number, showSubmitHint: boolean): number {
-  return Math.max(1, Math.floor(inputWidth) - 5 - (showSubmitHint ? 2 : 0));
+  return finiteDim(Math.floor(inputWidth) - 5 - (showSubmitHint ? 2 : 0), 1);
 }
 
 /**
@@ -117,8 +132,14 @@ export function splitLiveArea(frameHeight: number, chrome: ChromeHeights): {
   transcriptRows: number;
   liveRows: number;
 } {
-  const fixed = 5; // composer (2) + footer (2) + gap above it
-  const live = Math.max(0, chrome.todos + chrome.thinking + chrome.help + chrome.streaming);
-  const transcriptRows = Math.max(1, frameHeight - fixed - live);
+  const fixed = 5; // composer (2) + footer (2) + gap above it (dense mode trims this)
+  const h = finiteDim(frameHeight, 1);
+  const panelSum =
+    finiteDim(chrome.todos, 0) +
+    finiteDim(chrome.thinking, 0) +
+    finiteDim(chrome.help, 0) +
+    finiteDim(chrome.streaming, 0);
+  const live = Math.max(0, panelSum);
+  const transcriptRows = finiteDim(h - fixed - live, 1);
   return { transcriptRows, liveRows: live };
 }

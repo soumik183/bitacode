@@ -5,9 +5,17 @@
  * (200x60). Rather than a pile of inline `Math.min` calls scattered through
  * App, the breakpoints live here so they stay consistent and testable.
  */
+/**
+ * Turn a terminal dimension into a finite positive integer. A resize burst can
+ * briefly report 0/undefined/NaN (especially under zoom); letting those through
+ * would poison every downstream width/height with NaN and tear the frame.
+ */
+export function finiteDim(value, fallback) {
+    return Number.isFinite(value) && value > 0 ? Math.max(1, Math.floor(value)) : fallback;
+}
 export function resolveLayout(columns, rows) {
-    const cols = Math.max(1, Math.floor(columns));
-    const lines = Math.max(1, Math.floor(rows));
+    const cols = finiteDim(columns, 1);
+    const lines = finiteDim(rows, 1);
     const size = cols < 60 || lines < 20 ? 'compact' : cols < 100 ? 'regular' : 'wide';
     // Gutter shrinks on narrow screens so text keeps usable width.
     const gutter = size === 'compact' ? 1 : 2;
@@ -25,6 +33,7 @@ export function resolveLayout(columns, rows) {
     const visibleTodos = Math.max(1, Math.min(size === 'compact' ? 3 : 5, todoBudget));
     return {
         size,
+        dense: lines < 10,
         inputWidth,
         paletteWindow,
         visibleTodos,
@@ -43,7 +52,7 @@ export function resolveLayout(columns, rows) {
  * is what makes scrolling and streaming stable instead of blinking.
  */
 export function frameRows(terminalRows) {
-    const rows = Math.max(1, Math.floor(terminalRows));
+    const rows = finiteDim(terminalRows, 1);
     // Stay below the terminal height even on tiny screens, otherwise Ink takes
     // its full-screen erase path and the frame blinks on every update.
     return rows > 1 ? rows - 1 : 1;
@@ -55,7 +64,7 @@ export function frameRows(terminalRows) {
  * right padding) columns, plus 2 more for the ↵ hint when it is shown.
  */
 export function composerTextWidth(inputWidth, showSubmitHint) {
-    return Math.max(1, Math.floor(inputWidth) - 5 - (showSubmitHint ? 2 : 0));
+    return finiteDim(Math.floor(inputWidth) - 5 - (showSubmitHint ? 2 : 0), 1);
 }
 /**
  * Clamp a selection index into a list that may have just shrunk (for example
@@ -75,8 +84,13 @@ export function clampIndex(index, length) {
  * is clamped so the transcript is never squeezed away entirely.
  */
 export function splitLiveArea(frameHeight, chrome) {
-    const fixed = 5; // composer (2) + footer (2) + gap above it
-    const live = Math.max(0, chrome.todos + chrome.thinking + chrome.help + chrome.streaming);
-    const transcriptRows = Math.max(1, frameHeight - fixed - live);
+    const fixed = 5; // composer (2) + footer (2) + gap above it (dense mode trims this)
+    const h = finiteDim(frameHeight, 1);
+    const panelSum = finiteDim(chrome.todos, 0) +
+        finiteDim(chrome.thinking, 0) +
+        finiteDim(chrome.help, 0) +
+        finiteDim(chrome.streaming, 0);
+    const live = Math.max(0, panelSum);
+    const transcriptRows = finiteDim(h - fixed - live, 1);
     return { transcriptRows, liveRows: live };
 }
