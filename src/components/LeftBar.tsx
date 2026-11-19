@@ -11,7 +11,7 @@
 import React, { useRef, useState, useLayoutEffect } from 'react';
 import { Box, Text, measureElement } from 'ink';
 import type { DOMElement } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 
 export interface LeftBarProps {
   color?: string;
@@ -21,11 +21,13 @@ export interface LeftBarProps {
 }
 
 export const LeftBar: React.FC<LeftBarProps> = ({
-  color = theme.border,
+  color,
   children,
   marginTop = 0,
   marginBottom = 0,
 }) => {
+  const theme = useTheme();
+  const barColor = color ?? theme.border;
   const contentRef = useRef<DOMElement>(null);
   const [height, setHeight] = useState(1);
 
@@ -45,7 +47,7 @@ export const LeftBar: React.FC<LeftBarProps> = ({
   return (
     <Box flexDirection="row" marginTop={marginTop} marginBottom={marginBottom} overflow="hidden">
       <Box flexDirection="column" marginRight={1}>
-        <Text color={color} bold>{bar}</Text>
+        <Text color={barColor} bold>{bar}</Text>
       </Box>
       <Box ref={contentRef} flexDirection="column" flexGrow={1}>
         {children}

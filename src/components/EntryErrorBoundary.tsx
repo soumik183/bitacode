@@ -1,7 +1,17 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { logger } from '../utils/logger.js';
+
+/** Functional fallback so the bad-row card can read the active palette. */
+const Fallback: React.FC = () => {
+  const theme = useTheme();
+  return (
+    <Box paddingX={2} marginBottom={1}>
+      <Text color={theme.error}>Could not render this transcript item.</Text>
+    </Box>
+  );
+};
 
 interface Props {
   children: React.ReactNode;
@@ -32,10 +42,6 @@ export class EntryErrorBoundary extends React.Component<Props, State> {
 
   render(): React.ReactNode {
     if (!this.state.failed) return this.props.children;
-    return (
-      <Box paddingX={2} marginBottom={1}>
-        <Text color={theme.error}>Could not render this transcript item.</Text>
-      </Box>
-    );
+    return <Fallback />;
   }
 }

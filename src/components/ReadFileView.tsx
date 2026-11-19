@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { displayFilePath, type FileReadDisplay } from '../utils/file-diff.js';
 import { detectLanguage, safeHighlight, type HighlightLanguage } from '../utils/code-highlight.js';
 import { TokenText } from './CodeBlock.js';
@@ -18,6 +18,7 @@ const DEFAULT_MAX_LINES = 10;
  * line numbers without dumping an entire file into the scrollback.
  */
 export const ReadFileView: React.FC<ReadFileViewProps> = ({ filePath, sections, maxLines, language: languageOverride }) => {
+  const theme = useTheme();
   const limit = Math.max(1, maxLines ?? DEFAULT_MAX_LINES);
   const totalLines = sections.reduce((total, section) => total + section.lines.length, 0);
   let budget = limit;
@@ -36,7 +37,7 @@ export const ReadFileView: React.FC<ReadFileViewProps> = ({ filePath, sections, 
   const showSectionHeaders = sections.length > 1;
   const language = languageOverride ?? detectLanguage(filePath);
   const codeText = rendered.flatMap((section) => section.visible).join('\n');
-  const rows = React.useMemo(() => safeHighlight(codeText, language), [codeText, language]);
+  const rows = React.useMemo(() => safeHighlight(codeText, language, { palette: theme }), [codeText, language, theme]);
   let row = 0;
 
   return (

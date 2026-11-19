@@ -8,7 +8,8 @@
  * strings still get their own colour.
  */
 
-import { theme } from '../theme.js';
+import { getTheme } from '../theme.js';
+import type { Theme } from '../theme.js';
 
 export interface HighlightToken {
   text: string;
@@ -32,29 +33,52 @@ export type HighlightLanguage =
 export interface HighlightOptions {
   /** Input longer than this is sliced before tokenizing (keeps previews cheap). */
   maxChars?: number;
+  /** Palette supplying syntax colours. Defaults to the active/default theme. */
+  palette?: Theme;
 }
 
 /** Above this many characters we stop tokenizing altogether. */
 export const MAX_HIGHLIGHT_CHARS = 200_000;
 
-const COLOR = {
-  comment: theme.dim,
-  string: theme.success,
+/**
+ * Syntax colour slots. The cached tokenizer stores slot names rather than
+ * resolved hex, so one compiled regex can serve every palette; slots are mapped
+ * to the caller's palette at tokenize time. Three legacy syntax colours stay
+ * fixed because they are not part of the 15-key Theme type.
+ */
+type ColorSlot =
+  | 'comment' | 'string' | 'key' | 'keyword' | 'literal'
+  | 'number' | 'fn' | 'heading' | 'add' | 'remove' | 'hunk';
+
+const PALETTE_SLOT: Record<Exclude<ColorSlot, 'key' | 'number' | 'fn'>, keyof Theme> = {
+  comment: 'dim',
+  string: 'success',
+  keyword: 'accent',
+  literal: 'info',
+  heading: 'info',
+  add: 'success',
+  remove: 'error',
+  hunk: 'info',
+};
+
+const FIXED_SLOT: Partial<Record<ColorSlot, string>> = {
   key: '#9cdcfe',
-  keyword: theme.accent,
-  literal: theme.info,
   number: '#b5cea8',
   fn: '#dcdcaa',
-  heading: theme.info,
-  add: theme.success,
-  remove: theme.error,
-  hunk: theme.info,
-} as const;
+};
+
+function colorsFor(palette: Theme): Record<ColorSlot, string> {
+  const colors = { ...FIXED_SLOT } as Record<ColorSlot, string>;
+  for (const [slot, key] of Object.entries(PALETTE_SLOT)) {
+    colors[slot as ColorSlot] = palette[key];
+  }
+  return colors;
+}
 
 interface Rule {
   name: string;
   source: string;
-  color?: string;
+  color?: ColorSlot;
   bold?: boolean;
   dim?: boolean;
   /** Recognise but pass through untouched (e.g. ANSI escape sequences). */
@@ -117,56 +141,56 @@ function rulesFor(language: Exclude<HighlightLanguage, 'text'>): Rule[] {
     case 'jsx':
       return [
         ANSI,
-        { name: 'comment', source: `${LINE_COMMENT}|${BLOCK_COMMENT}`, color: COLOR.comment, dim: true },
-        { name: 'string', source: `${DOUBLE}|${SINGLE}|${BACKTICK}`, color: COLOR.string },
-        { name: 'keyword', source: words(JS_KEYWORDS), color: COLOR.keyword, bold: true },
-        { name: 'literal', source: words(JS_LITERALS), color: COLOR.literal },
-        { name: 'number', source: NUMBER, color: COLOR.number },
-        { name: 'call', source: CALL, color: COLOR.fn },
+        { name: 'comment', source: `${LINE_COMMENT}|${BLOCK_COMMENT}`, color: 'comment', dim: true },
+        { name: 'string', source: `${DOUBLE}|${SINGLE}|${BACKTICK}`, color: 'string' },
+        { name: 'keyword', source: words(JS_KEYWORDS), color: 'keyword', bold: true },
+        { name: 'literal', source: words(JS_LITERALS), color: 'literal' },
+        { name: 'number', source: NUMBER, color: 'number' },
+        { name: 'call', source: CALL, color: 'fn' },
       ];
     case 'json':
       return [
         ANSI,
-        { name: 'key', source: JSON_KEY, color: COLOR.key },
-        { name: 'literal', source: words(['true', 'false', 'null']), color: COLOR.literal },
-        { name: 'number', source: NUMBER, color: COLOR.number },
-        { name: 'string', source: DOUBLE, color: COLOR.string },
+        { name: 'key', source: JSON_KEY, color: 'key' },
+        { name: 'literal', source: words(['true', 'false', 'null']), color: 'literal' },
+        { name: 'number', source: NUMBER, color: 'number' },
+        { name: 'string', source: DOUBLE, color: 'string' },
       ];
     case 'bash':
       return [
         ANSI,
-        { name: 'comment', source: HASH_COMMENT, color: COLOR.comment, dim: true },
-        { name: 'string', source: `${DOUBLE}|${SINGLE}`, color: COLOR.string },
-        { name: 'keyword', source: words(SH_KEYWORDS), color: COLOR.keyword, bold: true },
-        { name: 'literal', source: words(SH_LITERALS), color: COLOR.literal },
-        { name: 'number', source: NUMBER, color: COLOR.number },
-        { name: 'call', source: CALL, color: COLOR.fn },
+        { name: 'comment', source: HASH_COMMENT, color: 'comment', dim: true },
+        { name: 'string', source: `${DOUBLE}|${SINGLE}`, color: 'string' },
+        { name: 'keyword', source: words(SH_KEYWORDS), color: 'keyword', bold: true },
+        { name: 'literal', source: words(SH_LITERALS), color: 'literal' },
+        { name: 'number', source: NUMBER, color: 'number' },
+        { name: 'call', source: CALL, color: 'fn' },
       ];
     case 'python':
       return [
         ANSI,
-        { name: 'comment', source: HASH_COMMENT, color: COLOR.comment, dim: true },
-        { name: 'string', source: `${TRIPLE}|${DOUBLE}|${SINGLE}`, color: COLOR.string },
-        { name: 'keyword', source: words(PY_KEYWORDS), color: COLOR.keyword, bold: true },
-        { name: 'literal', source: words(PY_LITERALS), color: COLOR.literal },
-        { name: 'number', source: NUMBER, color: COLOR.number },
-        { name: 'call', source: CALL, color: COLOR.fn },
+        { name: 'comment', source: HASH_COMMENT, color: 'comment', dim: true },
+        { name: 'string', source: `${TRIPLE}|${DOUBLE}|${SINGLE}`, color: 'string' },
+        { name: 'keyword', source: words(PY_KEYWORDS), color: 'keyword', bold: true },
+        { name: 'literal', source: words(PY_LITERALS), color: 'literal' },
+        { name: 'number', source: NUMBER, color: 'number' },
+        { name: 'call', source: CALL, color: 'fn' },
       ];
     case 'markdown':
       return [
         ANSI,
-        { name: 'fence', source: '^[ \\t]*```[^\\n]*', color: COLOR.comment, dim: true },
-        { name: 'heading', source: '^#{1,6}[ \\t]+[^\\n]*', color: COLOR.heading, bold: true },
+        { name: 'fence', source: '^[ \\t]*```[^\\n]*', color: 'comment', dim: true },
+        { name: 'heading', source: '^#{1,6}[ \\t]+[^\\n]*', color: 'heading', bold: true },
         { name: 'bold', source: '\\*\\*[^*\\n]+\\*\\*', bold: true },
-        { name: 'link', source: '\\[[^\\]\\n]+\\]\\([^)\\n]+\\)', color: COLOR.key },
-        { name: 'code', source: BACKTICK, color: COLOR.string },
+        { name: 'link', source: '\\[[^\\]\\n]+\\]\\([^)\\n]+\\)', color: 'key' },
+        { name: 'code', source: BACKTICK, color: 'string' },
       ];
     case 'diff':
       return [
         ANSI,
-        { name: 'hunk', source: '^@@[^\\n]*', color: COLOR.hunk },
-        { name: 'add', source: '^\\+[^\\n]*', color: COLOR.add },
-        { name: 'remove', source: '^-[^\\n]*', color: COLOR.remove },
+        { name: 'hunk', source: '^@@[^\\n]*', color: 'hunk' },
+        { name: 'add', source: '^\\+[^\\n]*', color: 'add' },
+        { name: 'remove', source: '^-[^\\n]*', color: 'remove' },
       ];
   }
 }
@@ -259,6 +283,7 @@ export function highlightCode(
   const cap = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : MAX_HIGHLIGHT_CHARS;
   const text = code.length > cap ? code.slice(0, cap) : code;
   const resolved = normalizeLanguage(language);
+  const colors = colorsFor(options.palette ?? getTheme());
 
   if (resolved === 'text') return text.split('\n').map((line) => [{ text: line }]);
 
@@ -285,7 +310,12 @@ export function highlightCode(
     }
     tokens.push(
       rule && !rule.plain
-        ? { text: match[0], color: rule.color, bold: rule.bold, dim: rule.dim }
+        ? {
+            text: match[0],
+            color: rule.color ? colors[rule.color] : undefined,
+            bold: rule.bold,
+            dim: rule.dim,
+          }
         : { text: match[0] }
     );
     last = regex.lastIndex;

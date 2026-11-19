@@ -39,7 +39,7 @@ import {
   upsertSubAgentActivity,
   type SubAgentEventFields,
 } from './components/SubAgentActivity.js';
-import { theme, getTheme, THEME_NAMES } from './theme.js';
+import { ThemeProvider, useTheme, THEME_NAMES, themes, type Theme, type ThemeName } from './theme/index.js';
 import {
   loadSettings,
   saveSettings,
@@ -187,19 +187,22 @@ const SPLASH_LINES = [
   '█▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄',
 ];
 
-const Splash: React.FC = () => (
-  <Box flexDirection="column" alignItems="center">
-    <Text color={theme.text} bold>
-      {SPLASH_LINES.join('\n')}
-    </Text>
-  </Box>
-);
+const Splash: React.FC = () => {
+  const theme = useTheme();
+  return (
+    <Box flexDirection="column" alignItems="center">
+      <Text color={theme.text} bold>
+        {SPLASH_LINES.join('\n')}
+      </Text>
+    </Box>
+  );
+};
 
 // First-run guidance lives in the main screen, never in a blocking wizard.
 const SETUP_HINT = 'No provider configured — type /provider to choose one';
 const API_MISSING_HINT = 'API key missing — type /provider to select a provider and add a key.';
 
-function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assistant', text: string): void {
+function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assistant', text: string, palette: Theme): void {
   const normalized = normalizeTranscriptText(text);
   if (!normalized) {
     addStatic(<Box height={1} />);
@@ -213,10 +216,10 @@ function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assist
           borderTop={false}
           borderRight={false}
           borderBottom={false}
-          borderLeftColor={theme.userBorder}
+          borderLeftColor={palette.userBorder}
           paddingLeft={1}
         >
-          <Text color={theme.userText}>{normalized}</Text>
+          <Text color={palette.userText}>{normalized}</Text>
         </Box>
       </Box>
     );
@@ -225,7 +228,7 @@ function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assist
   // Fallback is assistant, render with Markdown formatting (bold, italic)
   addStatic(
     <Box paddingX={2} paddingBottom={1}>
-      <Text>{renderFormattedText(normalized)}</Text>
+      <Text>{renderFormattedText(normalized, 0, palette)}</Text>
     </Box>
   );
 }
@@ -234,6 +237,7 @@ function replayOneMessage(
   addStatic: AddStaticFn,
   message: Message,
   toolCallsById: Map<string, { name: string; args?: string | Record<string, unknown> }>,
+  palette: Theme,
   columns?: number
 ): void {
   const msgAny = message as any;
@@ -246,7 +250,7 @@ function replayOneMessage(
     addStatic(collapsed, { collapsed, expanded });
   }
   if (message.role === 'user' && typeof message.content === 'string') {
-    printMessageToScrollback(addStatic, 'user', message.content);
+    printMessageToScrollback(addStatic, 'user', message.content, palette);
     return;
   }
   if (
@@ -254,20 +258,21 @@ function replayOneMessage(
     typeof message.content === 'string' &&
     message.content.trim().length > 0
   ) {
-    printMessageToScrollback(addStatic, 'assistant', message.content);
+    printMessageToScrollback(addStatic, 'assistant', message.content, palette);
     return;
   }
   if (message.role === 'tool') {
     const savedCall = msgAny.tool_call_id ? toolCallsById.get(msgAny.tool_call_id) : undefined;
     const toolName = typeof msgAny.name === 'string' && msgAny.name ? msgAny.name : savedCall?.name || 'tool';
     const toolArgs = msgAny.args ?? savedCall?.args;
-    addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''));
+    addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''), palette);
   }
 }
 
 function replayMessagesToScrollback(
   addStatic: AddStaticFn,
   messages: Message[],
+  palette: Theme,
   maxMessages = messages.length,
   columns?: number
 ): void {
@@ -291,7 +296,7 @@ function replayMessagesToScrollback(
   if (omitted > 0) {
     addStatic(
       <Box paddingX={2}>
-        <Text color={theme.dim}>
+        <Text color={palette.dim}>
           … {omitted} earlier message{omitted === 1 ? '' : 's'} kept in model context, not replayed …
         </Text>
       </Box>
@@ -299,7 +304,7 @@ function replayMessagesToScrollback(
   }
   for (const message of visible) {
     try {
-      replayOneMessage(addStatic, message, toolCallsById, columns);
+      replayOneMessage(addStatic, message, toolCallsById, palette, columns);
     } catch (err: any) {
       // One malformed saved message must not abort the rest of the transcript.
       logger.warn('Skipped malformed session message during replay', {
@@ -308,7 +313,7 @@ function replayMessagesToScrollback(
       });
       addStatic(
         <Box paddingX={2} marginBottom={1}>
-          <Text color={theme.dim}>… one saved message could not be displayed …</Text>
+          <Text color={palette.dim}>… one saved message could not be displayed …</Text>
         </Box>
       );
     }
@@ -321,12 +326,13 @@ function replayMessagesToScrollback(
 /** Flush one compact card summarising a resumed session's child agents. */
 function replaySubAgentActivities(
   addStatic: AddStaticFn,
-  activities: SubAgentActivityData[]
+  activities: SubAgentActivityData[],
+  palette: Theme
 ): void {
   if (activities.length === 0) return;
   addStatic(
     <Box paddingX={2} marginBottom={1}>
-      <Text color={theme.muted}>{`▣ ${subAgentActivitySummary(activities)}`}</Text>
+      <Text color={palette.muted}>{`▣ ${subAgentActivitySummary(activities)}`}</Text>
     </Box>
   );
 }
@@ -464,6 +470,11 @@ export interface AppProps {
   version?: string;
 }
 
+type AppContentProps = AppProps & {
+  settings: UiSettings;
+  setSettings: React.Dispatch<React.SetStateAction<UiSettings>>;
+};
+
 // ─── Help text derived from slash commands ───
 // Shortcuts accept ctrl OR alt (Ink reports Alt via `key.meta`). Text-editing
 // keys a/e/u/w belong to PromptInput, so they are deliberately absent here.
@@ -499,6 +510,16 @@ function buildHelpText(approvalMode: ApprovalMode): string {
 }
 
 const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode', 'theme', 'statusLine'] as const;
+
+// Short intents shown beside each palette in the theme picker. Keep them brief
+// so names and swatches stay readable on narrow terminals.
+const THEME_INTENTS: Record<ThemeName, string> = {
+  black: 'warm gold on near-black',
+  sand: 'paper-light notebook',
+  dark: 'classic flat dark',
+  light: 'bright-room friendly',
+  'high-contrast': 'maximum contrast',
+};
 
 function buildClient(config: Config, apiKeyOverride?: string): OpenAI {
   const provider = getProvider(config.provider);
@@ -555,13 +576,16 @@ interface ApiKeyRequest {
 }
 
 // ─── Main App ───
-export const App: React.FC<AppProps> = ({
+const AppContent: React.FC<AppContentProps> = ({
   dangerouslySkipPermissions = false,
   logLevel,
   sessionId,
   updateNotice,
   version,
+  settings,
+  setSettings,
 }) => {
+  const theme = useTheme();
   const { exit } = useApp();
   const { stdout } = useStdout();
   // A zoom burst can briefly report 0/undefined/NaN dimensions; clamp once at
@@ -710,17 +734,14 @@ export const App: React.FC<AppProps> = ({
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
   }, []);
 
-  // User-facing preferences + live reasoning/todo state
-  const [settings, setSettings] = useState<UiSettings>(loadSettings);
-  // Every component imports the same mutable `theme` palette object, so
-  // retheming in place is the smallest way to apply a choice across the UI.
-  Object.assign(theme, getTheme(settings.theme));
+  // User-facing preferences arrive from App; the live reasoning/todo state
+  // stays local. The palette comes from ThemeProvider via useTheme() above.
   // Keep the terminal canvas in step with the palette so the row below the
   // Ink frame (and any terminal clearing) uses the same background colour.
   useEffect(() => {
     if (!stdout) return;
-    stdout.write(`\x1b]11;${getTheme(settings.theme).bg}\x07`);
-  }, [settings.theme, stdout]);
+    stdout.write(`\x1b]11;${theme.bg}\x07`);
+  }, [theme.bg, stdout]);
   const [settingsIndex, setSettingsIndex] = useState<number | null>(null);
   const [thinkingText, setThinkingText] = useState('');
   // Expansion is driven by the provider: reasoning opens the block, and it
@@ -745,7 +766,7 @@ export const App: React.FC<AppProps> = ({
 
   // Palette state: slash-command list, provider/model/variant pickers
   const [commandIndex, setCommandIndex] = useState(0);
-  const [picker, setPicker] = useState<'model' | 'variant' | 'provider' | 'session' | 'statusLine' | null>(null);
+  const [picker, setPicker] = useState<'model' | 'variant' | 'provider' | 'session' | 'statusLine' | 'theme' | null>(null);
   const [pickerIndex, setPickerIndex] = useState(0);
   const [variantId, setVariantId] = useState(settings.variant);
   const [remoteModels, setRemoteModels] = useState<Record<string, PaletteItem[]>>({});
@@ -890,7 +911,7 @@ export const App: React.FC<AppProps> = ({
       }
       handleAgentEvent(event);
     },
-    [handleAgentEvent, mode, addStatic, showToast]
+    [handleAgentEvent, mode, addStatic, showToast, theme]
   );
 
   // Finished children linger briefly, then fold away so the panel does not
@@ -974,8 +995,8 @@ export const App: React.FC<AppProps> = ({
           if (hasConversationMessages(loadedSession.completionMessages)) {
             setMeasuringTranscript(true);
           }
-          replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES, columns);
-          replaySubAgentActivities(addStatic, savedActivities);
+          replayMessagesToScrollback(addStatic, loadedSession.completionMessages, theme, MAX_REPLAY_MESSAGES, columns);
+          replaySubAgentActivities(addStatic, savedActivities, theme);
           didPrintIntroRef.current = true;
           sessionSavedRef.current = true;
         }
@@ -997,7 +1018,7 @@ export const App: React.FC<AppProps> = ({
     }
 
     setInitialized(true);
-  }, [dangerouslySkipPermissions, sessionId, addStatic, columns]);
+  }, [dangerouslySkipPermissions, sessionId, addStatic, columns, theme]);
 
   useEffect(() => {
     if (!loading || !settings.animations) {
@@ -1072,7 +1093,7 @@ export const App: React.FC<AppProps> = ({
         </Box>
       );
     }
-  }, [error, addStatic]);
+  }, [error, addStatic, theme]);
 
   useEffect(() => {
     for (const threadError of threadErrors) {
@@ -1086,7 +1107,7 @@ export const App: React.FC<AppProps> = ({
         </Box>
       );
     }
-  }, [threadErrors, addStatic]);
+  }, [threadErrors, addStatic, theme]);
 
   // Mirror the session todo list into the live task panel after every tool
   // result, so todo_write checkmarks appear as soon as the agent calls it.
@@ -1098,6 +1119,11 @@ export const App: React.FC<AppProps> = ({
     }
     setTodos(getTodosForSession(id));
   }, [session?.id, completionMessages]);
+
+  // The cleanup runs on unmount; keep the latest palette in a ref so the
+  // terminal-restore effect is not re-registered on every theme change.
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
 
   // The alternate screen is entered and cleared by cli.tsx *before* Ink's
   // first render. Doing the raw \x1b[2J\x1b[H here (after commit) desyncs
@@ -1112,7 +1138,7 @@ export const App: React.FC<AppProps> = ({
       // The card is painted while the themed terminal background is still set;
       // reset it afterwards so the user's own colours come back.
       const exitId = exitSessionIdRef.current;
-      if (exitId) stdout.write(`${formatSessionExit(exitId, theme)}\n`);
+      if (exitId) stdout.write(`${formatSessionExit(exitId, themeRef.current)}\n`);
       stdout.write('\x1b]111\x07');
     };
   }, [stdout]);
@@ -1349,6 +1375,16 @@ export const App: React.FC<AppProps> = ({
     },
   ];
 
+  // Each row carries a live swatch painted with that palette's own colours;
+  // DialogList renders it as an accent glyph on the palette background.
+  const themeItems: DialogItem[] = THEME_NAMES.map((name) => ({
+    id: name,
+    label: name,
+    swatch: { accent: themes[name].accent, bg: themes[name].bg },
+    description: THEME_INTENTS[name],
+    meta: (settings.theme ?? 'black') === name ? 'current' : undefined,
+  }));
+
   const toggleSetting = useCallback(
     (index: number) => {
       const key = SETTING_KEYS[index];
@@ -1363,12 +1399,9 @@ export const App: React.FC<AppProps> = ({
         return;
       }
       if (key === 'theme') {
-        const current = (THEME_NAMES as readonly string[]).indexOf(settings.theme ?? 'black');
-        const nextName = THEME_NAMES[(current + 1) % THEME_NAMES.length]!;
-        const next = { ...settings, theme: nextName };
-        setSettings(next);
-        saveSettings(next);
-        showToast(`Theme: ${nextName}`);
+        setSettingsIndex(null);
+        setPicker('theme');
+        setPickerIndex(Math.max(0, THEME_NAMES.indexOf(settings.theme ?? 'black')));
         return;
       }
       if (key === 'statusLine') {
@@ -1382,7 +1415,7 @@ export const App: React.FC<AppProps> = ({
       setSettings(next);
       saveSettings(next);
     },
-    [settings, showToast]
+    [settings, setSettings]
   );
 
   const statusLineItems: DialogItem[] = STATUS_LINE_ITEMS.map((id) => ({
@@ -1853,8 +1886,8 @@ export const App: React.FC<AppProps> = ({
         if (hasConversationMessages(messages)) {
           setMeasuringTranscript(true);
         }
-        replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES, columns);
-        replaySubAgentActivities(addStatic, loadedActivities);
+        replayMessagesToScrollback(addStatic, messages, theme, MAX_REPLAY_MESSAGES, columns);
+        replaySubAgentActivities(addStatic, loadedActivities, theme);
         didPrintIntroRef.current = true;
         sessionSavedRef.current = true;
       } catch (err: any) {
@@ -1872,6 +1905,7 @@ export const App: React.FC<AppProps> = ({
       persistActiveSelection,
       getModelPaletteInfo,
       stdout,
+      theme,
     ]
   );
 
@@ -1885,11 +1919,11 @@ export const App: React.FC<AppProps> = ({
         { command },
         { sessionId: session?.id, abortSignal: abortControllerRef.current?.signal }
       );
-      addToolResultView(addStatic, 'bash', JSON.stringify({ command }), result);
+      addToolResultView(addStatic, 'bash', JSON.stringify({ command }), result, theme);
     } catch (err: any) {
       setError(`Shell command failed: ${err?.message ?? String(err)}`);
     }
-  }, [session?.id, addStatic, showToast]);
+  }, [session?.id, addStatic, showToast, theme]);
 
   /** Persist the live session, then exit with its resume id on screen. */
   const exitWithSave = useCallback(() => {
@@ -1996,6 +2030,12 @@ export const App: React.FC<AppProps> = ({
         setPicker('variant');
         setPickerIndex(Math.max(0, VARIANTS.findIndex((item) => item.id === variantId)));
         return true;
+      case '/theme':
+        setHelpMessage(null);
+        setSettingsIndex(null);
+        setPicker('theme');
+        setPickerIndex(Math.max(0, THEME_NAMES.indexOf(settings.theme ?? 'black')));
+        return true;
       case '/settings':
         setHelpMessage(null);
         setSettingsIndex(0);
@@ -2053,7 +2093,7 @@ export const App: React.FC<AppProps> = ({
         setError(null);
         try {
           const result = await handleToolCall('undo', {}, { sessionId: session?.id });
-          addToolResultView(addStatic, 'undo', {}, result);
+          addToolResultView(addStatic, 'undo', {}, result, theme);
         } catch (err: any) {
           setError(`Undo failed: ${err?.message ?? String(err)}`);
         }
@@ -2072,6 +2112,7 @@ export const App: React.FC<AppProps> = ({
     allModelItems,
     providerItems,
     variantId,
+    settings,
     effectiveApprovalMode,
     loadModels,
     startNewSession,
@@ -2081,9 +2122,28 @@ export const App: React.FC<AppProps> = ({
     session?.id,
     addStatic,
     showToast,
+    theme,
   ]);
 
+  // Shared save path for both entry points (settings row and /theme).
+  const applyTheme = useCallback(
+    (name: ThemeName) => {
+      const next = { ...settings, theme: name };
+      setSettings(next);
+      saveSettings(next);
+      showToast(`Theme: ${name}`);
+      setPicker(null);
+      setSettingsIndex(null);
+    },
+    [settings, setSettings, showToast]
+  );
+
   const applyPicker = useCallback(() => {
+    if (picker === 'theme') {
+      const name = THEME_NAMES[clampIndex(pickerIndex, THEME_NAMES.length)];
+      if (name) applyTheme(name);
+      return;
+    }
     if (picker === 'statusLine') {
       const id = STATUS_LINE_ITEMS[clampIndex(pickerIndex, STATUS_LINE_ITEMS.length)];
       if (id) {
@@ -2197,6 +2257,7 @@ export const App: React.FC<AppProps> = ({
     config,
     pendingProviderId,
     settings,
+    applyTheme,
     sessionItems,
     beginProviderSwitch,
     persistActiveSelection,
@@ -2282,7 +2343,7 @@ export const App: React.FC<AppProps> = ({
     const nextMessages = imageMessage
       ? [...completionMessages, userMessage, imageMessage]
       : [...completionMessages, userMessage];
-    printMessageToScrollback(addStatic, 'user', trimmed);
+    printMessageToScrollback(addStatic, 'user', trimmed, theme);
     setCompletionMessages((prev) =>
       imageMessage ? [...prev, userMessage, imageMessage] : [...prev, userMessage]
     );
@@ -2347,7 +2408,7 @@ export const App: React.FC<AppProps> = ({
         setLoading(false);
       }
     }
-  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand]);
+  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme]);
 
   // Any command path can reject; never let that become an unhandled rejection
   // that kills the TUI after a turn.
@@ -2413,7 +2474,8 @@ export const App: React.FC<AppProps> = ({
       <Text wrap="truncate-end">
         {renderFormattedText(
           clipToRows(streamingText, maxStreamRows, liveStreamWidth),
-          liveStreamWidth
+          liveStreamWidth,
+          theme
         )}
         <Text dimColor>▍</Text>
       </Text>
@@ -2622,15 +2684,24 @@ export const App: React.FC<AppProps> = ({
         }
       }
 
+      // The theme picker also accepts 1-5 as a direct pick.
+      if (picker === 'theme' && /^[1-5]$/.test(input)) {
+        const name = THEME_NAMES[Number(input) - 1];
+        if (name) applyTheme(name);
+        return;
+      }
+
       const count = picker === 'provider'
         ? providerItems.length
         : picker === 'model'
           ? modelItems.length
           : picker === 'session'
             ? sessionItems.length
-            : picker === 'statusLine'
-              ? STATUS_LINE_ITEMS.length
-              : variantItems.length;
+            : picker === 'theme'
+              ? THEME_NAMES.length
+              : picker === 'statusLine'
+                ? STATUS_LINE_ITEMS.length
+                : variantItems.length;
       if (count > 0) {
         if (key.upArrow) {
           setPickerIndex((index) => (index - 1 + count) % count);
@@ -3029,11 +3100,28 @@ export const App: React.FC<AppProps> = ({
     <Dialog
       title="Settings"
       badge={`${settingsIndex + 1}/${settingItems.length}`}
-      hint="↑↓ move · enter toggle · esc close"
+      hint="↑↓ move · enter toggle/open · esc close"
       columns={columns}
       compact={compactDialog}
     >
       <DialogList items={settingItems} selected={settingsIndex} maxVisible={paletteWindow} compact={compactDialog} />
+    </Dialog>
+  ) : picker === 'theme' ? (
+    <Dialog
+      title="Theme"
+      accentGlyph="◈"
+      borderStyle="square"
+      badge={`${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`}
+      hint="↑↓ move · enter use · 1-5 pick · esc close"
+      columns={columns}
+      compact={compactDialog}
+    >
+      <DialogList
+        items={themeItems}
+        selected={clampIndex(pickerIndex, themeItems.length)}
+        maxVisible={paletteWindow}
+        compact={compactDialog}
+      />
     </Dialog>
   ) : picker === 'model' ? (
     <Dialog
@@ -3382,5 +3470,19 @@ export const App: React.FC<AppProps> = ({
         />
       )}
     </Box>
+  );
+};
+
+/**
+ * Owns the UI settings so the selected palette can be published to the whole
+ * tree. Cycling the Theme row calls setSettings, which updates `name` here and
+ * makes ThemeProvider hand every consumer a fresh, immutable palette.
+ */
+export const App: React.FC<AppProps> = (props) => {
+  const [settings, setSettings] = useState<UiSettings>(loadSettings);
+  return (
+    <ThemeProvider name={settings.theme}>
+      <AppContent {...props} settings={settings} setSettings={setSettings} />
+    </ThemeProvider>
   );
 };

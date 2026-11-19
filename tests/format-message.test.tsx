@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
-import { theme } from '../src/theme.js';
+import { getTheme, themes } from '../src/theme.js';
 import { renderFormattedText, normalizeTranscriptText } from '../src/utils/format-message.js';
+
+/** Pure helpers default to the active palette (black). */
+const theme = getTheme();
 
 type AnyElement = React.ReactElement<Record<string, unknown>>;
 
@@ -204,4 +207,25 @@ test('long input is capped so rendering stays cheap', () => {
 test('normalizeTranscriptText keeps its original behaviour', () => {
   assert.equal(normalizeTranscriptText('  a\n\n\nb  '), 'a\nb');
   assert.equal(normalizeTranscriptText('   '), '');
+});
+
+test('an explicit palette paints headings, code and dividers', () => {
+  const light = themes.light;
+  const node = renderFormattedText('# Title\n`x`\n---', 0, light);
+  const found = elements(node);
+  assert.ok(found.some((e) => e.props.bold === true && e.props.color === light.accent && textOf(e) === 'Title'));
+  assert.ok(found.some((e) => e.props.backgroundColor === light.surfaceAlt));
+  assert.ok(found.some((e) => e.props.color === light.dim && /─{3,}/.test(textOf(e))));
+});
+
+test('the highlight memo does not leak colours across palettes', () => {
+  const code = '```ts\nconst x = 1;\n```';
+  const paintsWith = (palette: typeof theme): boolean =>
+    elements(renderFormattedText(code, 0, palette)).some(
+      (e) => e.props.color === palette.accent && textOf(e) === 'const'
+    );
+
+  assert.ok(paintsWith(theme), 'default palette paints its own keyword colour');
+  assert.ok(paintsWith(themes.light), 'a second palette paints its own keyword colour');
+  assert.ok(paintsWith(theme), 'switching back still paints the first palette correctly');
 });

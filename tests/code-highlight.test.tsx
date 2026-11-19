@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { theme } from '../src/theme.js';
+import { getTheme, themes } from '../src/theme.js';
 import {
   MAX_HIGHLIGHT_CHARS,
   detectLanguage,
@@ -9,6 +9,8 @@ import {
   type HighlightToken,
 } from '../src/utils/code-highlight.js';
 
+/** Pure helpers default to the active palette (black). */
+const theme = getTheme();
 const textOf = (line: HighlightToken[]): string => line.map((token) => token.text).join('');
 
 test('tokenizes TypeScript keywords, strings, numbers and comments', () => {
@@ -124,4 +126,24 @@ test('malformed input never crashes safeHighlight', () => {
   assert.deepEqual(safeHighlight(42, 'ts'), [[{ text: '42' }]]);
   assert.deepEqual(safeHighlight(null), [[{ text: '' }]]);
   assert.deepEqual(safeHighlight('const x = 1', 'ts'), highlightCode('const x = 1', 'ts'));
+});
+
+test('an explicit palette overrides the default for every token colour', () => {
+  const code = 'const x = 1; // note';
+  // Prime the cached tokenizer with the default palette first: the cache keys
+  // on language only, so colours must still resolve per call.
+  const [defaultLine] = highlightCode(code, 'ts');
+  const [sandLine] = highlightCode(code, 'ts', { palette: themes.sand });
+
+  assert.equal(defaultLine[0].color, theme.accent);
+  assert.equal(defaultLine.find((t) => t.text === '// note')?.color, theme.dim);
+  assert.equal(sandLine[0].color, themes.sand.accent);
+  assert.equal(sandLine.find((t) => t.text === '// note')?.color, themes.sand.dim);
+  assert.notEqual(sandLine[0].color, defaultLine[0].color);
+});
+
+test('safeHighlight forwards the palette and diff colours follow it', () => {
+  const [line] = safeHighlight('+added\n-removed', 'diff', { palette: themes.light });
+  assert.equal(line[0].color, themes.light.success);
+  assert.equal(safeHighlight('const a = 1;', 'ts', { palette: themes.light })[0][0].color, themes.light.accent);
 });

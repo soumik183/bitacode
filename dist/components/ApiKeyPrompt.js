@@ -3,8 +3,9 @@ import { useState } from 'react';
 import { Box, Text, useStdout } from 'ink';
 import { LeftBar } from './LeftBar.js';
 import { PromptInput } from './PromptInput.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 export const ApiKeyPrompt = ({ providerName, path, error, busy, columns, compact = false, embedded = false, onSubmit, }) => {
+    const theme = useTheme();
     const [value, setValue] = useState('');
     const { stdout } = useStdout();
     // Leave room for the bar, the "› " prefix and the panel gutter. Clamp to at

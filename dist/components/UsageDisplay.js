@@ -1,6 +1,6 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { STATUS_LINE_ITEMS } from '../settings.js';
 // Bouncing equaliser: shifts one bar per frame so it reads as AI activity.
 const WAVE = '▁▂▃▄▅▆▇█▇▆▅▄▃▂▁';
@@ -23,6 +23,7 @@ function wave(frame) {
 }
 /** A moving highlight sweeps across the label, like a thinking indicator. */
 const Shimmer = ({ text, frame }) => {
+    const theme = useTheme();
     const span = text.length + 8;
     const head = frame % span;
     return (_jsx(_Fragment, { children: [...text].map((char, index) => {
@@ -36,6 +37,7 @@ const Shimmer = ({ text, frame }) => {
  * wave while the agent works — and model · variant · context on the right.
  */
 export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, segments = STATUS_LINE_ITEMS, }) => {
+    const theme = useTheme();
     const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
     const show = (segment) => segments.includes(segment);
     // One combined row per side keeps the footer a single line; a segment is

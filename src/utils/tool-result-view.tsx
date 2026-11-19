@@ -4,7 +4,7 @@ import { CodeBlock } from '../components/CodeBlock.js';
 import { DiffView } from '../components/DiffView.js';
 import { ReadFileView } from '../components/ReadFileView.js';
 import { ShellView } from '../components/ShellView.js';
-import { theme } from '../theme.js';
+import { getTheme, type Theme } from '../theme.js';
 import { detectLanguage, type HighlightLanguage } from './code-highlight.js';
 import { displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
 import { parseShellResult } from './shell-result.js';
@@ -62,7 +62,8 @@ export function addToolResultView(
   addStatic: AddStaticFn,
   toolName: string,
   toolArgs: string | Record<string, unknown> | undefined,
-  rawResult: string
+  rawResult: string,
+  palette: Theme = getTheme()
 ): void {
   // Notifications and progress reports get dedicated, colorful cards instead
   // of being flattened into a generic one-line activity row.
@@ -70,8 +71,8 @@ export function addToolResultView(
     const message = rawResult.replace(/^NOTIFY:\s*/i, '');
     addStatic(
       <Box paddingX={2} marginBottom={1}>
-        <Text color={theme.info} bold>🔔 </Text>
-        <Text color={theme.text}>{message}</Text>
+        <Text color={palette.info} bold>🔔 </Text>
+        <Text color={palette.text}>{message}</Text>
       </Box>
     );
     return;
@@ -82,8 +83,8 @@ export function addToolResultView(
     const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
     addStatic(
       <Box paddingX={2} marginBottom={1}>
-        <Text color={theme.accent} bold>{`⏵ ${bar} ${progressInfo.percent}%`}</Text>
-        {progressInfo.label ? <Text color={theme.muted}> {progressInfo.label}</Text> : null}
+        <Text color={palette.accent} bold>{`⏵ ${bar} ${progressInfo.percent}%`}</Text>
+        {progressInfo.label ? <Text color={palette.muted}> {progressInfo.label}</Text> : null}
       </Box>
     );
     return;
@@ -138,7 +139,7 @@ export function addToolResultView(
 
   addStatic(
     <Box paddingX={2} marginBottom={1}>
-      <Text color={isError ? theme.error : undefined} dimColor={!isError}>
+      <Text color={isError ? palette.error : undefined} dimColor={!isError}>
         {'▶ '}
         {toolDisplay}
         {': '}

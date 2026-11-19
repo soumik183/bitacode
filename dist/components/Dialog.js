@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 /**
  * Outer width of a dialog at this terminal width.
  *
@@ -18,13 +18,15 @@ export function dialogInnerWidth(columns) {
     return Math.max(1, dialogWidth(columns) - 4);
 }
 const rule = (columns) => '─'.repeat(Math.max(1, dialogWidth(columns) - 2));
-export const Dialog = ({ title, badge, hint, columns, compact = false, children }) => {
+export const Dialog = ({ title, badge, hint, columns, compact = false, accentGlyph, borderStyle = 'round', children, }) => {
+    const theme = useTheme();
+    const heading = accentGlyph ? `${accentGlyph} ${title}` : title;
     const width = dialogWidth(columns);
     const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
     if (compact) {
-        return (_jsxs(Box, { flexDirection: "column", width: width, flexShrink: 0, overflow: "hidden", children: [_jsx(Box, { flexDirection: "row", overflow: "hidden", children: _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: title }) }) }), _jsx(Box, { flexDirection: "column", flexShrink: 1, overflow: "hidden", children: children }), hint ? _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint }) : null] }));
+        return (_jsxs(Box, { flexDirection: "column", width: width, flexShrink: 0, overflow: "hidden", children: [_jsx(Box, { flexDirection: "row", overflow: "hidden", children: _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: heading }) }) }), _jsx(Box, { flexDirection: "column", flexShrink: 1, overflow: "hidden", children: children }), hint ? _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint }) : null] }));
     }
-    return (_jsxs(Box, { flexDirection: "column", width: width, flexShrink: 0, overflow: "hidden", borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: title }) }), badge ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: badge }) })) : null] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule(cols) }), _jsx(Box, { flexDirection: "column", flexShrink: 1, overflow: "hidden", children: children }), hint ? _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule(cols) }) : null, hint ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint })) : null] }));
+    return (_jsxs(Box, { flexDirection: "column", width: width, flexShrink: 0, overflow: "hidden", borderStyle: borderStyle === 'square' ? 'single' : 'round', borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: heading }) }), badge ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: badge }) })) : null] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule(cols) }), _jsx(Box, { flexDirection: "column", flexShrink: 1, overflow: "hidden", children: children }), hint ? _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule(cols) }) : null, hint ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint })) : null] }));
 };
 const MAX_VISIBLE = 8;
 /**
@@ -35,6 +37,7 @@ const MAX_VISIBLE = 8;
  * key. Section headings make the settings/model dialogs readable at a glance.
  */
 export const DialogList = ({ items, selected, maxVisible, empty = 'Nothing to show.', compact = false, }) => {
+    const theme = useTheme();
     if (items.length === 0) {
         return _jsx(Text, { color: theme.muted, wrap: "truncate-end", children: empty });
     }
@@ -46,7 +49,7 @@ export const DialogList = ({ items, selected, maxVisible, empty = 'Nothing to sh
                 const active = itemIndex === selected;
                 const previous = itemIndex > 0 ? items[itemIndex - 1] : undefined;
                 const showSection = !compact && Boolean(item.section) && item.section !== previous?.section;
-                return (_jsxs(Box, { flexDirection: "column", children: [showSection ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: item.section })) : null, _jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Box, { flexGrow: 1, flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: item.color ?? (active ? theme.text : theme.muted), bold: active || item.bold, wrap: "truncate-end", children: [item.label, item.description ? (_jsx(Text, { color: theme.dim, children: `  ${item.description}` })) : null] }) }), item.meta ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: item.meta }) })) : null] })] }, item.id));
+                return (_jsxs(Box, { flexDirection: "column", children: [showSection ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: item.section })) : null, _jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), item.swatch ? (_jsx(Box, { flexShrink: 0, marginRight: 1, children: _jsx(Text, { color: item.swatch.accent, backgroundColor: item.swatch.bg, children: "\u25A0" }) })) : null, _jsx(Box, { flexGrow: 1, flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: item.color ?? (active ? theme.text : theme.muted), bold: active || item.bold, wrap: "truncate-end", children: [item.label, item.description ? (_jsx(Text, { color: theme.dim, children: `  ${item.description}` })) : null] }) }), item.meta ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: item.meta }) })) : null] })] }, item.id));
             }), !compact && items.length > windowSize ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${selected + 1}/${items.length}` })) : null] }));
 };
 export default Dialog;

@@ -98,7 +98,8 @@ bitacode init --project --force
 - `/model` — Switch model
 - `/provider` — Switch API provider
 - `/variant` — Set reasoning variant
-- `/settings` — Toggle animations, mouse clicks, theme and approval mode (manual / auto / yolo)
+- `/theme` — Choose a colour theme (live swatches; press `1`–`5` or use ↑↓ + Enter)
+- `/settings` — Toggle animations and mouse clicks, change approval mode (manual / auto / yolo), or open the theme picker from the Theme row
 - `/undo` — Undo the last file change
 - `/update` — Check npm and install the latest `bitacode` release (`/update --local` for this project)
 - `/quit` or `/exit` — Save and exit

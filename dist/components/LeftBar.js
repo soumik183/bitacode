@@ -10,8 +10,10 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  */
 import { useRef, useState, useLayoutEffect } from 'react';
 import { Box, Text, measureElement } from 'ink';
-import { theme } from '../theme.js';
-export const LeftBar = ({ color = theme.border, children, marginTop = 0, marginBottom = 0, }) => {
+import { useTheme } from '../theme.js';
+export const LeftBar = ({ color, children, marginTop = 0, marginBottom = 0, }) => {
+    const theme = useTheme();
+    const barColor = color ?? theme.border;
     const contentRef = useRef(null);
     const [height, setHeight] = useState(1);
     useLayoutEffect(() => {
@@ -27,5 +29,5 @@ export const LeftBar = ({ color = theme.border, children, marginTop = 0, marginB
         }
     });
     const bar = Array.from({ length: height }, () => '│').join('\n');
-    return (_jsxs(Box, { flexDirection: "row", marginTop: marginTop, marginBottom: marginBottom, overflow: "hidden", children: [_jsx(Box, { flexDirection: "column", marginRight: 1, children: _jsx(Text, { color: color, bold: true, children: bar }) }), _jsx(Box, { ref: contentRef, flexDirection: "column", flexGrow: 1, children: children })] }));
+    return (_jsxs(Box, { flexDirection: "row", marginTop: marginTop, marginBottom: marginBottom, overflow: "hidden", children: [_jsx(Box, { flexDirection: "column", marginRight: 1, children: _jsx(Text, { color: barColor, bold: true, children: bar }) }), _jsx(Box, { ref: contentRef, flexDirection: "column", flexGrow: 1, children: children })] }));
 };

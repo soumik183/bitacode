@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import {
   safeHighlight,
   MAX_HIGHLIGHT_CHARS,
@@ -55,13 +55,15 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({
   showLineNumbers = false,
   maxRows = DEFAULT_MAX_ROWS,
   columns,
-  borderColor = theme.border,
+  borderColor,
   marginY = 1,
   startLine = 1,
 }) => {
+  const theme = useTheme();
+  const edgeColor = borderColor ?? theme.border;
   const lines = React.useMemo(
-    () => safeHighlight(code, language, { maxChars: MAX_HIGHLIGHT_CHARS }),
-    [code, language]
+    () => safeHighlight(code, language, { maxChars: MAX_HIGHLIGHT_CHARS, palette: theme }),
+    [code, language, theme]
   );
 
   const budget = Math.max(1, Math.floor(maxRows));
@@ -75,7 +77,7 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({
     <Box
       flexDirection="column"
       borderStyle="round"
-      borderColor={borderColor}
+      borderColor={edgeColor}
       paddingX={1}
       marginY={marginY}
       width={columns}

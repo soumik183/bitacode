@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
 import { stripMouseReports } from '../utils/mouse.js';
 import type { AskQuestion, AskResponse } from '../tools/ask.js';
@@ -50,6 +50,7 @@ function clampText(text: string, width: number): string {
  *  - a progress line makes a multi-question ask feel bounded
  */
 export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compact = false, embedded = false, onRespond }) => {
+  const theme = useTheme();
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Answered>({});
   const [cursor, setCursor] = useState(0);

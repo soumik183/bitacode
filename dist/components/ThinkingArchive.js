@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { formatDuration } from '../utils/duration.js';
 /** Fixed slice used only when no terminal width is known. */
 const FALLBACK_PREVIEW_CHARS = 240;
@@ -20,6 +20,7 @@ export function archivePreviewChars(columns) {
  * into a single unreadable string. Clicking expands every line in place.
  */
 export const ThinkingArchive = ({ text, elapsedMs, columns, expanded = false, }) => {
+    const theme = useTheme();
     const reasoning = text.trim();
     if (!reasoning)
         return null;

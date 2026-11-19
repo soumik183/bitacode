@@ -3,7 +3,7 @@ import { useCallback, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Select } from '@inkjs/ui';
 import { LeftBar } from './LeftBar.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 const OPTIONS = [
     { label: 'Approve once', value: 'approve_once' },
     { label: 'Approve session', value: 'approve_session' },
@@ -24,6 +24,7 @@ function fit(text, max) {
  * the 1/2/3 and Esc shortcuts. App ignores every key while approval is pending.
  */
 export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 24, embedded = false, onRespond, }) => {
+    const theme = useTheme();
     // A digit and Enter can arrive in one burst; settle at most once per prompt.
     const settledRef = useRef(false);
     const respond = useCallback((response) => {

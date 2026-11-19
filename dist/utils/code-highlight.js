@@ -7,22 +7,31 @@
  * which is how a diff line keeps its green/red tint while keywords and
  * strings still get their own colour.
  */
-import { theme } from '../theme.js';
+import { getTheme } from '../theme.js';
 /** Above this many characters we stop tokenizing altogether. */
 export const MAX_HIGHLIGHT_CHARS = 200_000;
-const COLOR = {
-    comment: theme.dim,
-    string: theme.success,
+const PALETTE_SLOT = {
+    comment: 'dim',
+    string: 'success',
+    keyword: 'accent',
+    literal: 'info',
+    heading: 'info',
+    add: 'success',
+    remove: 'error',
+    hunk: 'info',
+};
+const FIXED_SLOT = {
     key: '#9cdcfe',
-    keyword: theme.accent,
-    literal: theme.info,
     number: '#b5cea8',
     fn: '#dcdcaa',
-    heading: theme.info,
-    add: theme.success,
-    remove: theme.error,
-    hunk: theme.info,
 };
+function colorsFor(palette) {
+    const colors = { ...FIXED_SLOT };
+    for (const [slot, key] of Object.entries(PALETTE_SLOT)) {
+        colors[slot] = palette[key];
+    }
+    return colors;
+}
 // ─── Reusable regex fragments ───
 const ANSI = { name: 'ansi', source: '\\x1b\\[[0-9;?]*[ -/]*[@-~]', plain: true };
 const DOUBLE = '"(?:\\\\.|[^"\\\\])*"';
@@ -70,56 +79,56 @@ function rulesFor(language) {
         case 'jsx':
             return [
                 ANSI,
-                { name: 'comment', source: `${LINE_COMMENT}|${BLOCK_COMMENT}`, color: COLOR.comment, dim: true },
-                { name: 'string', source: `${DOUBLE}|${SINGLE}|${BACKTICK}`, color: COLOR.string },
-                { name: 'keyword', source: words(JS_KEYWORDS), color: COLOR.keyword, bold: true },
-                { name: 'literal', source: words(JS_LITERALS), color: COLOR.literal },
-                { name: 'number', source: NUMBER, color: COLOR.number },
-                { name: 'call', source: CALL, color: COLOR.fn },
+                { name: 'comment', source: `${LINE_COMMENT}|${BLOCK_COMMENT}`, color: 'comment', dim: true },
+                { name: 'string', source: `${DOUBLE}|${SINGLE}|${BACKTICK}`, color: 'string' },
+                { name: 'keyword', source: words(JS_KEYWORDS), color: 'keyword', bold: true },
+                { name: 'literal', source: words(JS_LITERALS), color: 'literal' },
+                { name: 'number', source: NUMBER, color: 'number' },
+                { name: 'call', source: CALL, color: 'fn' },
             ];
         case 'json':
             return [
                 ANSI,
-                { name: 'key', source: JSON_KEY, color: COLOR.key },
-                { name: 'literal', source: words(['true', 'false', 'null']), color: COLOR.literal },
-                { name: 'number', source: NUMBER, color: COLOR.number },
-                { name: 'string', source: DOUBLE, color: COLOR.string },
+                { name: 'key', source: JSON_KEY, color: 'key' },
+                { name: 'literal', source: words(['true', 'false', 'null']), color: 'literal' },
+                { name: 'number', source: NUMBER, color: 'number' },
+                { name: 'string', source: DOUBLE, color: 'string' },
             ];
         case 'bash':
             return [
                 ANSI,
-                { name: 'comment', source: HASH_COMMENT, color: COLOR.comment, dim: true },
-                { name: 'string', source: `${DOUBLE}|${SINGLE}`, color: COLOR.string },
-                { name: 'keyword', source: words(SH_KEYWORDS), color: COLOR.keyword, bold: true },
-                { name: 'literal', source: words(SH_LITERALS), color: COLOR.literal },
-                { name: 'number', source: NUMBER, color: COLOR.number },
-                { name: 'call', source: CALL, color: COLOR.fn },
+                { name: 'comment', source: HASH_COMMENT, color: 'comment', dim: true },
+                { name: 'string', source: `${DOUBLE}|${SINGLE}`, color: 'string' },
+                { name: 'keyword', source: words(SH_KEYWORDS), color: 'keyword', bold: true },
+                { name: 'literal', source: words(SH_LITERALS), color: 'literal' },
+                { name: 'number', source: NUMBER, color: 'number' },
+                { name: 'call', source: CALL, color: 'fn' },
             ];
         case 'python':
             return [
                 ANSI,
-                { name: 'comment', source: HASH_COMMENT, color: COLOR.comment, dim: true },
-                { name: 'string', source: `${TRIPLE}|${DOUBLE}|${SINGLE}`, color: COLOR.string },
-                { name: 'keyword', source: words(PY_KEYWORDS), color: COLOR.keyword, bold: true },
-                { name: 'literal', source: words(PY_LITERALS), color: COLOR.literal },
-                { name: 'number', source: NUMBER, color: COLOR.number },
-                { name: 'call', source: CALL, color: COLOR.fn },
+                { name: 'comment', source: HASH_COMMENT, color: 'comment', dim: true },
+                { name: 'string', source: `${TRIPLE}|${DOUBLE}|${SINGLE}`, color: 'string' },
+                { name: 'keyword', source: words(PY_KEYWORDS), color: 'keyword', bold: true },
+                { name: 'literal', source: words(PY_LITERALS), color: 'literal' },
+                { name: 'number', source: NUMBER, color: 'number' },
+                { name: 'call', source: CALL, color: 'fn' },
             ];
         case 'markdown':
             return [
                 ANSI,
-                { name: 'fence', source: '^[ \\t]*```[^\\n]*', color: COLOR.comment, dim: true },
-                { name: 'heading', source: '^#{1,6}[ \\t]+[^\\n]*', color: COLOR.heading, bold: true },
+                { name: 'fence', source: '^[ \\t]*```[^\\n]*', color: 'comment', dim: true },
+                { name: 'heading', source: '^#{1,6}[ \\t]+[^\\n]*', color: 'heading', bold: true },
                 { name: 'bold', source: '\\*\\*[^*\\n]+\\*\\*', bold: true },
-                { name: 'link', source: '\\[[^\\]\\n]+\\]\\([^)\\n]+\\)', color: COLOR.key },
-                { name: 'code', source: BACKTICK, color: COLOR.string },
+                { name: 'link', source: '\\[[^\\]\\n]+\\]\\([^)\\n]+\\)', color: 'key' },
+                { name: 'code', source: BACKTICK, color: 'string' },
             ];
         case 'diff':
             return [
                 ANSI,
-                { name: 'hunk', source: '^@@[^\\n]*', color: COLOR.hunk },
-                { name: 'add', source: '^\\+[^\\n]*', color: COLOR.add },
-                { name: 'remove', source: '^-[^\\n]*', color: COLOR.remove },
+                { name: 'hunk', source: '^@@[^\\n]*', color: 'hunk' },
+                { name: 'add', source: '^\\+[^\\n]*', color: 'add' },
+                { name: 'remove', source: '^-[^\\n]*', color: 'remove' },
             ];
     }
 }
@@ -207,6 +216,7 @@ export function highlightCode(code, language = 'text', options = {}) {
     const cap = Number.isFinite(requested) && requested > 0 ? Math.floor(requested) : MAX_HIGHLIGHT_CHARS;
     const text = code.length > cap ? code.slice(0, cap) : code;
     const resolved = normalizeLanguage(language);
+    const colors = colorsFor(options.palette ?? getTheme());
     if (resolved === 'text')
         return text.split('\n').map((line) => [{ text: line }]);
     const { regex, names, styles } = tokenizer(resolved);
@@ -230,7 +240,12 @@ export function highlightCode(code, language = 'text', options = {}) {
             }
         }
         tokens.push(rule && !rule.plain
-            ? { text: match[0], color: rule.color, bold: rule.bold, dim: rule.dim }
+            ? {
+                text: match[0],
+                color: rule.color ? colors[rule.color] : undefined,
+                bold: rule.bold,
+                dim: rule.dim,
+            }
             : { text: match[0] });
         last = regex.lastIndex;
     }

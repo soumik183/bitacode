@@ -2,7 +2,7 @@ import { jsx as _jsx } from "react/jsx-runtime";
 import { useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { ThinkingArchive } from '../components/ThinkingArchive.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { renderFormattedText, normalizeTranscriptText } from '../utils/format-message.js';
 import { logger } from '../utils/logger.js';
 import { formatSubAgentActivity } from '../utils/tool-display.js';
@@ -12,6 +12,7 @@ import { addToolResultView } from '../utils/tool-result-view.js';
 // full-frame repaint cost that made the old 50 ms value necessary.
 const STREAM_UI_INTERVAL_MS = 16;
 export function useAgentEventHandler(options) {
+    const theme = useTheme();
     const reasoningUiRef = useRef(0);
     const reasoningStartedRef = useRef(0);
     const { addStatic, setCompletionMessages, setIsStreaming, setStreamingText, setThinkingText, setThinkingArchived, setThinkingStartedAt, reasoningRef, setActiveTool, setLastUsage, setTotalCost, setThreadErrors, setError, assistantMessageRef, streamingBufferRef, columns, } = options;
@@ -20,6 +21,7 @@ export function useAgentEventHandler(options) {
             case 'text_delta': {
                 handleTextDelta(event, {
                     addStatic,
+                    palette: theme,
                     setCompletionMessages,
                     setIsStreaming,
                     setStreamingText,
@@ -63,6 +65,7 @@ export function useAgentEventHandler(options) {
             case 'tool_call': {
                 handleToolCall(event, {
                     addStatic,
+                    palette: theme,
                     setCompletionMessages,
                     setActiveTool,
                     assistantMessageRef,
@@ -84,6 +87,7 @@ export function useAgentEventHandler(options) {
                     setCompletionMessages,
                     setActiveTool,
                     assistantMessageRef,
+                    palette: theme,
                 });
                 break;
             }
@@ -103,6 +107,7 @@ export function useAgentEventHandler(options) {
                 reasoningUiRef.current = 0;
                 handleDone(event, {
                     addStatic,
+                    palette: theme,
                     setCompletionMessages,
                     setIsStreaming,
                     setStreamingText,
@@ -137,6 +142,7 @@ export function useAgentEventHandler(options) {
         assistantMessageRef,
         streamingBufferRef,
         columns,
+        theme,
     ]);
 }
 /**
@@ -165,7 +171,7 @@ function flushStreamingBuffer(ctx) {
     const { addStatic, setIsStreaming, setStreamingText, streamingBufferRef } = ctx;
     const buffer = streamingBufferRef.current;
     if (buffer.unflushedContent) {
-        addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(buffer.unflushedContent) }) }));
+        addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(buffer.unflushedContent, 0, ctx.palette) }) }));
     }
     streamingBufferRef.current = { unflushedContent: '', hasFlushedAnyLine: false, lastUiUpdate: 0 };
     setIsStreaming(false);
@@ -203,7 +209,7 @@ function handleTextDelta(event, ctx) {
             const completeLines = lines.slice(0, -1);
             const textToFlush = completeLines.join('\n');
             if (textToFlush) {
-                addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(textToFlush) }) }));
+                addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(textToFlush, 0, ctx.palette) }) }));
                 buffer.hasFlushedAnyLine = true;
             }
             buffer.unflushedContent = lines[lines.length - 1];
@@ -226,7 +232,7 @@ function handleTextDelta(event, ctx) {
             // Build the text to flush - each complete line gets a newline added back
             const textToFlush = completeLines.join('\n');
             if (textToFlush) {
-                addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(textToFlush) }) }));
+                addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(textToFlush, 0, ctx.palette) }) }));
                 buffer.hasFlushedAnyLine = true;
                 flushedLine = true;
             }
@@ -324,7 +330,7 @@ function handleToolCall(event, ctx) {
     }
 }
 function handleToolResult(event, ctx) {
-    const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef } = ctx;
+    const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef, palette } = ctx;
     if (!event.toolCall)
         return;
     const toolCall = event.toolCall;
@@ -335,11 +341,11 @@ function handleToolResult(event, ctx) {
     // frame height so write() restores the correct frame.
     const rawResult = toolCall.result || '';
     try {
-        addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult);
+        addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult, palette);
     }
     catch (err) {
         logger.warn('Could not render tool result', { error: err?.message ?? String(err) });
-        addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: theme.error, children: "Could not display this tool result." }) }));
+        addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: palette.error, children: "Could not display this tool result." }) }));
     }
     // Flush the assistant message + tool result into completionMessages
     // for session saving.
@@ -422,13 +428,13 @@ function handleDone(_event, ctx) {
             // If we've already flushed some lines, just append the remainder
             // Otherwise, normalize and flush the full content
             if (buffer.hasFlushedAnyLine) {
-                ctx.addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(buffer.unflushedContent) }) }));
+                ctx.addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(buffer.unflushedContent, 0, ctx.palette) }) }));
             }
             else {
                 // Nothing was flushed yet, normalize the full content
                 const normalized = normalizeTranscriptText(finalRef.message.content || '');
                 if (normalized) {
-                    ctx.addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(normalized) }) }));
+                    ctx.addStatic(_jsx(Box, { paddingX: 2, children: _jsx(Text, { children: renderFormattedText(normalized, 0, ctx.palette) }) }));
                 }
             }
         }

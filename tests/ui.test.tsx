@@ -28,7 +28,7 @@ import { PromptInput } from '../src/components/PromptInput.js';
 import { AskPrompt } from '../src/components/AskPrompt.js';
 import { ApprovalPrompt } from '../src/components/ApprovalPrompt.js';
 import { ApiKeyPrompt } from '../src/components/ApiKeyPrompt.js';
-import { theme, themes } from '../src/theme.js';
+import { themes, THEME_NAMES } from '../src/theme.js';
 import { ErrorBoundary } from '../src/components/ErrorBoundary.js';
 import { maxScrollOffset, visibleRowWindow, sliceItemsToWindow } from '../src/utils/scroll.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from '../src/utils/scrollbar.js';
@@ -883,7 +883,7 @@ function waitForFrameText(
 }
 
 function waitForFrameWhere(
-  app: ReturnType<typeof renderApp>,
+  app: { stdout: { frames: string[] } },
   predicate: (frame: string) => boolean,
   timeoutMs = 5000,
   fromIndex = 0
@@ -911,34 +911,26 @@ test('settings palette shows approval mode and cycles manual -> auto -> yolo', a
     assert.match(frame, /Approval mode/);
     assert.match(frame, /manual/, 'current approval mode is shown in the description');
 
-    // Rows: 0 animations, 1 mouse clicks, 2 approval mode. Move to the last.
-    // Terminal input can be dropped under parallel test load, so retry a key
-    // until the selection marker actually moves.
-    const moveDownUntil = async (marker: string) => {
-      await settle(80);
-      for (let attempt = 0; attempt < 6; attempt++) {
-        app.stdin.write('\x1b[B');
-        const hit = await waitForFrameWhere(app, (f) => f.includes(marker), 1200);
-        if (hit) return hit;
-      }
-      return '';
-    };
+    // Rows: 0 animations, 1 mouse clicks, 2 approval mode. pressUntil retries
+    // keys dropped under parallel load and waits for the marker, not a timer.
     const settingsFrame = (f: string, mode: string) =>
       f.includes('Settings') && f.includes('Approval mode') && f.includes(mode);
-    assert.ok(await moveDownUntil('› Mouse click thinking'), 'moved to mouse setting');
-    assert.ok(await moveDownUntil('› Approval mode'), 'moved to approval setting');
+    assert.ok(await pressUntil(app, '\x1b[B', (f) => f.includes('› Mouse click thinking')), 'moved to mouse setting');
+    assert.ok(await pressUntil(app, '\x1b[B', (f) => f.includes('› Approval mode')), 'moved to approval setting');
 
     // Poll global state (not frames): raw stdout writes can clobber lastFrame
     // under parallel load. Retry Enter in case a key is dropped.
     const cycleTo = async (mode: string) => {
       for (let attempt = 0; attempt < 6; attempt++) {
         app.stdin.write('\r');
-        const start = Date.now();
-        while (Date.now() - start < 1200) {
-          if (getApprovalMode() === mode) return;
-          await settle(20);
+        try {
+          await waitFor(() => getApprovalMode() === mode, 1200);
+          return;
+        } catch {
+          // dropped key — try again
         }
       }
+      assert.fail(`approval mode never reached ${mode}`);
     };
 
     await cycleTo('auto');
@@ -955,31 +947,146 @@ test('settings palette shows approval mode and cycles manual -> auto -> yolo', a
   }
 });
 
-test('theme selection repaints the full UI palette', async () => {
+/** Ink wires stdin one effect after the first painted frame; wait for it. */
+async function waitForInput(app: ReturnType<typeof renderApp>): Promise<void> {
+  await waitFor(
+    () => app.stdin.listenerCount('readable') > 0,
+    3000,
+    'Ink never attached its stdin listener'
+  );
+}
+
+/** Send a key once and wait for its frame. Retries would queue a duplicate
+ * arrow/Enter press, which overshoots the row or closes the picker again. */
+async function pressOnce(
+  app: ReturnType<typeof renderApp>,
+  key: string,
+  predicate: (frame: string) => boolean,
+  timeoutMs = 3000
+): Promise<string> {
+  app.stdin.write(key);
+  const hit = await waitForFrameWhere(app, predicate, timeoutMs);
+  // Ink re-registers useInput effects after the frame; flush before the next key.
+  await new Promise((resolve) => setImmediate(resolve));
+  return hit;
+}
+
+/** Open the theme picker from the Settings dialog using the Theme row. */
+async function openThemeFromSettings(app: ReturnType<typeof renderApp>): Promise<string> {
+  await waitForInput(app);
+  app.stdin.write('\x1c'); // ctrl+, opens settings
+  await waitForFrameText(app, 'Approval mode');
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const marker of ['› Mouse click thinking', '› Approval mode', '› Theme']) {
+    assert.ok(await pressOnce(app, '\x1b[B', (f) => f.includes(marker)), `${marker} selected`);
+  }
+  // Enter must be sent once: a second press would select the highlighted
+  // palette and close the picker we are trying to inspect.
+  app.stdin.write('\r');
+  const frame = await waitForFrameWhere(app, (f) => f.includes('1-5 pick'), 3000);
+  assert.ok(frame, 'Theme row opened the picker');
+  // The frame paints before Ink re-registers useInput for the new picker.
+  await new Promise((resolve) => setImmediate(resolve));
+  return frame;
+}
+
+/** Type /theme and submit, retrying keys dropped under parallel load. */
+async function openThemeViaSlash(app: ReturnType<typeof renderApp>): Promise<string> {
+  await waitForInput(app);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    app.stdin.write('\x0b'); // ctrl+k clears the draft
+    const from = app.stdout.frames.length;
+    app.stdin.write('/theme');
+    if (!(await waitForFrameWhere(app, (f) => f.includes('/theme'), 1500, from))) continue;
+    await new Promise((resolve) => setImmediate(resolve));
+    // One Enter only — a second would immediately pick a palette and close it.
+    app.stdin.write('\r');
+    const frame = await waitForFrameWhere(app, (f) => f.includes('1-5 pick'), 3000, from);
+    if (frame) {
+      // Let Ink re-register useInput for the picker before sending more keys.
+      await new Promise((resolve) => setImmediate(resolve));
+      return frame;
+    }
+  }
+  return '';
+}
+
+/** OSC 11 canvas writes are an observable proxy for the active palette. */
+function themeCanvas(app: ReturnType<typeof renderApp>) {
+  const canvas = (name: keyof typeof themes) => `\x1b]11;${themes[name].bg}\x07`;
+  return {
+    painted: (name: keyof typeof themes) =>
+      app.stdout.frames.some((frame) => frame.includes(canvas(name))),
+  };
+}
+
+test('theme picker from settings lists all five palettes with live swatches', async () => {
   const app = renderApp();
   try {
     await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
-    assert.equal(theme.bg, themes.black.bg, 'new installs start on black');
-
-    app.stdin.write('\x1c'); // ctrl+, opens settings
-    await waitForFrameText(app, 'Theme');
-    // Rows: 0 animations, 1 mouse, 2 approval, 3 theme.
-    for (let i = 0; i < 3; i++) {
-      await settle(80);
-      app.stdin.write('\x1b[B');
+    const frame = await openThemeFromSettings(app);
+    assert.match(frame, /Theme/, 'theme picker is open');
+    for (const name of THEME_NAMES) {
+      assert.ok(frame.includes(name), `palette ${name} is listed`);
     }
-    assert.ok(await waitForFrameWhere(app, (f) => f.includes('› Theme'), 2000), 'theme row selected');
-    for (let attempt = 0; attempt < 5; attempt++) {
-      app.stdin.write('\r');
-      await settle(150);
-      if (theme.bg === themes.sand.bg) break;
-    }
-    await waitFor(() => theme.bg === themes.sand.bg, 2000, 'theme palette did not update');
-    assert.equal(theme.bg, themes.sand.bg, 'background colour follows the choice');
-    assert.equal(theme.accent, themes.sand.accent, 'accents follow the choice too');
+    assert.equal(
+      (frame.match(/■/g) ?? []).length,
+      THEME_NAMES.length,
+      'each palette shows a colour swatch'
+    );
+    assert.ok(frame.includes('warm gold on near-black'), 'black intent is shown');
+    assert.ok(frame.includes('maximum contrast'), 'high-contrast intent is shown');
+    assert.match(frame, /current/, 'the active palette is marked current');
   } finally {
     app.cleanupAll();
-    Object.assign(theme, themes.black);
+  }
+});
+
+test('theme selection repaints the full UI palette', async () => {
+  const app = renderApp();
+  const { painted } = themeCanvas(app);
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    assert.ok(painted('black'), 'new installs paint the black canvas');
+
+    await openThemeFromSettings(app);
+    // Palette 2 is sand; the picker accepts 1-5 as a direct pick.
+    assert.ok(await pressOnce(app, '2', (f) => f.includes('Theme: sand')), 'sand was picked');
+    await waitFor(() => painted('sand'), 2000, 'theme palette did not repaint');
+    assert.ok(painted('sand'), 'canvas follows the choice');
+    assert.ok(
+      await pressOnce(app, '\x1c', (f) => f.includes('Settings') && f.includes('sand')),
+      'settings show the selected palette'
+    );
+  } finally {
+    app.cleanupAll();
+  }
+});
+
+test('/theme opens the picker and arrow + enter saves settings.theme', async () => {
+  const app = renderApp();
+  const { painted } = themeCanvas(app);
+  const settingsFile = () => path.join(process.env.HOME!, '.config', 'bitacode', 'settings.json');
+  const savedTheme = () =>
+    (JSON.parse(fs.readFileSync(settingsFile(), 'utf8')) as { theme?: string }).theme;
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    const frame = await openThemeViaSlash(app);
+    assert.match(frame, /Theme/, '/theme opens the theme picker');
+
+    // Move down to 'light' (index 3) and confirm with Enter.
+    for (const marker of ['› ■ sand', '› ■ dark', '› ■ light']) {
+      assert.ok(await pressOnce(app, '\x1b[B', (f) => f.includes(marker)), `${marker} selected`);
+    }
+    assert.ok(
+      await pressOnce(app, '\r', (f) => f.includes('Theme: light'), 3000),
+      'light was picked'
+    );
+    await waitFor(() => painted('light'), 2000, 'light canvas did not repaint');
+    await waitFor(() => savedTheme() === 'light', 2000, 'settings.theme was not saved');
+    assert.equal(savedTheme(), 'light');
+  } finally {
+    app.cleanupAll();
   }
 });
 
@@ -1409,12 +1516,28 @@ test('transient 0/NaN resize values keep the last valid dimensions', async () =>
   const app = renderAppSized(80, 24);
   try {
     await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+    const from = app.stdout.frames.length;
+    // A bogus resize is deliberately a no-op, so it emits no frame to wait for.
+    // Follow it with a real resize and wait for that frame instead of sleeping.
     app.resize(0, Number.NaN);
-    await settle(80);
-    const frame = app.stdout.frame();
-    assert.ok(frame.length > 0);
+    app.resize(60, 18);
+    const frame = await waitForFrameWhere(
+      app,
+      (f) => f.includes('┃') && lineWidth(f) <= 60 && f.split('\n').length <= 17,
+      5000,
+      from
+    );
+    assert.ok(frame, 'a valid frame rendered after the bogus resize');
     assert.ok(Number.isFinite(lineWidth(frame)), 'frame width is a finite number');
-    assert.ok(frame.split('\n').length <= 23, 'frame did not grow from a bogus resize');
+    assert.ok(frame.split('\n').length <= 17, 'frame did not grow from a bogus resize');
+    // Nothing painted between the two resizes may carry bogus dimensions.
+    for (let i = from; i < app.stdout.frames.length; i++) {
+      assert.doesNotMatch(
+        plain(app.stdout.frames[i] ?? ''),
+        /NaN|undefined/,
+        'bogus resize leaked into a frame'
+      );
+    }
   } finally {
     app.cleanup();
   }
@@ -1482,6 +1605,7 @@ test('approving resolves once and clears the prompt', async () => {
     await waitForFrame(app.stdout.frameContaining.bind(app.stdout, 'Approval Required'), (f) => f.length > 0);
 
     // Since the modal owns the keyboard, '1' selects Approve once immediately.
+    const from = app.stdout.frames.length;
     app.stdin.write('1');
     const result = await Promise.race([
       pending,
@@ -1490,16 +1614,12 @@ test('approving resolves once and clears the prompt', async () => {
     assert.equal(result, true, 'requestApproval resolves to approved');
     assert.equal(resolveCount, 1, 'the response settles exactly once');
 
-    const deadline = Date.now() + 4000;
-    let cleared = '';
-    while (Date.now() < deadline) {
-      const frame = plain(app.stdout.frames[app.stdout.frames.length - 1] ?? '');
-      if (frame.includes('┃') && !frame.includes('Approval Required')) {
-        cleared = frame;
-        break;
-      }
-      await settle(20);
-    }
+    const cleared = await waitForFrameWhere(
+      app,
+      (f) => f.includes('┃') && !f.includes('Approval Required'),
+      4000,
+      from
+    );
     assert.match(cleared, /Build anything…/, 'the composer is back after approval');
     assert.doesNotMatch(cleared, /Approval Required/, 'the prompt is gone');
   } finally {
@@ -1509,7 +1629,7 @@ test('approving resolves once and clears the prompt', async () => {
 
 test('approval prompt settles only once when number keys and Enter collide', async () => {
   let responses = 0;
-  const { stdin } = render(
+  const { stdin, stdout } = render(
     <ApprovalPrompt
       request={{ type: 'bash', description: 'Run a shell command' } as any}
       columns={40}
@@ -1517,13 +1637,21 @@ test('approval prompt settles only once when number keys and Enter collide', asy
       onRespond={() => { responses += 1; }}
     />
   );
-  await settle(50);
+  await waitFor(
+    () => stdout.frames.some((f) => f.includes('1. Approve once')),
+    2000,
+    'approval options did not render'
+  );
   stdin.write('1');
-  await settle(50);
+  await waitFor(() => responses === 1, 2000, 'digit key did not settle the prompt');
+
+  // Enter repaints the Select highlight, so wait for that frame rather than a
+  // fixed sleep; the trailing digit produces no repaint, just flush its handler.
+  const from = stdout.frames.length;
   stdin.write('\r');
-  await settle(50);
+  await waitFor(() => stdout.frames.length > from, 2000, 'enter key was not processed');
   stdin.write('2');
-  await settle(80);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(responses, 1, 'onRespond is called once for the whole interaction');
 });
 

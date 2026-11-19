@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Text, useInput } from 'ink';
 import { stripMouseReports } from '../utils/mouse.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 
 export interface PromptInputProps {
   value: string;
@@ -35,6 +35,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   mask = false,
   width,
 }) => {
+  const theme = useTheme();
   // Cursor is a code-point index, not a UTF-16 offset: arrows and backspace
   // must land on whole glyphs (emoji are two UTF-16 units, CJK are two columns).
   const points = Array.from(value);

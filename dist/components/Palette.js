@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 // ─── Available slash commands ───
 export const SLASH_COMMANDS = [
     { name: '/help', description: 'Show all available commands' },
@@ -8,6 +8,7 @@ export const SLASH_COMMANDS = [
     { name: '/session', description: 'Open a saved session' },
     { name: '/model', description: 'Switch model' },
     { name: '/variant', description: 'Set reasoning variant' },
+    { name: '/theme', description: 'Choose a colour theme' },
     { name: '/provider', description: 'Switch API provider' },
     { name: '/settings', description: 'Open settings' },
     { name: '/find', description: 'Search the transcript' },
@@ -23,6 +24,7 @@ const MAX_VISIBLE = 7;
  * Kept tiny: no timers, so it renders on the same frame as the keypress.
  */
 export const Palette = ({ title, items, selected, hint, maxVisible }) => {
+    const theme = useTheme();
     if (items.length === 0)
         return null;
     const window = Math.max(3, Math.min(MAX_VISIBLE, maxVisible ?? MAX_VISIBLE));

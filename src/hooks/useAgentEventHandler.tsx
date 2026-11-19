@@ -2,7 +2,8 @@ import React, { useCallback, useRef } from 'react';
 import { Box, Text } from 'ink';
 import type { AgentEvent, Message } from '../agentic-loop.js';
 import { ThinkingArchive } from '../components/ThinkingArchive.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
+import type { Theme } from '../theme.js';
 import { renderFormattedText, normalizeTranscriptText } from '../utils/format-message.js';
 import { logger } from '../utils/logger.js';
 import { formatSubAgentActivity } from '../utils/tool-display.js';
@@ -53,6 +54,7 @@ interface UseAgentEventHandlerOptions {
 }
 
 export function useAgentEventHandler(options: UseAgentEventHandlerOptions) {
+  const theme = useTheme();
   const reasoningUiRef = useRef(0);
   const reasoningStartedRef = useRef(0);
   const {
@@ -79,6 +81,7 @@ export function useAgentEventHandler(options: UseAgentEventHandlerOptions) {
       case 'text_delta': {
         handleTextDelta(event as AgentEvent & { type: 'text_delta' }, {
           addStatic,
+          palette: theme,
           setCompletionMessages,
           setIsStreaming,
           setStreamingText,
@@ -124,6 +127,7 @@ export function useAgentEventHandler(options: UseAgentEventHandlerOptions) {
       case 'tool_call': {
         handleToolCall(event as AgentEvent & { type: 'tool_call' }, {
           addStatic,
+          palette: theme,
           setCompletionMessages,
           setActiveTool,
           assistantMessageRef,
@@ -145,6 +149,7 @@ export function useAgentEventHandler(options: UseAgentEventHandlerOptions) {
           setCompletionMessages,
           setActiveTool,
           assistantMessageRef,
+          palette: theme,
         });
         break;
       }
@@ -164,6 +169,7 @@ export function useAgentEventHandler(options: UseAgentEventHandlerOptions) {
         reasoningUiRef.current = 0;
         handleDone(event as AgentEvent & { type: 'done' }, {
           addStatic,
+          palette: theme,
           setCompletionMessages,
           setIsStreaming,
           setStreamingText,
@@ -198,12 +204,15 @@ export function useAgentEventHandler(options: UseAgentEventHandlerOptions) {
     assistantMessageRef,
     streamingBufferRef,
     columns,
+    theme,
   ]);
 }
 
 // Shared base interface for contexts that need static scrollback access
 interface StaticContext {
   addStatic: AddStaticFn;
+  /** Active palette, forwarded to pure helpers that paint palette colours. */
+  palette: Theme;
 }
 
 interface ThinkingContext extends StaticContext {
@@ -256,7 +265,7 @@ function flushStreamingBuffer(ctx: StreamingContext) {
   if (buffer.unflushedContent) {
     addStatic(
       <Box paddingX={2}>
-        <Text>{renderFormattedText(buffer.unflushedContent)}</Text>
+        <Text>{renderFormattedText(buffer.unflushedContent, 0, ctx.palette)}</Text>
       </Box>
     );
   }
@@ -314,7 +323,7 @@ function handleTextDelta(
       if (textToFlush) {
         addStatic(
           <Box paddingX={2}>
-            <Text>{renderFormattedText(textToFlush)}</Text>
+            <Text>{renderFormattedText(textToFlush, 0, ctx.palette)}</Text>
           </Box>
         );
         buffer.hasFlushedAnyLine = true;
@@ -346,7 +355,7 @@ function handleTextDelta(
       if (textToFlush) {
         addStatic(
           <Box paddingX={2}>
-            <Text>{renderFormattedText(textToFlush)}</Text>
+            <Text>{renderFormattedText(textToFlush, 0, ctx.palette)}</Text>
           </Box>
         );
         buffer.hasFlushedAnyLine = true;
@@ -483,10 +492,10 @@ function handleToolResult(
   event: AgentEvent & { type: 'tool_result' },
   ctx: ToolResultContext
 ) {
-  const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef } = ctx;
-  
+  const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef, palette } = ctx;
+
   if (!event.toolCall) return;
-  
+
   const toolCall = event.toolCall;
   setActiveTool(null);
 
@@ -496,12 +505,12 @@ function handleToolResult(
   // frame height so write() restores the correct frame.
   const rawResult = toolCall.result || '';
   try {
-    addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult);
+    addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult, palette);
   } catch (err: any) {
     logger.warn('Could not render tool result', { error: err?.message ?? String(err) });
     addStatic(
       <Box paddingX={2} marginBottom={1}>
-        <Text color={theme.error}>Could not display this tool result.</Text>
+        <Text color={palette.error}>Could not display this tool result.</Text>
       </Box>
     );
   }
@@ -629,7 +638,7 @@ function handleDone(
       if (buffer.hasFlushedAnyLine) {
         ctx.addStatic(
           <Box paddingX={2}>
-            <Text>{renderFormattedText(buffer.unflushedContent)}</Text>
+            <Text>{renderFormattedText(buffer.unflushedContent, 0, ctx.palette)}</Text>
           </Box>
         );
       } else {
@@ -638,7 +647,7 @@ function handleDone(
         if (normalized) {
           ctx.addStatic(
             <Box paddingX={2}>
-              <Text>{renderFormattedText(normalized)}</Text>
+              <Text>{renderFormattedText(normalized, 0, ctx.palette)}</Text>
             </Box>
           );
         }

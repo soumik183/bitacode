@@ -13,7 +13,7 @@ import {
   RuntimeConfigFileSchema 
 } from './runtime-config.js';
 import { getAllProviders, getProvider, getProviderApiKeyEnvVars } from './providers/index.js';
-import { theme } from './theme.js';
+import { useTheme } from './theme.js';
 
 export interface Config {
   provider: string;
@@ -472,6 +472,7 @@ export const TargetSelection: React.FC<TargetSelectionProps> = ({
   subtitle,
   onSelect,
 }) => {
+  const theme = useTheme();
   return (
     <Box flexDirection="column">
       {title && <Text color={theme.text} bold>{title}</Text>}
@@ -505,6 +506,7 @@ export const ModelSelection: React.FC<ModelSelectionProps> = ({
   title,
   subtitle,
 }) => {
+  const theme = useTheme();
   const items = getAllProviders().flatMap((provider) =>
     provider.models.map((model) => ({
       label: `${provider.name} - ${model.name}`,
@@ -553,6 +555,7 @@ export const ApiKeyInput: React.FC<ApiKeyInputProps> = ({
   setStep,
   setConfigWritten,
 }) => {
+  const theme = useTheme();
   const [errorMessage, setErrorMessage] = useState('');
   const provider = getProvider(selectedProviderId);
   const canUseResolvedAuth = Boolean(resolveApiKey({ provider: selectedProviderId, apiKey: undefined }));
@@ -602,6 +605,7 @@ interface ConfigResultProps {
   configWritten: boolean;
 }
 export const ConfigResult: React.FC<ConfigResultProps> = ({ configWritten }) => {
+  const theme = useTheme();
   return (
     <Box flexDirection="column">
       {configWritten ? (
@@ -659,6 +663,7 @@ export const ConfigureComponent = ({ onComplete }: ConfigureComponentProps = {})
 };
 
 export const InitComponent = () => {
+  const theme = useTheme();
   const [selectedTarget, setSelectedTarget] = useState<InitConfigTarget | null>(null);
   const [result, setResult] = useState<{ path: string; status: InitConfigWriteStatus } | null>(null);
 

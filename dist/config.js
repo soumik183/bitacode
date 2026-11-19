@@ -8,7 +8,7 @@ import { Select, TextInput, PasswordInput } from '@inkjs/ui';
 import { parse } from 'jsonc-parser';
 import { getActiveRuntimeConfigPath, RuntimeConfigFileSchema } from './runtime-config.js';
 import { getAllProviders, getProvider, getProviderApiKeyEnvVars } from './providers/index.js';
-import { theme } from './theme.js';
+import { useTheme } from './theme.js';
 const CONFIG_DIR_MODE = 0o700;
 const CONFIG_FILE_MODE = 0o600;
 function hardenPermissions(targetPath, mode) {
@@ -364,12 +364,14 @@ export const ResetPrompt = ({ existingConfig, setStep, setConfigWritten }) => {
                 } })] }));
 };
 export const TargetSelection = ({ title, subtitle, onSelect, }) => {
+    const theme = useTheme();
     return (_jsxs(Box, { flexDirection: "column", children: [title && _jsx(Text, { color: theme.text, bold: true, children: title }), subtitle && _jsx(Text, { children: subtitle }), _jsx(Box, { marginTop: 1, children: _jsx(Select, { options: [
                         { label: `Project config — ${getProjectRuntimeConfigPath()}`, value: 'project' },
                         { label: `Shared user config — ${getUserRuntimeConfigPath()}`, value: 'user' },
                     ], onChange: (value) => onSelect(value) }) })] }));
 };
 export const ModelSelection = ({ setSelectedProviderId, setSelectedModelId, onSelect, setStep, title, subtitle, }) => {
+    const theme = useTheme();
     const items = getAllProviders().flatMap((provider) => provider.models.map((model) => ({
         label: `${provider.name} - ${model.name}`,
         value: `${provider.id}:::${model.id}`,
@@ -388,6 +390,7 @@ export const ModelSelection = ({ setSelectedProviderId, setSelectedModelId, onSe
     return (_jsxs(Box, { flexDirection: "column", children: [title && _jsx(Text, { color: theme.text, bold: true, children: title }), subtitle && _jsx(Text, { color: theme.muted, children: subtitle }), _jsx(Text, { children: "Select an AI Model:" }), _jsx(Select, { options: items, onChange: handleSelect })] }));
 };
 export const ApiKeyInput = ({ selectedProviderId, selectedModelId, target = 'user', title, showProviderHeaders = true, onComplete, setStep, setConfigWritten, }) => {
+    const theme = useTheme();
     const [errorMessage, setErrorMessage] = useState('');
     const provider = getProvider(selectedProviderId);
     const canUseResolvedAuth = Boolean(resolveApiKey({ provider: selectedProviderId, apiKey: undefined }));
@@ -413,6 +416,7 @@ export const ApiKeyInput = ({ selectedProviderId, selectedModelId, target = 'use
     return (_jsxs(Box, { flexDirection: "column", children: [title && _jsx(Text, { color: theme.text, bold: true, children: title }), _jsxs(Text, { children: [canUseResolvedAuth ? 'Optional API Key' : 'Enter API Key', " for ", provider?.name || selectedProviderId, ":"] }), showProviderHeaders && provider?.headers && Object.keys(provider.headers).length > 0 && (_jsx(Text, { dimColor: true, children: "This provider can authenticate with configured headers or environment variables." })), errorMessage && _jsx(Text, { color: theme.error, children: errorMessage }), _jsx(PasswordInput, { placeholder: canUseResolvedAuth ? 'Press enter to keep resolved auth' : `Enter your ${provider?.apiKeyEnvVar || 'API'} key`, onSubmit: handleApiKeySubmit })] }));
 };
 export const ConfigResult = ({ configWritten }) => {
+    const theme = useTheme();
     return (_jsxs(Box, { flexDirection: "column", children: [configWritten ? (_jsx(Text, { color: theme.text, children: "Configuration saved successfully!" })) : (_jsx(Text, { color: theme.muted, children: "Configuration not changed." })), _jsx(Text, { children: "You can now run Bitacode." })] }));
 };
 export const ConfigureComponent = ({ onComplete } = {}) => {
@@ -435,6 +439,7 @@ export const ConfigureComponent = ({ onComplete } = {}) => {
     }
 };
 export const InitComponent = () => {
+    const theme = useTheme();
     const [selectedTarget, setSelectedTarget] = useState(null);
     const [result, setResult] = useState(null);
     // Step 1: Show target selection

@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { formatDuration } from '../utils/duration.js';
 /** How many content rows the expanded panel may use at this terminal size. */
 function previewRowBudget(rows) {
@@ -70,6 +70,7 @@ export function thinkingBlockHeight(text, expanded, columns, rows) {
  * A left click on the header (or ctrl+t) toggles it.
  */
 export const ThinkingBlock = ({ text, expanded, active, animate, frame, columns, rows, elapsedMs = 0, }) => {
+    const theme = useTheme();
     const hasText = text.trim().length > 0;
     // No provider reasoning means nothing to show. Rendering an empty header
     // here would claim the model is thinking when it sent no reasoning at all.

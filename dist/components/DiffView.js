@@ -1,27 +1,28 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { annotateDiff, displayFilePath } from '../utils/file-diff.js';
 import { detectLanguage, safeHighlight } from '../utils/code-highlight.js';
 import { TokenText } from './CodeBlock.js';
 const MAX_VISIBLE_LINES = 24;
-function lineColor(line) {
+function lineColor(line, palette) {
     if (line.kind === 'add')
-        return theme.success;
+        return palette.success;
     if (line.kind === 'remove')
-        return theme.error;
+        return palette.error;
     if (line.kind === 'context')
-        return theme.muted;
+        return palette.muted;
     if (line.kind === 'hunk')
-        return theme.info;
-    return theme.dim;
+        return palette.info;
+    return palette.dim;
 }
 /**
  * Compact, colour-coded unified diff for edit_file/write_file results.
  * Green additions, red removals and file line numbers in a bordered card.
  */
 export const DiffView = ({ header, diff, filePath, operation, language: languageOverride, maxRows }) => {
+    const theme = useTheme();
     const lines = annotateDiff(diff);
     const additions = lines.filter((line) => line.kind === 'add').length;
     const removals = lines.filter((line) => line.kind === 'remove').length;
@@ -31,14 +32,14 @@ export const DiffView = ({ header, diff, filePath, operation, language: language
     const language = languageOverride ?? detectLanguage(filePath);
     // Highlight once per diff, not per render. Syntax colours sit on top of the
     // green/red line tint: uncoloured tokens inherit `baseColor` below.
-    const tokens = React.useMemo(() => shown.map((line) => safeHighlight(line.text, language)[0] ?? [{ text: line.text }]), [diff, language]);
+    const tokens = React.useMemo(() => shown.map((line) => safeHighlight(line.text, language, { palette: theme })[0] ?? [{ text: line.text }]), [diff, language, theme]);
     const gutter = Math.max(2, ...shown.map((line) => (line.number == null ? 0 : String(line.number).length)));
     const summary = header
         .replace(/^Successfully (edited|wrote) /i, (_, verb) => (verb.toLowerCase() === 'edited' ? 'Edited ' : 'Wrote '))
         .replace(/\.$/, '');
     const path = filePath ? displayFilePath(filePath) : '';
     return (_jsxs(Box, { flexDirection: "column", borderStyle: "round", borderColor: theme.border, paddingX: 1, marginY: 1, width: "100%", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.success, children: "\u2713 " }), _jsx(Text, { color: theme.text, bold: true, children: operation ?? summary }), path && _jsx(Text, { color: theme.muted, children: `  ${path}` }), additions > 0 && _jsx(Text, { color: theme.success, children: `  +${additions}` }), removals > 0 && _jsx(Text, { color: theme.error, children: `  -${removals}` })] }), shown.map((line, index) => {
-                const color = lineColor(line);
+                const color = lineColor(line, theme);
                 if (line.kind === 'hunk') {
                     return (_jsx(Text, { color: color, wrap: "truncate-end", children: `${' '.repeat(gutter)}  ${line.text}` }, index));
                 }

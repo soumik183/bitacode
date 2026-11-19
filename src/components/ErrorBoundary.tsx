@@ -1,7 +1,23 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { logger } from '../utils/logger.js';
+
+/** Functional fallback so the error card can read the active palette. */
+const Fallback: React.FC<{ message: string }> = ({ message }) => {
+  const theme = useTheme();
+  return (
+    <Box flexDirection="column" paddingX={2} paddingY={1}>
+      <Text color={theme.error} bold>
+        Bitacode hit an unexpected UI error.
+      </Text>
+      <Text color={theme.muted}>{message}</Text>
+      <Text color={theme.dim}>
+        Press ctrl+c to quit. Completed turns are already saved.
+      </Text>
+    </Box>
+  );
+};
 
 interface Props {
   children: React.ReactNode;
@@ -33,17 +49,6 @@ export class ErrorBoundary extends React.Component<Props, State> {
 
   render(): React.ReactNode {
     if (!this.state.error) return this.props.children;
-
-    return (
-      <Box flexDirection="column" paddingX={2} paddingY={1}>
-        <Text color={theme.error} bold>
-          Bitacode hit an unexpected UI error.
-        </Text>
-        <Text color={theme.muted}>{this.state.error.message}</Text>
-        <Text color={theme.dim}>
-          Press ctrl+c to quit. Completed turns are already saved.
-        </Text>
-      </Box>
-    );
+    return <Fallback message={this.state.error.message} />;
   }
 }

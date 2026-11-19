@@ -1,7 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
 import { stripMouseReports } from '../utils/mouse.js';
 /** Marker shown next to the agent's own recommendation. */
@@ -34,6 +34,7 @@ function clampText(text, width) {
  *  - a progress line makes a multi-question ask feel bounded
  */
 export const AskPrompt = ({ questions, columns, compact = false, embedded = false, onRespond }) => {
+    const theme = useTheme();
     const [index, setIndex] = useState(0);
     const [answers, setAnswers] = useState({});
     const [cursor, setCursor] = useState(0);

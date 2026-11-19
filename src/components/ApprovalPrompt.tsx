@@ -2,7 +2,7 @@ import React, { useCallback, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Select } from '@inkjs/ui';
 import { LeftBar } from './LeftBar.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import type { ApprovalRequest, ApprovalResponse } from '../utils/approval.js';
 
 export interface ApprovalPromptProps {
@@ -40,6 +40,7 @@ function fit(text: string, max: number): string {
 export const ApprovalPrompt: React.FC<ApprovalPromptProps> = ({
   request, columns = 80, compact = false, rows = 24, embedded = false, onRespond,
 }) => {
+  const theme = useTheme();
   // A digit and Enter can arrive in one burst; settle at most once per prompt.
   const settledRef = useRef(false);
   const respond = useCallback((response: ApprovalResponse) => {

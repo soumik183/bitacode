@@ -4,7 +4,7 @@
  */
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme, type Theme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
 
 /** Persisted shape (mirrors SubAgentActivity in sessions.ts). */
@@ -40,10 +40,11 @@ const STATUS_ICON: Record<SubAgentActivityItem['status'], string> = {
   error: '✗',
 };
 
-const STATUS_COLOR: Record<SubAgentActivityItem['status'], string> = {
-  start: theme.info,
-  done: theme.success,
-  error: theme.error,
+/** Status → semantic palette key, resolved from the active palette at render. */
+const STATUS_COLOR_KEY: Record<SubAgentActivityItem['status'], keyof Theme> = {
+  start: 'info',
+  done: 'success',
+  error: 'error',
 };
 
 /** Upsert one child's state from a synthetic sub_agent_iteration event. */
@@ -128,6 +129,7 @@ export interface SubAgentActivityProps {
 }
 
 export const SubAgentActivity: React.FC<SubAgentActivityProps> = ({ activities, columns, now }) => {
+  const theme = useTheme();
   if (activities.length === 0) return null;
   const visible = activities.slice(-SUB_AGENT_MAX_VISIBLE);
   const nowMs = now ?? Date.now();
@@ -142,7 +144,7 @@ export const SubAgentActivity: React.FC<SubAgentActivityProps> = ({ activities, 
           <Text color={theme.muted} bold>Sub-agents</Text>
           {visible.map((item) => (
             <Box key={item.id} flexDirection="row">
-              <Text color={STATUS_COLOR[item.status]}>{`${STATUS_ICON[item.status]} `}</Text>
+              <Text color={theme[STATUS_COLOR_KEY[item.status]]}>{`${STATUS_ICON[item.status]} `}</Text>
               <Text color={theme.dim} wrap="truncate-end">{`${shortId(item.id)} `}</Text>
               <Text color={theme.text} wrap="truncate-end">{truncate(item.task, taskWidth)}</Text>
               <Text color={theme.dim} wrap="truncate-end">{`  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}`}</Text>

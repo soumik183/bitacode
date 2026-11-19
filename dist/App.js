@@ -33,7 +33,7 @@ import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.j
 import { ThinkingArchive } from './components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
 import { SubAgentActivity, subAgentActivityRows, subAgentActivitySummary, upsertSubAgentActivity, } from './components/SubAgentActivity.js';
-import { theme, getTheme, THEME_NAMES } from './theme.js';
+import { ThemeProvider, useTheme, THEME_NAMES, themes } from './theme/index.js';
 import { loadSettings, saveSettings, STATUS_LINE_ITEMS, } from './settings.js';
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
@@ -110,24 +110,27 @@ const SPLASH_LINES = [
     '█▄▄ █ ▀█▀ ▄▀█ █▀▀ █▀█ █▀▄ █▀▀',
     '█▄█ █  █  █▀█ █▄▄ █▄█ █▄▀ ██▄',
 ];
-const Splash = () => (_jsx(Box, { flexDirection: "column", alignItems: "center", children: _jsx(Text, { color: theme.text, bold: true, children: SPLASH_LINES.join('\n') }) }));
+const Splash = () => {
+    const theme = useTheme();
+    return (_jsx(Box, { flexDirection: "column", alignItems: "center", children: _jsx(Text, { color: theme.text, bold: true, children: SPLASH_LINES.join('\n') }) }));
+};
 // First-run guidance lives in the main screen, never in a blocking wizard.
 const SETUP_HINT = 'No provider configured — type /provider to choose one';
 const API_MISSING_HINT = 'API key missing — type /provider to select a provider and add a key.';
-function printMessageToScrollback(addStatic, role, text) {
+function printMessageToScrollback(addStatic, role, text, palette) {
     const normalized = normalizeTranscriptText(text);
     if (!normalized) {
         addStatic(_jsx(Box, { height: 1 }));
         return;
     }
     if (role === 'user') {
-        addStatic(_jsx(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: _jsx(Box, { borderStyle: "single", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: theme.userBorder, paddingLeft: 1, children: _jsx(Text, { color: theme.userText, children: normalized }) }) }));
+        addStatic(_jsx(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: _jsx(Box, { borderStyle: "single", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: palette.userBorder, paddingLeft: 1, children: _jsx(Text, { color: palette.userText, children: normalized }) }) }));
         return;
     }
     // Fallback is assistant, render with Markdown formatting (bold, italic)
-    addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized) }) }));
+    addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized, 0, palette) }) }));
 }
-function replayOneMessage(addStatic, message, toolCallsById, columns) {
+function replayOneMessage(addStatic, message, toolCallsById, palette, columns) {
     const msgAny = message;
     if (message.role === 'system')
         return;
@@ -139,23 +142,23 @@ function replayOneMessage(addStatic, message, toolCallsById, columns) {
         addStatic(collapsed, { collapsed, expanded });
     }
     if (message.role === 'user' && typeof message.content === 'string') {
-        printMessageToScrollback(addStatic, 'user', message.content);
+        printMessageToScrollback(addStatic, 'user', message.content, palette);
         return;
     }
     if (message.role === 'assistant' &&
         typeof message.content === 'string' &&
         message.content.trim().length > 0) {
-        printMessageToScrollback(addStatic, 'assistant', message.content);
+        printMessageToScrollback(addStatic, 'assistant', message.content, palette);
         return;
     }
     if (message.role === 'tool') {
         const savedCall = msgAny.tool_call_id ? toolCallsById.get(msgAny.tool_call_id) : undefined;
         const toolName = typeof msgAny.name === 'string' && msgAny.name ? msgAny.name : savedCall?.name || 'tool';
         const toolArgs = msgAny.args ?? savedCall?.args;
-        addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''));
+        addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''), palette);
     }
 }
-function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.length, columns) {
+function replayMessagesToScrollback(addStatic, messages, palette, maxMessages = messages.length, columns) {
     const omitted = Math.max(0, messages.length - maxMessages);
     const visible = omitted > 0 ? messages.slice(omitted) : messages;
     // Saved tool results only carry tool_call_id, so recover the tool name and
@@ -173,11 +176,11 @@ function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.
         }
     }
     if (omitted > 0) {
-        addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.dim, children: ["\u2026 ", omitted, " earlier message", omitted === 1 ? '' : 's', " kept in model context, not replayed \u2026"] }) }));
+        addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: palette.dim, children: ["\u2026 ", omitted, " earlier message", omitted === 1 ? '' : 's', " kept in model context, not replayed \u2026"] }) }));
     }
     for (const message of visible) {
         try {
-            replayOneMessage(addStatic, message, toolCallsById, columns);
+            replayOneMessage(addStatic, message, toolCallsById, palette, columns);
         }
         catch (err) {
             // One malformed saved message must not abort the rest of the transcript.
@@ -185,7 +188,7 @@ function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.
                 error: err?.message ?? String(err),
                 role: message?.role,
             });
-            addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: theme.dim, children: "\u2026 one saved message could not be displayed \u2026" }) }));
+            addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: palette.dim, children: "\u2026 one saved message could not be displayed \u2026" }) }));
         }
     }
     if (messages.length > 0) {
@@ -193,10 +196,10 @@ function replayMessagesToScrollback(addStatic, messages, maxMessages = messages.
     }
 }
 /** Flush one compact card summarising a resumed session's child agents. */
-function replaySubAgentActivities(addStatic, activities) {
+function replaySubAgentActivities(addStatic, activities, palette) {
     if (activities.length === 0)
         return;
-    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: `▣ ${subAgentActivitySummary(activities)}` }) }));
+    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: palette.muted, children: `▣ ${subAgentActivitySummary(activities)}` }) }));
 }
 // Limit streaming text to the free viewport rows. Count WRAPPED rows, not
 // logical lines: one long token with no newline can still wrap to many rows
@@ -359,6 +362,15 @@ function buildHelpText(approvalMode) {
     ].join('\n');
 }
 const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode', 'theme', 'statusLine'];
+// Short intents shown beside each palette in the theme picker. Keep them brief
+// so names and swatches stay readable on narrow terminals.
+const THEME_INTENTS = {
+    black: 'warm gold on near-black',
+    sand: 'paper-light notebook',
+    dark: 'classic flat dark',
+    light: 'bright-room friendly',
+    'high-contrast': 'maximum contrast',
+};
 function buildClient(config, apiKeyOverride) {
     const provider = getProvider(config.provider);
     const apiKey = apiKeyOverride?.trim() || resolveApiKey(config);
@@ -401,7 +413,8 @@ function buildClient(config, apiKeyOverride) {
     return new OpenAI(clientOptions);
 }
 // ─── Main App ───
-export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, updateNotice, version, }) => {
+const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, updateNotice, version, settings, setSettings, }) => {
+    const theme = useTheme();
     const { exit } = useApp();
     const { stdout } = useStdout();
     // A zoom burst can briefly report 0/undefined/NaN dimensions; clamp once at
@@ -549,18 +562,15 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         if (toastTimerRef.current)
             clearTimeout(toastTimerRef.current);
     }, []);
-    // User-facing preferences + live reasoning/todo state
-    const [settings, setSettings] = useState(loadSettings);
-    // Every component imports the same mutable `theme` palette object, so
-    // retheming in place is the smallest way to apply a choice across the UI.
-    Object.assign(theme, getTheme(settings.theme));
+    // User-facing preferences arrive from App; the live reasoning/todo state
+    // stays local. The palette comes from ThemeProvider via useTheme() above.
     // Keep the terminal canvas in step with the palette so the row below the
     // Ink frame (and any terminal clearing) uses the same background colour.
     useEffect(() => {
         if (!stdout)
             return;
-        stdout.write(`\x1b]11;${getTheme(settings.theme).bg}\x07`);
-    }, [settings.theme, stdout]);
+        stdout.write(`\x1b]11;${theme.bg}\x07`);
+    }, [theme.bg, stdout]);
     const [settingsIndex, setSettingsIndex] = useState(null);
     const [thinkingText, setThinkingText] = useState('');
     // Expansion is driven by the provider: reasoning opens the block, and it
@@ -694,7 +704,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             showToast('Background process started');
         }
         handleAgentEvent(event);
-    }, [handleAgentEvent, mode, addStatic, showToast]);
+    }, [handleAgentEvent, mode, addStatic, showToast, theme]);
     // Finished children linger briefly, then fold away so the panel does not
     // occupy the live area forever. A new activity resets the timer; a still
     // running child keeps the panel pinned.
@@ -766,8 +776,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     if (hasConversationMessages(loadedSession.completionMessages)) {
                         setMeasuringTranscript(true);
                     }
-                    replayMessagesToScrollback(addStatic, loadedSession.completionMessages, MAX_REPLAY_MESSAGES, columns);
-                    replaySubAgentActivities(addStatic, savedActivities);
+                    replayMessagesToScrollback(addStatic, loadedSession.completionMessages, theme, MAX_REPLAY_MESSAGES, columns);
+                    replaySubAgentActivities(addStatic, savedActivities, theme);
                     didPrintIntroRef.current = true;
                     sessionSavedRef.current = true;
                 }
@@ -787,7 +797,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             didPrintIntroRef.current = true;
         }
         setInitialized(true);
-    }, [dangerouslySkipPermissions, sessionId, addStatic, columns]);
+    }, [dangerouslySkipPermissions, sessionId, addStatic, columns, theme]);
     useEffect(() => {
         if (!loading || !settings.animations) {
             setSpinnerFrame(0);
@@ -850,7 +860,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         if (error) {
             addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.error, children: ["Error: ", error] }) }));
         }
-    }, [error, addStatic]);
+    }, [error, addStatic, theme]);
     useEffect(() => {
         for (const threadError of threadErrors) {
             if (threadError.transient || printedThreadErrorIdsRef.current.has(threadError.id)) {
@@ -859,7 +869,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             printedThreadErrorIdsRef.current.add(threadError.id);
             addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.error, children: ["Error: ", threadError.message] }) }));
         }
-    }, [threadErrors, addStatic]);
+    }, [threadErrors, addStatic, theme]);
     // Mirror the session todo list into the live task panel after every tool
     // result, so todo_write checkmarks appear as soon as the agent calls it.
     useEffect(() => {
@@ -870,6 +880,10 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
         setTodos(getTodosForSession(id));
     }, [session?.id, completionMessages]);
+    // The cleanup runs on unmount; keep the latest palette in a ref so the
+    // terminal-restore effect is not re-registered on every theme change.
+    const themeRef = useRef(theme);
+    themeRef.current = theme;
     // The alternate screen is entered and cleared by cli.tsx *before* Ink's
     // first render. Doing the raw \x1b[2J\x1b[H here (after commit) desyncs
     // Ink's incremental cursor/line accounting: Ink assumes the cursor is at the
@@ -885,7 +899,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             // reset it afterwards so the user's own colours come back.
             const exitId = exitSessionIdRef.current;
             if (exitId)
-                stdout.write(`${formatSessionExit(exitId, theme)}\n`);
+                stdout.write(`${formatSessionExit(exitId, themeRef.current)}\n`);
             stdout.write('\x1b]111\x07');
         };
     }, [stdout]);
@@ -1100,6 +1114,15 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             meta: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length}`,
         },
     ];
+    // Each row carries a live swatch painted with that palette's own colours;
+    // DialogList renders it as an accent glyph on the palette background.
+    const themeItems = THEME_NAMES.map((name) => ({
+        id: name,
+        label: name,
+        swatch: { accent: themes[name].accent, bg: themes[name].bg },
+        description: THEME_INTENTS[name],
+        meta: (settings.theme ?? 'black') === name ? 'current' : undefined,
+    }));
     const toggleSetting = useCallback((index) => {
         const key = SETTING_KEYS[index];
         if (!key)
@@ -1114,12 +1137,9 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             return;
         }
         if (key === 'theme') {
-            const current = THEME_NAMES.indexOf(settings.theme ?? 'black');
-            const nextName = THEME_NAMES[(current + 1) % THEME_NAMES.length];
-            const next = { ...settings, theme: nextName };
-            setSettings(next);
-            saveSettings(next);
-            showToast(`Theme: ${nextName}`);
+            setSettingsIndex(null);
+            setPicker('theme');
+            setPickerIndex(Math.max(0, THEME_NAMES.indexOf(settings.theme ?? 'black')));
             return;
         }
         if (key === 'statusLine') {
@@ -1132,7 +1152,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         const next = { ...settings, [key]: !settings[key] };
         setSettings(next);
         saveSettings(next);
-    }, [settings, showToast]);
+    }, [settings, setSettings]);
     const statusLineItems = STATUS_LINE_ITEMS.map((id) => ({
         id,
         label: id,
@@ -1545,8 +1565,8 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             if (hasConversationMessages(messages)) {
                 setMeasuringTranscript(true);
             }
-            replayMessagesToScrollback(addStatic, messages, MAX_REPLAY_MESSAGES, columns);
-            replaySubAgentActivities(addStatic, loadedActivities);
+            replayMessagesToScrollback(addStatic, messages, theme, MAX_REPLAY_MESSAGES, columns);
+            replaySubAgentActivities(addStatic, loadedActivities, theme);
             didPrintIntroRef.current = true;
             sessionSavedRef.current = true;
         }
@@ -1564,6 +1584,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         persistActiveSelection,
         getModelPaletteInfo,
         stdout,
+        theme,
     ]);
     /** Run `! <cmd>` directly through the bash tool, without involving the model. */
     const runShellCommand = useCallback(async (command) => {
@@ -1571,12 +1592,12 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         showToast(`$ ${command}`, 0);
         try {
             const result = await handleToolCall('bash', { command }, { sessionId: session?.id, abortSignal: abortControllerRef.current?.signal });
-            addToolResultView(addStatic, 'bash', JSON.stringify({ command }), result);
+            addToolResultView(addStatic, 'bash', JSON.stringify({ command }), result, theme);
         }
         catch (err) {
             setError(`Shell command failed: ${err?.message ?? String(err)}`);
         }
-    }, [session?.id, addStatic, showToast]);
+    }, [session?.id, addStatic, showToast, theme]);
     /** Persist the live session, then exit with its resume id on screen. */
     const exitWithSave = useCallback(() => {
         if (exitingRef.current)
@@ -1684,6 +1705,12 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 setPicker('variant');
                 setPickerIndex(Math.max(0, VARIANTS.findIndex((item) => item.id === variantId)));
                 return true;
+            case '/theme':
+                setHelpMessage(null);
+                setSettingsIndex(null);
+                setPicker('theme');
+                setPickerIndex(Math.max(0, THEME_NAMES.indexOf(settings.theme ?? 'black')));
+                return true;
             case '/settings':
                 setHelpMessage(null);
                 setSettingsIndex(0);
@@ -1728,7 +1755,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 setError(null);
                 try {
                     const result = await handleToolCall('undo', {}, { sessionId: session?.id });
-                    addToolResultView(addStatic, 'undo', {}, result);
+                    addToolResultView(addStatic, 'undo', {}, result, theme);
                 }
                 catch (err) {
                     setError(`Undo failed: ${err?.message ?? String(err)}`);
@@ -1748,6 +1775,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         allModelItems,
         providerItems,
         variantId,
+        settings,
         effectiveApprovalMode,
         loadModels,
         startNewSession,
@@ -1757,8 +1785,24 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         session?.id,
         addStatic,
         showToast,
+        theme,
     ]);
+    // Shared save path for both entry points (settings row and /theme).
+    const applyTheme = useCallback((name) => {
+        const next = { ...settings, theme: name };
+        setSettings(next);
+        saveSettings(next);
+        showToast(`Theme: ${name}`);
+        setPicker(null);
+        setSettingsIndex(null);
+    }, [settings, setSettings, showToast]);
     const applyPicker = useCallback(() => {
+        if (picker === 'theme') {
+            const name = THEME_NAMES[clampIndex(pickerIndex, THEME_NAMES.length)];
+            if (name)
+                applyTheme(name);
+            return;
+        }
         if (picker === 'statusLine') {
             const id = STATUS_LINE_ITEMS[clampIndex(pickerIndex, STATUS_LINE_ITEMS.length)];
             if (id) {
@@ -1871,6 +1915,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         config,
         pendingProviderId,
         settings,
+        applyTheme,
         sessionItems,
         beginProviderSwitch,
         persistActiveSelection,
@@ -1950,7 +1995,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         const nextMessages = imageMessage
             ? [...completionMessages, userMessage, imageMessage]
             : [...completionMessages, userMessage];
-        printMessageToScrollback(addStatic, 'user', trimmed);
+        printMessageToScrollback(addStatic, 'user', trimmed, theme);
         setCompletionMessages((prev) => imageMessage ? [...prev, userMessage, imageMessage] : [...prev, userMessage]);
         lastSubmitRef.current = trimmed;
         // Reset assistant message tracker (streamed indices were reset above)
@@ -2004,7 +2049,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 setLoading(false);
             }
         }
-    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand]);
+    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme]);
     // Any command path can reject; never let that become an unhandled rejection
     // that kills the TUI after a turn.
     const submitSafely = useCallback(async (value, force = false, keepInput = false) => {
@@ -2051,7 +2096,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         : streamingIsDiff
             ? Math.min(maxStreamRows, 10) + 4
             : liveStreamTextRows + (dense ? 0 : 1);
-    const liveStreamNode = !isStreaming ? null : streamingIsDiff ? (_jsx(DiffView, { header: "Streaming diff", diff: clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns), maxRows: Math.max(2, maxStreamRows - 3) })) : (_jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, liveStreamWidth), liveStreamWidth), _jsx(Text, { dimColor: true, children: "\u258D" })] }) }));
+    const liveStreamNode = !isStreaming ? null : streamingIsDiff ? (_jsx(DiffView, { header: "Streaming diff", diff: clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns), maxRows: Math.max(2, maxStreamRows - 3) })) : (_jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, liveStreamWidth), liveStreamWidth, theme), _jsx(Text, { dimColor: true, children: "\u258D" })] }) }));
     // Live rows join the flow only for the normal transcript. /find keeps its
     // result set to saved messages so a moving stream cannot change the matches.
     const liveItems = [];
@@ -2230,15 +2275,24 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     return;
                 }
             }
+            // The theme picker also accepts 1-5 as a direct pick.
+            if (picker === 'theme' && /^[1-5]$/.test(input)) {
+                const name = THEME_NAMES[Number(input) - 1];
+                if (name)
+                    applyTheme(name);
+                return;
+            }
             const count = picker === 'provider'
                 ? providerItems.length
                 : picker === 'model'
                     ? modelItems.length
                     : picker === 'session'
                         ? sessionItems.length
-                        : picker === 'statusLine'
-                            ? STATUS_LINE_ITEMS.length
-                            : variantItems.length;
+                        : picker === 'theme'
+                            ? THEME_NAMES.length
+                            : picker === 'statusLine'
+                                ? STATUS_LINE_ITEMS.length
+                                : variantItems.length;
             if (count > 0) {
                 if (key.upArrow) {
                     setPickerIndex((index) => (index - 1 + count) % count);
@@ -2577,7 +2631,7 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             : undefined, hint: "\u2191\u2193 pick \u00B7 tab to type \u00B7 enter send \u00B7 esc skip", columns: columns, compact: compactDialog, children: _jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onRespond: (response) => {
                 pendingAsk.resolve(response);
                 setPendingAsk(null);
-            } }) })) : keyPrompt ? (_jsx(Dialog, { title: "API key", badge: keyPrompt.providerName, hint: keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel', columns: columns, compact: compactDialog, children: _jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onSubmit: (value) => { void handleApiKeySubmit(value); } }) })) : settingsIndex !== null ? (_jsx(Dialog, { title: "Settings", badge: `${settingsIndex + 1}/${settingItems.length}`, hint: "\u2191\u2193 move \u00B7 enter toggle \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'model' ? (_jsxs(Dialog, { title: "Select model", badge: modelProvider ? modelProvider.name : undefined, hint: "type to search \u00B7 \u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, children: "search  " }), _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: theme.text, wrap: "truncate-end", children: [modelSearch, _jsx(Text, { inverse: true, children: ' ' })] }) }), _jsx(Text, { color: theme.dim, children: `  ${modelItems.length}` })] }), (modelsLoading || modelNotice) && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
+            } }) })) : keyPrompt ? (_jsx(Dialog, { title: "API key", badge: keyPrompt.providerName, hint: keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel', columns: columns, compact: compactDialog, children: _jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onSubmit: (value) => { void handleApiKeySubmit(value); } }) })) : settingsIndex !== null ? (_jsx(Dialog, { title: "Settings", badge: `${settingsIndex + 1}/${settingItems.length}`, hint: "\u2191\u2193 move \u00B7 enter toggle/open \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'theme' ? (_jsx(Dialog, { title: "Theme", accentGlyph: "\u25C8", borderStyle: "square", badge: `${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 1-5 pick \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: themeItems, selected: clampIndex(pickerIndex, themeItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'model' ? (_jsxs(Dialog, { title: "Select model", badge: modelProvider ? modelProvider.name : undefined, hint: "type to search \u00B7 \u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, children: "search  " }), _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: theme.text, wrap: "truncate-end", children: [modelSearch, _jsx(Text, { inverse: true, children: ' ' })] }) }), _jsx(Text, { color: theme.dim, children: `  ${modelItems.length}` })] }), (modelsLoading || modelNotice) && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
                     ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
                     : modelNotice })), _jsx(DialogList, { items: modelItems, selected: selectedModelIndex, maxVisible: paletteWindow, empty: modelEmptyMessage, compact: compactDialog })] })) : picker === 'provider' ? (_jsx(Dialog, { title: "Select provider", badge: `${providerItems.length} available`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: providerItems, selected: clampIndex(pickerIndex, providerItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'session' ? (_jsx(Dialog, { title: pendingSessionDelete ? 'Delete session?' : 'Select session', badge: pendingSessionDelete?.label, hint: pendingSessionDelete
             ? 'y delete permanently · n cancel'
@@ -2596,4 +2650,13 @@ export const App = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                                     // bottom off-screen. The wrapper is registered for clicks so
                                     // the yoga lookup still sees the clipped geometry.
                                     _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && !dialogActive && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && !dialogActive && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense, segments: settings.statusLine ?? STATUS_LINE_ITEMS }))] }));
+};
+/**
+ * Owns the UI settings so the selected palette can be published to the whole
+ * tree. Cycling the Theme row calls setSettings, which updates `name` here and
+ * makes ThemeProvider hand every consumer a fresh, immutable palette.
+ */
+export const App = (props) => {
+    const [settings, setSettings] = useState(loadSettings);
+    return (_jsx(ThemeProvider, { name: settings.theme, children: _jsx(AppContent, { ...props, settings: settings, setSettings: setSettings }) }));
 };

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { formatDuration } from '../utils/duration.js';
 
 export interface ThinkingBlockProps {
@@ -114,6 +114,7 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   rows,
   elapsedMs = 0,
 }) => {
+  const theme = useTheme();
   const hasText = text.trim().length > 0;
   // No provider reasoning means nothing to show. Rendering an empty header
   // here would claim the model is thinking when it sent no reasoning at all.

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 
 /**
  * Floating dialog chrome.
@@ -22,6 +22,10 @@ export interface DialogProps {
   columns: number;
   /** Short terminals drop borders and rules so every option still fits. */
   compact?: boolean;
+  /** Optional accent glyph rendered just before the title. */
+  accentGlyph?: string;
+  /** Card corner style: rounded (default) or square. Ignored when compact. */
+  borderStyle?: 'round' | 'square';
   children: React.ReactNode;
 }
 
@@ -45,7 +49,18 @@ export function dialogInnerWidth(columns: number): number {
 
 const rule = (columns: number): string => '─'.repeat(Math.max(1, dialogWidth(columns) - 2));
 
-export const Dialog: React.FC<DialogProps> = ({ title, badge, hint, columns, compact = false, children }) => {
+export const Dialog: React.FC<DialogProps> = ({
+  title,
+  badge,
+  hint,
+  columns,
+  compact = false,
+  accentGlyph,
+  borderStyle = 'round',
+  children,
+}) => {
+  const theme = useTheme();
+  const heading = accentGlyph ? `${accentGlyph} ${title}` : title;
   const width = dialogWidth(columns);
   const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
 
@@ -55,7 +70,7 @@ export const Dialog: React.FC<DialogProps> = ({ title, badge, hint, columns, com
         <Box flexDirection="row" overflow="hidden">
           <Box flexShrink={1} minWidth={1}>
             <Text color={theme.accent} bold wrap="truncate-end">
-              {title}
+              {heading}
             </Text>
           </Box>
         </Box>
@@ -71,7 +86,7 @@ export const Dialog: React.FC<DialogProps> = ({ title, badge, hint, columns, com
       width={width}
       flexShrink={0}
       overflow="hidden"
-      borderStyle="round"
+      borderStyle={borderStyle === 'square' ? 'single' : 'round'}
       borderColor={theme.border}
       backgroundColor={theme.surface}
       paddingX={1}
@@ -79,7 +94,7 @@ export const Dialog: React.FC<DialogProps> = ({ title, badge, hint, columns, com
       <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
         <Box flexShrink={1} minWidth={1}>
           <Text color={theme.accent} bold wrap="truncate-end">
-            {title}
+            {heading}
           </Text>
         </Box>
         {badge ? (
@@ -108,6 +123,8 @@ export interface DialogItem {
   meta?: string;
   color?: string;
   bold?: boolean;
+  /** Optional palette preview: an accent glyph painted on that palette's bg. */
+  swatch?: { accent: string; bg: string };
   /** Optional group heading rendered when the group changes. */
   section?: string;
 }
@@ -139,6 +156,7 @@ export const DialogList: React.FC<DialogListProps> = ({
   empty = 'Nothing to show.',
   compact = false,
 }) => {
+  const theme = useTheme();
   if (items.length === 0) {
     return <Text color={theme.muted} wrap="truncate-end">{empty}</Text>;
   }
@@ -161,6 +179,11 @@ export const DialogList: React.FC<DialogListProps> = ({
             ) : null}
             <Box flexDirection="row" overflow="hidden">
               <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
+              {item.swatch ? (
+                <Box flexShrink={0} marginRight={1}>
+                  <Text color={item.swatch.accent} backgroundColor={item.swatch.bg}>■</Text>
+                </Box>
+              ) : null}
               <Box flexGrow={1} flexShrink={1} minWidth={1}>
                 <Text
                   color={item.color ?? (active ? theme.text : theme.muted)}

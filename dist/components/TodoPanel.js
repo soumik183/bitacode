@@ -1,17 +1,18 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 const STATUS_ICON = {
     completed: '✓',
     in_progress: '◐',
     pending: '○',
     cancelled: '✕',
 };
-const STATUS_COLOR = {
-    completed: theme.success,
-    in_progress: theme.info,
-    pending: theme.dim,
-    cancelled: theme.dim,
+/** Status → semantic palette key, resolved from the active palette at render. */
+const STATUS_COLOR_KEY = {
+    completed: 'success',
+    in_progress: 'info',
+    pending: 'dim',
+    cancelled: 'dim',
 };
 /** Collapse whitespace and trim, without losing the end of long items. */
 function oneLine(text) {
@@ -57,6 +58,7 @@ export function visibleTodoWindow(todos, maxVisible) {
  * and the progress bar move in real time.
  */
 export const TodoPanel = ({ todos, columns, maxVisible = 5 }) => {
+    const theme = useTheme();
     if (todos.length === 0)
         return null;
     const total = todos.length;
@@ -75,7 +77,7 @@ export const TodoPanel = ({ todos, columns, maxVisible = 5 }) => {
     const contentWidth = Math.max(1, safeColumns - 4 - reserved);
     return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.text, bold: true, children: "Tasks" }), _jsx(Text, { color: theme.dim, children: `  ${done}/${total} done  ` }), _jsx(Text, { color: theme.success, children: '▰'.repeat(filled) }), _jsx(Text, { color: theme.border, children: '▱'.repeat(barWidth - filled) })] }), hiddenAbove > 0 && (_jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` })), visible.map((todo, index) => {
                 const dimmed = todo.status === 'completed' || todo.status === 'cancelled';
-                return (_jsxs(Box, { children: [_jsx(Text, { color: STATUS_COLOR[todo.status], children: `${STATUS_ICON[todo.status]} ` }), _jsx(Text, { color: dimmed
+                return (_jsxs(Box, { children: [_jsx(Text, { color: theme[STATUS_COLOR_KEY[todo.status]], children: `${STATUS_ICON[todo.status]} ` }), _jsx(Text, { color: dimmed
                                 ? theme.dim
                                 : todo.status === 'in_progress'
                                     ? theme.text

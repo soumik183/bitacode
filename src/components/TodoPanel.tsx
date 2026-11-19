@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme, type Theme } from '../theme.js';
 import type { TodoItem } from '../tools/todo.js';
 
 export interface TodoPanelProps {
@@ -16,11 +16,12 @@ const STATUS_ICON: Record<TodoItem['status'], string> = {
   cancelled: '✕',
 };
 
-const STATUS_COLOR: Record<TodoItem['status'], string> = {
-  completed: theme.success,
-  in_progress: theme.info,
-  pending: theme.dim,
-  cancelled: theme.dim,
+/** Status → semantic palette key, resolved from the active palette at render. */
+const STATUS_COLOR_KEY: Record<TodoItem['status'], keyof Theme> = {
+  completed: 'success',
+  in_progress: 'info',
+  pending: 'dim',
+  cancelled: 'dim',
 };
 
 /** Collapse whitespace and trim, without losing the end of long items. */
@@ -71,6 +72,7 @@ export function visibleTodoWindow(
  * and the progress bar move in real time.
  */
 export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible = 5 }) => {
+  const theme = useTheme();
   if (todos.length === 0) return null;
 
   const total = todos.length;
@@ -108,7 +110,7 @@ export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible
         const dimmed = todo.status === 'completed' || todo.status === 'cancelled';
         return (
           <Box key={`${todo.id}-${start + index}`}>
-            <Text color={STATUS_COLOR[todo.status]}>{`${STATUS_ICON[todo.status]} `}</Text>
+            <Text color={theme[STATUS_COLOR_KEY[todo.status]]}>{`${STATUS_ICON[todo.status]} `}</Text>
             <Text
               color={
                 dimmed

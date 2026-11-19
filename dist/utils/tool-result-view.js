@@ -4,7 +4,7 @@ import { CodeBlock } from '../components/CodeBlock.js';
 import { DiffView } from '../components/DiffView.js';
 import { ReadFileView } from '../components/ReadFileView.js';
 import { ShellView } from '../components/ShellView.js';
-import { theme } from '../theme.js';
+import { getTheme } from '../theme.js';
 import { detectLanguage } from './code-highlight.js';
 import { displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
 import { parseShellResult } from './shell-result.js';
@@ -57,19 +57,19 @@ function toolCodeLanguage(args, result) {
  * get a bounded highlighted box; everything else keeps the compact one-line
  * activity row.
  */
-export function addToolResultView(addStatic, toolName, toolArgs, rawResult) {
+export function addToolResultView(addStatic, toolName, toolArgs, rawResult, palette = getTheme()) {
     // Notifications and progress reports get dedicated, colorful cards instead
     // of being flattened into a generic one-line activity row.
     if (isNotification(rawResult)) {
         const message = rawResult.replace(/^NOTIFY:\s*/i, '');
-        addStatic(_jsxs(Box, { paddingX: 2, marginBottom: 1, children: [_jsx(Text, { color: theme.info, bold: true, children: "\uD83D\uDD14 " }), _jsx(Text, { color: theme.text, children: message })] }));
+        addStatic(_jsxs(Box, { paddingX: 2, marginBottom: 1, children: [_jsx(Text, { color: palette.info, bold: true, children: "\uD83D\uDD14 " }), _jsx(Text, { color: palette.text, children: message })] }));
         return;
     }
     const progressInfo = parseProgress(rawResult);
     if (progressInfo) {
         const filled = Math.round((progressInfo.percent / 100) * 10);
         const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
-        addStatic(_jsxs(Box, { paddingX: 2, marginBottom: 1, children: [_jsx(Text, { color: theme.accent, bold: true, children: `⏵ ${bar} ${progressInfo.percent}%` }), progressInfo.label ? _jsxs(Text, { color: theme.muted, children: [" ", progressInfo.label] }) : null] }));
+        addStatic(_jsxs(Box, { paddingX: 2, marginBottom: 1, children: [_jsx(Text, { color: palette.accent, bold: true, children: `⏵ ${bar} ${progressInfo.percent}%` }), progressInfo.label ? _jsxs(Text, { color: palette.muted, children: [" ", progressInfo.label] }) : null] }));
         return;
     }
     const fileDiff = parseFileMutationDiff(toolName, toolArgs, rawResult);
@@ -98,5 +98,5 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult) {
     const toolDisplay = parsedArgs ? formatToolActivity(toolName, parsedArgs) : toolName;
     const compactResult = rawResult.replace(/\s+/g, ' ').trim().slice(0, 180);
     const isError = /^(Error\b|File not found\b|Operation cancelled\b)/i.test(rawResult.trim());
-    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? theme.error : undefined, dimColor: !isError, children: ['▶ ', toolDisplay, ': ', compactResult] }) }));
+    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? palette.error : undefined, dimColor: !isError, children: ['▶ ', toolDisplay, ': ', compactResult] }) }));
 }

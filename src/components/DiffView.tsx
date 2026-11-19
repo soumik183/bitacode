@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
+import type { Theme } from '../theme.js';
 import { annotateDiff, displayFilePath, type DiffLine } from '../utils/file-diff.js';
 import { detectLanguage, safeHighlight, type HighlightLanguage } from '../utils/code-highlight.js';
 import { TokenText } from './CodeBlock.js';
@@ -18,12 +19,12 @@ export interface DiffViewProps {
 
 const MAX_VISIBLE_LINES = 24;
 
-function lineColor(line: DiffLine): string {
-  if (line.kind === 'add') return theme.success;
-  if (line.kind === 'remove') return theme.error;
-  if (line.kind === 'context') return theme.muted;
-  if (line.kind === 'hunk') return theme.info;
-  return theme.dim;
+function lineColor(line: DiffLine, palette: Theme): string {
+  if (line.kind === 'add') return palette.success;
+  if (line.kind === 'remove') return palette.error;
+  if (line.kind === 'context') return palette.muted;
+  if (line.kind === 'hunk') return palette.info;
+  return palette.dim;
 }
 
 /**
@@ -31,6 +32,7 @@ function lineColor(line: DiffLine): string {
  * Green additions, red removals and file line numbers in a bordered card.
  */
 export const DiffView: React.FC<DiffViewProps> = ({ header, diff, filePath, operation, language: languageOverride, maxRows }) => {
+  const theme = useTheme();
   const lines = annotateDiff(diff);
   const additions = lines.filter((line) => line.kind === 'add').length;
   const removals = lines.filter((line) => line.kind === 'remove').length;
@@ -41,8 +43,8 @@ export const DiffView: React.FC<DiffViewProps> = ({ header, diff, filePath, oper
   // Highlight once per diff, not per render. Syntax colours sit on top of the
   // green/red line tint: uncoloured tokens inherit `baseColor` below.
   const tokens = React.useMemo(
-    () => shown.map((line) => safeHighlight(line.text, language)[0] ?? [{ text: line.text }]),
-    [diff, language]
+    () => shown.map((line) => safeHighlight(line.text, language, { palette: theme })[0] ?? [{ text: line.text }]),
+    [diff, language, theme]
   );
   const gutter = Math.max(2, ...shown.map((line) => (line.number == null ? 0 : String(line.number).length)));
   const summary = header
@@ -68,7 +70,7 @@ export const DiffView: React.FC<DiffViewProps> = ({ header, diff, filePath, oper
       </Text>
 
       {shown.map((line, index) => {
-        const color = lineColor(line);
+        const color = lineColor(line, theme);
         if (line.kind === 'hunk') {
           return (
             <Text key={index} color={color} wrap="truncate-end">

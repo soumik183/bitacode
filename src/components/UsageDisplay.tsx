@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { STATUS_LINE_ITEMS, type StatusLineItem } from '../settings.js';
 
 export interface UsageDisplayProps {
@@ -45,6 +45,7 @@ function wave(frame: number): string {
 
 /** A moving highlight sweeps across the label, like a thinking indicator. */
 const Shimmer: React.FC<{ text: string; frame: number }> = ({ text, frame }) => {
+  const theme = useTheme();
   const span = text.length + 8;
   const head = frame % span;
   return (
@@ -81,6 +82,7 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   dense = false,
   segments = STATUS_LINE_ITEMS,
 }) => {
+  const theme = useTheme();
   const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
   const show = (segment: StatusLineItem) => segments.includes(segment);
   // One combined row per side keeps the footer a single line; a segment is

@@ -2,7 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { useState } from 'react';
 import { Text, useInput } from 'ink';
 import { stripMouseReports } from '../utils/mouse.js';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 // Display columns without a dependency: CJK/emoji take two, combining/zero-width take none.
 const WIDE = /[\u{1100}-\u{115F}\u{2329}-\u{232A}\u{2E80}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE10}-\u{FE19}\u{FE30}-\u{FE6F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
 const ZERO = /[\u0300-\u036F\u200B-\u200F\uFEFF]/;
@@ -14,6 +14,7 @@ const charWidth = (ch) => ZERO.test(ch) || ch === '\uFE0F' ? 0 : WIDE.test(ch) ?
  * get inserted as text, and so the cursor is drawn in our own palette.
  */
 export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDisabled = false, mask = false, width, }) => {
+    const theme = useTheme();
     // Cursor is a code-point index, not a UTF-16 offset: arrows and backspace
     // must land on whole glyphs (emoji are two UTF-16 units, CJK are two columns).
     const points = Array.from(value);

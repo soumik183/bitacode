@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { formatDuration } from '../utils/duration.js';
 
 export interface ThinkingArchiveProps {
@@ -37,6 +37,7 @@ export const ThinkingArchive: React.FC<ThinkingArchiveProps> = ({
   columns,
   expanded = false,
 }) => {
+  const theme = useTheme();
   const reasoning = text.trim();
   if (!reasoning) return null;
 

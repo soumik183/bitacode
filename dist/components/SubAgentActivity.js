@@ -1,6 +1,6 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
-import { theme } from '../theme.js';
+import { useTheme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
 export const SUB_AGENT_MAX_VISIBLE = 3;
 const STATUS_ICON = {
@@ -8,10 +8,11 @@ const STATUS_ICON = {
     done: '✓',
     error: '✗',
 };
-const STATUS_COLOR = {
-    start: theme.info,
-    done: theme.success,
-    error: theme.error,
+/** Status → semantic palette key, resolved from the active palette at render. */
+const STATUS_COLOR_KEY = {
+    start: 'info',
+    done: 'success',
+    error: 'error',
 };
 /** Upsert one child's state from a synthetic sub_agent_iteration event. */
 export function upsertSubAgentActivity(list, event, now = Date.now()) {
@@ -83,6 +84,7 @@ function elapsed(item, now) {
     return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 export const SubAgentActivity = ({ activities, columns, now }) => {
+    const theme = useTheme();
     if (activities.length === 0)
         return null;
     const visible = activities.slice(-SUB_AGENT_MAX_VISIBLE);
@@ -90,5 +92,5 @@ export const SubAgentActivity = ({ activities, columns, now }) => {
     const labelWidth = 10;
     const tailWidth = 18; // "  N tools · 1.2s"
     const taskWidth = Math.max(1, columns - 6 - labelWidth - tailWidth);
-    return (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.muted, bold: true, children: "Sub-agents" }), visible.map((item) => (_jsxs(Box, { flexDirection: "row", children: [_jsx(Text, { color: STATUS_COLOR[item.status], children: `${STATUS_ICON[item.status]} ` }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${shortId(item.id)} ` }), _jsx(Text, { color: theme.text, wrap: "truncate-end", children: truncate(item.task, taskWidth) }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}` })] }, item.id)))] }) }) }));
+    return (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.muted, bold: true, children: "Sub-agents" }), visible.map((item) => (_jsxs(Box, { flexDirection: "row", children: [_jsx(Text, { color: theme[STATUS_COLOR_KEY[item.status]], children: `${STATUS_ICON[item.status]} ` }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${shortId(item.id)} ` }), _jsx(Text, { color: theme.text, wrap: "truncate-end", children: truncate(item.task, taskWidth) }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}` })] }, item.id)))] }) }) }));
 };

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Text } from 'ink';
-import { theme } from '../theme.js';
+import { getTheme } from '../theme.js';
+import type { Theme } from '../theme.js';
 import { safeHighlight, type HighlightToken } from '../utils/code-highlight.js';
 
 /**
@@ -41,32 +42,38 @@ const MAX_TABLE_CELL_CHARS = 120;
 const MAX_TABLE_OUTPUT_ROWS = 20;
 
 /**
- * Semantic palette. Kept local (theme.ts is intentionally untouched) so the
- * meaning of each colour is fixed and consistent across every construct.
- * Cool blue -> accent -> info -> success -> muted for headings; yellow for
- * list markers/tasks; green for completed; red/orange for errors/warnings;
- * blue+underline for links; dim for separators.
+ * Two legacy syntax colours are intentionally theme-independent (they are not
+ * part of the 15-key Theme type): yellow for list markers/tasks and orange for
+ * warnings. Everything else is derived from the active palette below.
  */
-const COLOR = {
-  marker: '#facc15', // yellow: list markers + unchecked tasks
-  success: theme.success, // green: completed tasks, success semantics
-  error: theme.error, // red: errors
-  warning: '#fb923c', // orange: warnings
-  link: theme.accent, // blue
-  code: theme.success, // green, matches the existing inline-code card
-  quoteBar: theme.accent,
-  divider: theme.dim,
-  tableHeader: theme.accent,
-} as const;
+const MARKER = '#facc15';
+const WARNING = '#fb923c';
 
-const HEADING_COLORS: string[] = [
-  theme.accent, // h1: cool blue
-  theme.info, // h2: info blue
-  theme.success, // h3: success green
-  theme.muted, // h4 and deeper: recede
-  theme.muted,
-  theme.muted,
-];
+/** Colours and styles derived once per render from the caller's palette. */
+interface RenderCtx {
+  palette: Theme;
+  marker: string;
+  /** h1 → h3 use accent/info/success, h4+ recede to muted. */
+  heading: string[];
+  callout: Record<string, string>;
+}
+
+function ctxFor(palette: Theme): RenderCtx {
+  return {
+    palette,
+    marker: MARKER,
+    heading: [palette.accent, palette.info, palette.success, palette.muted, palette.muted, palette.muted],
+    callout: {
+      ERROR: palette.error,
+      WARNING,
+      WARN: WARNING,
+      TIP: palette.success,
+      NOTE: palette.info,
+      TODO: MARKER,
+      FIXME: palette.error,
+    },
+  };
+}
 
 // Inline alternatives are ordered most-specific first so *** wins over ** over *.
 const INLINE_PATTERN =
@@ -81,34 +88,34 @@ const TASK = /^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)$/;
 const UNORDERED = /^(\s*)([-*+])\s+(.*)$/;
 const ORDERED = /^(\s*)(\d+\.)\s+(.*)$/;
 const CALLOUT = /^\s*(ERROR|WARNING|WARN|TIP|NOTE|TODO|FIXME)\s*:\s*(.*)$/i;
-const CALLOUT_COLOR: Record<string, string> = {
-  ERROR: COLOR.error,
-  WARNING: COLOR.warning,
-  WARN: COLOR.warning,
-  TIP: COLOR.success,
-  NOTE: theme.info,
-  TODO: COLOR.marker,
-  FIXME: COLOR.error,
-};
 
-/** Small bounded memo so repeated frames do not re-tokenize identical code. */
-const HIGHLIGHT_CACHE = new Map<string, HighlightToken[][]>();
+/**
+ * Bounded memo so repeated frames do not re-tokenize identical code. Cached
+ * tokens carry palette colours, so the memo is keyed by palette object rather
+ * than shared across themes (a theme switch repaints correctly).
+ */
+const HIGHLIGHT_CACHE = new WeakMap<Theme, Map<string, HighlightToken[][]>>();
 const HIGHLIGHT_CACHE_MAX = 256;
 const HIGHLIGHT_CACHE_ITEM_MAX = 2000;
 
-function cachedHighlight(code: string, language: string, maxChars: number): HighlightToken[][] {
+function cachedHighlight(code: string, language: string, maxChars: number, palette: Theme): HighlightToken[][] {
   if (code.length > HIGHLIGHT_CACHE_ITEM_MAX) {
-    return safeHighlight(code, language, { maxChars });
+    return safeHighlight(code, language, { maxChars, palette });
+  }
+  let byCode = HIGHLIGHT_CACHE.get(palette);
+  if (!byCode) {
+    byCode = new Map();
+    HIGHLIGHT_CACHE.set(palette, byCode);
   }
   const key = `${language}\u0000${maxChars}\u0000${code}`;
-  const hit = HIGHLIGHT_CACHE.get(key);
+  const hit = byCode.get(key);
   if (hit) return hit;
-  const tokens = safeHighlight(code, language, { maxChars });
-  if (HIGHLIGHT_CACHE.size >= HIGHLIGHT_CACHE_MAX) {
-    const oldest = HIGHLIGHT_CACHE.keys().next().value;
-    if (oldest !== undefined) HIGHLIGHT_CACHE.delete(oldest);
+  const tokens = safeHighlight(code, language, { maxChars, palette });
+  if (byCode.size >= HIGHLIGHT_CACHE_MAX) {
+    const oldest = byCode.keys().next().value;
+    if (oldest !== undefined) byCode.delete(oldest);
   }
-  HIGHLIGHT_CACHE.set(key, tokens);
+  byCode.set(key, tokens);
   return tokens;
 }
 
@@ -120,29 +127,29 @@ function renderTokens(tokens: HighlightToken[], keyPrefix: string, baseColor?: s
   ));
 }
 
-function renderInlineCode(code: string, key: string): React.ReactNode {
-  const [tokens = []] = cachedHighlight(code, 'text', MAX_INLINE_CODE_CHARS);
+function renderInlineCode(code: string, key: string, ctx: RenderCtx): React.ReactNode {
+  const [tokens = []] = cachedHighlight(code, 'text', MAX_INLINE_CODE_CHARS, ctx.palette);
   return (
-    <Text key={key} backgroundColor={theme.surfaceAlt} color={COLOR.code}>
-      {renderTokens(tokens, key, COLOR.code)}
+    <Text key={key} backgroundColor={ctx.palette.surfaceAlt} color={ctx.palette.success}>
+      {renderTokens(tokens, key, ctx.palette.success)}
     </Text>
   );
 }
 
-function renderLink(raw: string, key: string): React.ReactNode {
+function renderLink(raw: string, key: string, ctx: RenderCtx): React.ReactNode {
   const match = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(raw);
   if (!match) {
     return <Text key={key}>{raw}</Text>;
   }
   return (
     <Text key={key}>
-      <Text color={COLOR.link} underline>{match[1]}</Text>
-      <Text color={theme.dim}>{` (${match[2]})`}</Text>
+      <Text color={ctx.palette.accent} underline>{match[1]}</Text>
+      <Text color={ctx.palette.dim}>{` (${match[2]})`}</Text>
     </Text>
   );
 }
 
-function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
+function renderInline(text: string, keyPrefix: string, ctx: RenderCtx): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let last = 0;
   INLINE_PATTERN.lastIndex = 0;
@@ -158,11 +165,11 @@ function renderInline(text: string, keyPrefix: string): React.ReactNode[] {
     }
     const key = `${keyPrefix}-i${match.index}`;
     if (match[1] !== undefined) {
-      nodes.push(renderInlineCode(match[1].slice(1, -1), key));
+      nodes.push(renderInlineCode(match[1].slice(1, -1), key, ctx));
     } else if (match[2] !== undefined) {
-      nodes.push(renderLink(match[2], key));
+      nodes.push(renderLink(match[2], key, ctx));
     } else if (match[3] !== undefined) {
-      nodes.push(<Text key={key} color={theme.info}>{match[3]}</Text>);
+      nodes.push(<Text key={key} color={ctx.palette.info}>{match[3]}</Text>);
     } else if (match[4] !== undefined) {
       nodes.push(<Text key={key} bold italic>{match[4].slice(3, -3)}</Text>);
     } else if (match[5] !== undefined) {
@@ -187,12 +194,12 @@ function indentFor(ws: string): string {
   return ' '.repeat(Math.min(width, MAX_LIST_DEPTH * 2));
 }
 
-function renderLine(line: string, key: string): React.ReactNode {
+function renderLine(line: string, key: string, ctx: RenderCtx): React.ReactNode {
   const heading = HEADING.exec(line);
   if (heading) {
     return (
-      <Text key={key} bold color={HEADING_COLORS[heading[1].length - 1]}>
-        {renderInline(heading[2], key)}
+      <Text key={key} bold color={ctx.heading[heading[1].length - 1]}>
+        {renderInline(heading[2], key, ctx)}
       </Text>
     );
   }
@@ -203,9 +210,9 @@ function renderLine(line: string, key: string): React.ReactNode {
     return (
       <Text key={key}>
         {Array.from({ length: bars }, (_, i) => (
-          <Text key={`${key}-b${i}`} color={COLOR.quoteBar}>│ </Text>
+          <Text key={`${key}-b${i}`} color={ctx.palette.accent}>│ </Text>
         ))}
-        <Text color={theme.muted} italic>{renderInline(quote[3], key)}</Text>
+        <Text color={ctx.palette.muted} italic>{renderInline(quote[3], key, ctx)}</Text>
       </Text>
     );
   }
@@ -215,9 +222,9 @@ function renderLine(line: string, key: string): React.ReactNode {
     const done = task[3] === 'x' || task[3] === 'X';
     return (
       <Text key={key}>
-        <Text color={theme.muted}>{indentFor(task[1])}</Text>
-        <Text color={done ? COLOR.success : COLOR.marker} bold>{done ? '☑ ' : '☐ '}</Text>
-        <Text>{renderInline(task[4], key)}</Text>
+        <Text color={ctx.palette.muted}>{indentFor(task[1])}</Text>
+        <Text color={done ? ctx.palette.success : ctx.marker} bold>{done ? '☑ ' : '☐ '}</Text>
+        <Text>{renderInline(task[4], key, ctx)}</Text>
       </Text>
     );
   }
@@ -226,9 +233,9 @@ function renderLine(line: string, key: string): React.ReactNode {
   if (unordered) {
     return (
       <Text key={key}>
-        <Text color={theme.muted}>{indentFor(unordered[1])}</Text>
-        <Text color={COLOR.marker} bold>{'• '}</Text>
-        <Text>{renderInline(unordered[3], key)}</Text>
+        <Text color={ctx.palette.muted}>{indentFor(unordered[1])}</Text>
+        <Text color={ctx.marker} bold>{'• '}</Text>
+        <Text>{renderInline(unordered[3], key, ctx)}</Text>
       </Text>
     );
   }
@@ -237,49 +244,49 @@ function renderLine(line: string, key: string): React.ReactNode {
   if (ordered) {
     return (
       <Text key={key}>
-        <Text color={theme.muted}>{indentFor(ordered[1])}</Text>
-        <Text color={COLOR.marker} bold>{ordered[2] + ' '}</Text>
-        <Text>{renderInline(ordered[3], key)}</Text>
+        <Text color={ctx.palette.muted}>{indentFor(ordered[1])}</Text>
+        <Text color={ctx.marker} bold>{ordered[2] + ' '}</Text>
+        <Text>{renderInline(ordered[3], key, ctx)}</Text>
       </Text>
     );
   }
 
   const callout = CALLOUT.exec(line);
   if (callout) {
-    const color = CALLOUT_COLOR[callout[1].toUpperCase()] ?? theme.info;
+    const color = ctx.callout[callout[1].toUpperCase()] ?? ctx.palette.info;
     return (
       <Text key={key}>
         <Text color={color} bold>{`${callout[1]}: `}</Text>
-        <Text>{renderInline(callout[2], key)}</Text>
+        <Text>{renderInline(callout[2], key, ctx)}</Text>
       </Text>
     );
   }
 
-  return <Text key={key}>{renderInline(line, key)}</Text>;
+  return <Text key={key}>{renderInline(line, key, ctx)}</Text>;
 }
 
 /** A horizontal rule becomes one dim divider row. */
-function renderHorizontalRule(line: string, key: string): React.ReactNode {
+function renderHorizontalRule(line: string, key: string, ctx: RenderCtx): React.ReactNode {
   const width = Math.min(40, Math.max(3, line.trim().length));
-  return <Text key={key} color={COLOR.divider}>{'─'.repeat(width)}</Text>;
+  return <Text key={key} color={ctx.palette.dim}>{'─'.repeat(width)}</Text>;
 }
 
 /** Highlight a fenced block with a hard row budget so it cannot grow the frame. */
-function renderFenced(codeLines: string[], language: string, keyPrefix: string): React.ReactNode[] {
+function renderFenced(codeLines: string[], language: string, keyPrefix: string, ctx: RenderCtx): React.ReactNode[] {
   const shown = codeLines.slice(0, MAX_CODE_ROWS);
   const hidden = codeLines.length - shown.length;
-  const tokenRows = cachedHighlight(shown.join('\n'), language, MAX_RENDER_CHARS);
+  const tokenRows = cachedHighlight(shown.join('\n'), language, MAX_RENDER_CHARS, ctx.palette);
 
   const nodes: React.ReactNode[] = tokenRows.map((tokens, index) => (
     <Text key={`${keyPrefix}-c${index}`}>
-      <Text color={theme.dim}>  </Text>
-      {renderTokens(tokens, `${keyPrefix}-c${index}`, theme.text)}
+      <Text color={ctx.palette.dim}>  </Text>
+      {renderTokens(tokens, `${keyPrefix}-c${index}`, ctx.palette.text)}
     </Text>
   ));
 
   if (hidden > 0) {
     nodes.push(
-      <Text key={`${keyPrefix}-more`} color={theme.dim}>
+      <Text key={`${keyPrefix}-more`} color={ctx.palette.dim}>
         {`  … ${hidden} more line${hidden === 1 ? '' : 's'}`}
       </Text>
     );
@@ -421,7 +428,8 @@ function renderTableCell(
   width: number,
   align: Align,
   key: string,
-  isHeader: boolean
+  isHeader: boolean,
+  ctx: RenderCtx
 ): React.ReactNode {
   // Inline markdown is rendered on the original cell; <br> degrades to a space.
   const content = raw.replace(/<br\s*\/?>/gi, ' ');
@@ -441,11 +449,11 @@ function renderTableCell(
   } else {
     padRight = missing;
   }
-  const style = isHeader ? { bold: true, color: COLOR.tableHeader } : {};
+  const style = isHeader ? { bold: true, color: ctx.palette.accent } : {};
   return (
     <Text key={key} {...style}>
       {padLeft > 0 ? ' '.repeat(padLeft) : null}
-      {renderInline(limited, key)}
+      {renderInline(limited, key, ctx)}
       {padRight > 0 ? ' '.repeat(padRight) : null}
     </Text>
   );
@@ -457,25 +465,26 @@ function renderTableRow(
   widths: number[],
   aligns: Align[],
   key: string,
-  isHeader: boolean
+  isHeader: boolean,
+  ctx: RenderCtx
 ): React.ReactNode {
-  const parts: React.ReactNode[] = [<Text key={`${key}-edge`} color={theme.dim}>{'│ '}</Text>];
+  const parts: React.ReactNode[] = [<Text key={`${key}-edge`} color={ctx.palette.dim}>{'│ '}</Text>];
   for (let ci = 0; ci < colCount; ci++) {
     if (ci > 0) {
-      parts.push(<Text key={`${key}-sep${ci}`} color={theme.dim}>{' │ '}</Text>);
+      parts.push(<Text key={`${key}-sep${ci}`} color={ctx.palette.dim}>{' │ '}</Text>);
     }
-    parts.push(renderTableCell(row[ci] ?? '', widths[ci], aligns[ci], `${key}-c${ci}`, isHeader));
+    parts.push(renderTableCell(row[ci] ?? '', widths[ci], aligns[ci], `${key}-c${ci}`, isHeader, ctx));
   }
-  parts.push(<Text key={`${key}-end`} color={theme.dim}>{' │'}</Text>);
+  parts.push(<Text key={`${key}-end`} color={ctx.palette.dim}>{' │'}</Text>);
   return <Text key={key}>{parts}</Text>;
 }
 
-function renderTableDivider(widths: number[], key: string): React.ReactNode {
+function renderTableDivider(widths: number[], key: string, ctx: RenderCtx): React.ReactNode {
   const segments = widths.map((width) => '─'.repeat(Math.max(1, width + 2)));
-  return <Text key={key} color={COLOR.divider}>{`├${segments.join('┼')}┤`}</Text>;
+  return <Text key={key} color={ctx.palette.dim}>{`├${segments.join('┼')}┤`}</Text>;
 }
 
-function renderTable(table: TableHead, keyPrefix: string, columns = 0): React.ReactNode[] {
+function renderTable(table: TableHead, keyPrefix: string, columns = 0, ctx: RenderCtx): React.ReactNode[] {
   const colCount = Math.min(
     MAX_TABLE_COLS,
     Math.max(1, table.header.length, ...table.body.map((row) => row.length))
@@ -506,18 +515,18 @@ function renderTable(table: TableHead, keyPrefix: string, columns = 0): React.Re
   }
 
   const rows: React.ReactNode[] = [
-    renderTableRow(table.header, colCount, widths, table.aligns, `${keyPrefix}-head`, true),
-    renderTableDivider(widths, `${keyPrefix}-div`),
+    renderTableRow(table.header, colCount, widths, table.aligns, `${keyPrefix}-head`, true, ctx),
+    renderTableDivider(widths, `${keyPrefix}-div`, ctx),
   ];
 
   const shown = Math.min(table.body.length, MAX_TABLE_OUTPUT_ROWS - 3);
   for (let i = 0; i < shown; i++) {
-    rows.push(renderTableRow(table.body[i], colCount, widths, table.aligns, `${keyPrefix}-r${i}`, false));
+    rows.push(renderTableRow(table.body[i], colCount, widths, table.aligns, `${keyPrefix}-r${i}`, false, ctx));
   }
   const hidden = table.body.length - shown;
   if (hidden > 0) {
     rows.push(
-      <Text key={`${keyPrefix}-more`} color={theme.dim}>{`  … ${hidden} more row${hidden === 1 ? '' : 's'}`}</Text>
+      <Text key={`${keyPrefix}-more`} color={ctx.palette.dim}>{`  … ${hidden} more row${hidden === 1 ? '' : 's'}`}</Text>
     );
   }
   return rows;
@@ -527,7 +536,8 @@ function renderTable(table: TableHead, keyPrefix: string, columns = 0): React.Re
  * Render formatted text as Ink Text elements.
  * Returns an array of <Text> components that can be nested inside a parent <Text>.
  */
-export function renderFormattedText(text: string, columns = 0): React.ReactNode {
+export function renderFormattedText(text: string, columns = 0, palette: Theme = getTheme()): React.ReactNode {
+  const ctx = ctxFor(palette);
   try {
     const raw = typeof text === 'string' ? text : String(text ?? '');
     if (!raw) {
@@ -548,17 +558,17 @@ export function renderFormattedText(text: string, columns = 0): React.ReactNode 
           end++;
         }
         const language = fence[1] || 'text';
-        rows.push(<Text key={`f${index}`} color={theme.dim}>{line}</Text>);
-        rows.push(...renderFenced(lines.slice(index + 1, end), language, `f${index}`));
+        rows.push(<Text key={`f${index}`} color={ctx.palette.dim}>{line}</Text>);
+        rows.push(...renderFenced(lines.slice(index + 1, end), language, `f${index}`, ctx));
         if (end < lines.length) {
-          rows.push(<Text key={`fc${end}`} color={theme.dim}>{lines[end]}</Text>);
+          rows.push(<Text key={`fc${end}`} color={ctx.palette.dim}>{lines[end]}</Text>);
         }
         index = end + 1;
         continue;
       }
 
       if (HR.test(line)) {
-        rows.push(renderHorizontalRule(line, `hr${index}`));
+        rows.push(renderHorizontalRule(line, `hr${index}`, ctx));
         index++;
         continue;
       }
@@ -571,12 +581,12 @@ export function renderFormattedText(text: string, columns = 0): React.ReactNode 
         table = null;
       }
       if (table) {
-        rows.push(...renderTable(table, `t${index}`, columns));
+        rows.push(...renderTable(table, `t${index}`, columns, ctx));
         index = table.endIndex;
         continue;
       }
 
-      rows.push(renderLine(line, `l${index}`));
+      rows.push(renderLine(line, `l${index}`, ctx));
       index++;
     }
 
@@ -584,7 +594,7 @@ export function renderFormattedText(text: string, columns = 0): React.ReactNode 
     // grow the frame past a fixed number of rows.
     if (rows.length > MAX_OUTPUT_ROWS) {
       rows.length = MAX_OUTPUT_ROWS;
-      rows.push(<Text key="rowcap" color={theme.dim}>{`  … ${rows.length} more rows`}</Text>);
+      rows.push(<Text key="rowcap" color={ctx.palette.dim}>{`  … ${rows.length} more rows`}</Text>);
     }
 
     // Re-join rows with the same newline structure as the input.

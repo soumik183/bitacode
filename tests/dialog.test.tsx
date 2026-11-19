@@ -59,3 +59,46 @@ test('dialog list renders right-aligned values and group headings', () => {
   assert.match(frame, /› Approval mode\s+manual/, 'selection and value share one row');
   assert.equal(dialogInnerWidth(20), dialogWidth(20) - 4);
 });
+
+test('accentGlyph prefixes the title and borderStyle switches to square corners', () => {
+  const frame = stripAnsi(
+    render(
+      <Dialog title="Theme" accentGlyph="◈" borderStyle="square" columns={80} hint="esc close">
+        <Text>black  warm gold on near-black</Text>
+      </Dialog>
+    ).lastFrame() ?? ''
+  );
+  assert.match(frame, /┌─+┐/, 'square top border');
+  assert.match(frame, /└─+┘/, 'square bottom border');
+  assert.match(frame, /◈ Theme/, 'accent glyph sits before the title');
+  assert.match(frame, /warm gold on near-black/);
+});
+
+test('the accent glyph also shows in compact dialogs without adding a frame', () => {
+  const frame = stripAnsi(
+    render(
+      <Dialog title="Theme" accentGlyph="◈" columns={20} compact>
+        <Text>black</Text>
+      </Dialog>
+    ).lastFrame() ?? ''
+  );
+  assert.match(frame, /◈ Theme/);
+  assert.doesNotMatch(frame, /╭|┌/, 'compact stays frameless');
+});
+
+test('dialog list renders a palette swatch between the pointer and the name', () => {
+  const frame = stripAnsi(
+    render(
+      <DialogList
+        items={[{
+          id: 'black',
+          label: 'black',
+          swatch: { accent: '#d4af37', bg: '#050505' },
+          meta: 'current',
+        }]}
+        selected={0}
+      />
+    ).lastFrame() ?? ''
+  );
+  assert.match(frame, /› ■ black\s+current/, 'swatch and current marker share one row');
+});

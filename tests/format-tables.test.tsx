@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
-import { theme } from '../src/theme.js';
+import { getTheme } from '../src/theme.js';
 import { renderFormattedText } from '../src/utils/format-message.js';
+
+/** Pure helpers default to the active palette (black). */
+const theme = getTheme();
 
 type AnyElement = React.ReactElement<Record<string, unknown>>;
 
