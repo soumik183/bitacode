@@ -1,23 +1,27 @@
 /**
- * Premium black — the default palette. Near-black canvas, warm gold accents
- * and soft ivory ink; quiet enough for long sessions but distinct from the
- * old flat-dark palette (which stays available as `dark`).
+ * Graphite & gold — the default palette.
+ *
+ * Near-black graphite keeps long sessions calm, and a single warm gold accent
+ * carries attention without the blue-light glare of a pure-white terminal.
+ * Semantic colours are deliberately separated: gold (accent), mint (success),
+ * coral (error) and sky (info) so a status word is identifiable before it is
+ * read. Body text sits at ~15:1 contrast; captions stay above 4.5:1.
  */
 const black = {
-    bg: '#050505',
-    surface: '#111111',
-    surfaceAlt: '#1a1a1a',
-    border: '#33302b',
-    borderFocus: '#c9a227',
-    text: '#f2efe9',
+    bg: '#0b0b0d',
+    surface: '#16161b',
+    surfaceAlt: '#1f1f26',
+    border: '#59534b',
+    borderFocus: '#e0b341',
+    text: '#f4f1ea',
     userText: '#ffffff',
-    userBorder: '#c9a227',
-    placeholder: '#7d756a',
-    muted: '#a8a29a',
-    dim: '#726c63',
-    error: '#ff6b6b',
-    accent: '#d4af37',
-    success: '#7bc47f',
-    info: '#c9a227',
+    userBorder: '#e0b341',
+    placeholder: '#8d857a',
+    muted: '#b3ada3',
+    dim: '#8a8378',
+    error: '#ff8080',
+    accent: '#e0b341',
+    success: '#7ed09a',
+    info: '#7fc8ff',
 };
 export default black;

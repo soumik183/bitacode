@@ -88,6 +88,42 @@ bitacode init --user
 bitacode init --project --force
 ```
 
+## Headless / CI mode
+
+Run one prompt without the TUI, optionally emitting one JSON object per event:
+
+```bash
+bitacode -p "fix the failing test"
+bitacode -p "review the diff" --json
+bitacode -p "summarise the repo" --approval auto --provider openai --model gpt-4o-mini
+bitacode -p "commit the change" --max-iterations 8 --save-session
+```
+
+`--cwd` sets the working directory. `--session <id>` resumes a saved session.
+Exit code is `0` on success and non-zero on failure, so it works in scripts and
+GitHub Actions.
+
+## Configuration, trust and automation
+
+- `bitacode permissions show|trust|untrust|allow|deny|ask` — granular per-tool,
+  per-command and per-path rules with last-match-wins ordering. Project rules
+  are only read from a trusted directory.
+- `bitacode hooks` configuration lives in `~/.config/bitacode/hooks.json` and
+  `<repo>/.bitacode/hooks.json`. Events: `SessionStart`, `UserPromptSubmit`,
+  `PreToolUse`, `PostToolUse`. Project hooks require a trusted project.
+- Custom slash commands are Markdown files in `~/.config/bitacode/commands/` and
+  `<repo>/.bitacode/commands/` (project ones require trust).
+- Plugins are discovered from `~/.config/bitacode/plugins/` and
+  `<repo>/.bitacode/plugins/`; manage them with `bitacode plugins list|enable|disable|info`.
+- `bitacode sessions list|show|replay|stats|journal|fork|rename|pin|export [id]`
+  manages saved conversations.
+- `bitacode doctor` diagnoses config, permissions, hooks, storage and terminal support.
+- `bitacode completion bash|zsh|fish` prints a shell completion script.
+
+The agent also keeps a small durable memory (`fact`, `preference`, `decision`,
+`constraint`) and folds stable repo context into prompts to keep the
+provider prompt cache warm across turns.
+
 ## Interactive Commands
 
 - `/help` — Show available slash commands
@@ -98,7 +134,9 @@ bitacode init --project --force
 - `/model` — Switch model
 - `/provider` — Switch API provider
 - `/variant` — Set reasoning variant
-- `/theme` — Choose a colour theme (live swatches; press `1`–`5` or use ↑↓ + Enter)
+- `/theme` — Choose a colour theme (live swatches; press `1`–`7` or use ↑↓ + Enter)
+
+  Palettes: `black` (graphite + gold), `midnight` (navy + violet), `dark` (slate + blue), `light` (paper + ink), `sand` (warm notebook), `moss` (forest), `high-contrast` (pure black/white). Every palette is contrast-audited: body text ≥ 4.5:1, borders ≥ 2.2:1, status colours visually distinct.
 - `/settings` — Toggle animations and mouse clicks, change approval mode (manual / auto / yolo), or open the theme picker from the Theme row
 - `/undo` — Undo the last file change
 - `/update` — Check npm and install the latest `bitacode` release (`/update --local` for this project)

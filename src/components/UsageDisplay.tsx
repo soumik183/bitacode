@@ -20,6 +20,8 @@ export interface UsageDisplayProps {
   dense?: boolean;
   /** Which status segments to show; defaults to all. */
   segments?: readonly StatusLineItem[];
+  /** Live decode rate while text streams, e.g. "42 tok/s". */
+  tps?: string | null;
 }
 
 // Bouncing equaliser: shifts one bar per frame so it reads as AI activity.
@@ -81,6 +83,7 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   gutter = 2,
   dense = false,
   segments = STATUS_LINE_ITEMS,
+  tps = null,
 }) => {
   const theme = useTheme();
   const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
@@ -117,6 +120,12 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
               <>
                 <Text>{'  '}</Text>
                 <Shimmer text={`running ${tool}`} frame={frame} />
+              </>
+            )}
+            {!tool && tps && (
+              <>
+                <Text>{'  '}</Text>
+                <Text color={theme.muted}>{tps}</Text>
               </>
             )}
           </>

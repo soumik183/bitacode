@@ -9,8 +9,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const workingDirectory = process.cwd();
 let allowedRoots: string[] = [];
+
+/**
+ * Read the cwd on every check. It used to be captured once at module load, so a
+ * later chdir (tests, resumed sessions) kept validating against a stale root.
+ */
+function workingDirectory(): string {
+  return process.cwd();
+}
 
 function isWithinRoot(targetPath: string, rootPath: string): boolean {
   const relative = path.relative(rootPath, targetPath);
@@ -18,7 +25,7 @@ function isWithinRoot(targetPath: string, rootPath: string): boolean {
 }
 
 function isAllowedPath(targetPath: string): boolean {
-  return isWithinRoot(targetPath, workingDirectory) || allowedRoots.some((root) => isWithinRoot(targetPath, root));
+  return isWithinRoot(targetPath, workingDirectory()) || allowedRoots.some((root) => isWithinRoot(targetPath, root));
 }
 
 export async function setAllowedPathRoots(roots: string[]): Promise<void> {
@@ -58,7 +65,7 @@ export async function validatePath(requestedPath: string): Promise<string> {
   }
 
   // First check: is the normalised path within cwd?
-  const normalized = path.normalize(path.resolve(workingDirectory, requestedPath));
+  const normalized = path.normalize(path.resolve(workingDirectory(), requestedPath));
   if (!isAllowedPath(normalized)) {
     throw new Error(`Path "${requestedPath}" is outside the working directory.`);
   }
@@ -93,5 +100,5 @@ export async function validatePath(requestedPath: string): Promise<string> {
 }
 
 export function getWorkingDirectory(): string {
-  return workingDirectory;
+  return workingDirectory();
 }

@@ -41,6 +41,10 @@ export const HttpServerConfigSchema = z.object({
 });
 export const RuntimeMcpServerConfigSchema = z.union([StdioServerConfigSchema, HttpServerConfigSchema]);
 export const RuntimeConfigFileSchema = z.object({
+    // Explicit active selection. Older configs encoded the choice implicitly by
+    // key order; both are read, but only this survives a reorder or a rewrite.
+    provider: z.string().optional(),
+    model: z.string().optional(),
     providers: z.record(z.string(), z.any()).optional(),
     mcp: z.object({
         servers: z.record(z.string(), z.any()).optional(),

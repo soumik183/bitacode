@@ -16,7 +16,7 @@ Layout:
 - On exit (ctrl+c or /quit) the session is saved and a resume card is printed
   after Ink unmounts.
 */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text, useApp, useInput, useStdout, measureElement } from 'ink';
 import { basename } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -28,6 +28,7 @@ import { AskPrompt } from './components/AskPrompt.js';
 import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
 import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
+import { LiveStatus } from './components/LiveStatus.js';
 import { DiffView } from './components/DiffView.js';
 import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.js';
 import { ThinkingArchive } from './components/ThinkingArchive.js';
@@ -37,19 +38,40 @@ import { ThemeProvider, useTheme, THEME_NAMES, themes } from './theme/index.js';
 import { loadSettings, saveSettings, STATUS_LINE_ITEMS, } from './settings.js';
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
-import { OpenAI } from 'openai';
+import { createProviderClient } from './providers/client.js';
+import { answerLocally } from './utils/local-answers.js';
+import { detectTerminalProfile } from './utils/terminal.js';
+import { createDecodeSpeedTracker } from './utils/decode-speed.js';
+import { loadHooks, runHooks } from './utils/hooks.js';
+import { isProjectTrusted, trustProject } from './utils/project-trust.js';
+import { loadEffectiveRules } from './commands/permissions.js';
+import { mergeRuleSets } from './utils/permission-rules.js';
+import { loadCustomCommands, expandCommand } from './utils/custom-commands.js';
+import { loadPlugins } from './utils/plugins.js';
+import { loadHistory, appendHistory, HistoryNavigator } from './utils/input-history.js';
+import { summarizePaste } from './utils/paste.js';
+import { findMentionToken, applyMention, listMentionCandidates } from './utils/mentions.js';
+import { commonPrefix } from './utils/completion.js';
+import { detectChecks, runChecks, renderCheckReport } from './utils/autoverify.js';
+import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
+import { appendJournal } from './utils/session-journal.js';
+import { beginTurn, endTurn, resolveRewind, checkpointsForRewind, truncateTurns } from './utils/turn-snapshots.js';
+import { getWorkingCheckpoint, clearWorkingCheckpoint } from './utils/working-checkpoint.js';
+import { formatMemoryList, listMemory, addMemory, forgetMemory } from './utils/memory.js';
+import { handleToolCall as runToolCall } from './tools/index.js';
 import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, detectConfigFromEnvironment, writeConfig } from './config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
 import { getAllProviders, getProvider, getModelDetails, getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { runAgenticLoop, initializeMessages, } from './agentic-loop.js';
 import { setDangerouslySkipPermissions, setApprovalMode, setApprovalHandler, clearApprovalHandler, setAskHandler, recordSubAgentStatus, handleToolCall, setPlanMode, } from './tools/index.js';
 import { setLogLevel, LogLevel, initLogFile, logger } from './utils/logger.js';
-import { createSession, deleteSession, ensureSystemPromptAtTop, hasConversationMessages, saveSession, loadSession, listSessions, generateTitle, } from './sessions.js';
+import { createSession, deleteSession, ensureSystemPromptAtTop, hasConversationMessages, saveSession, loadSession, listSessions, generateTitle, formatSessionAge, } from './sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession } from './tools/todo.js';
+import { stopAllProcesses } from './tools/process.js';
 import { initializeMcp, closeMcp } from './mcp.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { renderFormattedText, normalizeTranscriptText } from './utils/format-message.js';
-import { formatContextWindow, listProviderModels } from './utils/provider-models.js';
+import { formatContextWindow, listProviderModels, prefetchProviderModels } from './utils/provider-models.js';
 import { addToolResultView } from './utils/tool-result-view.js';
 import { itemAtViewportRow } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
@@ -57,7 +79,8 @@ import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import { formatSessionExit } from './utils/session-exit-format.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import { clampScroll, maxScrollOffset, scrollAfterGrowth, sliceItemsToWindow, visibleRowWindow, } from './utils/scroll.js';
-import { clampIndex, composerTextWidth, finiteDim, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
+import { clampIndex, composerTextWidth, finiteDim, frameRows, resolveLayout, splitLiveArea, transcriptFillerRows, } from './utils/layout.js';
+import { resolveItemRows } from './utils/transcript-rows.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from './utils/scrollbar.js';
 import { useAgentEventHandler } from './hooks/useAgentEventHandler.js';
 // Live conversation ids. Thinking and the streaming tail are appended to the
@@ -73,8 +96,6 @@ const MAX_STATIC_ITEMS = 120;
 // Resumed sessions keep their full model context, but replay only the tail to
 // scrollback so a huge transcript does not flood the terminal at once.
 const MAX_REPLAY_MESSAGES = 100;
-// Avoid refetching a provider's model list on every /model open.
-const MODEL_CACHE_TTL_MS = 5 * 60_000;
 function fallbackItemRows(node) {
     if (!node)
         return 0;
@@ -100,7 +121,7 @@ const StaticEntry = React.memo(({ item, columns, onMeasure, onRef }) => {
             return;
         const height = measureElement(ref.current).height;
         if (height > 0)
-            onMeasure(item.id, height);
+            onMeasure(item.id, height, item.node);
     }, [item.id, item.node, columns, onMeasure]);
     return (_jsx(Box, { ref: setRef, flexDirection: "column", flexShrink: 0, children: _jsx(EntryErrorBoundary, { children: item.node }) }));
 });
@@ -117,7 +138,18 @@ const Splash = () => {
 // First-run guidance lives in the main screen, never in a blocking wizard.
 const SETUP_HINT = 'No provider configured — type /provider to choose one';
 const API_MISSING_HINT = 'API key missing — type /provider to select a provider and add a key.';
-function printMessageToScrollback(addStatic, role, text, palette) {
+/**
+ * Content width for an archived message: the terminal minus the transcript
+ * gutter (2 each side) and the scrollbar rail (1 column). Tables and long
+ * inline spans are scaled to this, so a wide table can never wrap and smear
+ * when the user scrolls back to it.
+ */
+function transcriptTextWidth(columns) {
+    if (!columns || !Number.isFinite(columns))
+        return 0;
+    return Math.max(20, Math.floor(columns) - 5);
+}
+function printMessageToScrollback(addStatic, role, text, palette, columns) {
     const normalized = normalizeTranscriptText(text);
     if (!normalized) {
         addStatic(_jsx(Box, { height: 1 }));
@@ -128,7 +160,7 @@ function printMessageToScrollback(addStatic, role, text, palette) {
         return;
     }
     // Fallback is assistant, render with Markdown formatting (bold, italic)
-    addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized, 0, palette) }) }));
+    addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized, transcriptTextWidth(columns), palette) }) }));
 }
 function replayOneMessage(addStatic, message, toolCallsById, palette, columns) {
     const msgAny = message;
@@ -142,13 +174,13 @@ function replayOneMessage(addStatic, message, toolCallsById, palette, columns) {
         addStatic(collapsed, { collapsed, expanded });
     }
     if (message.role === 'user' && typeof message.content === 'string') {
-        printMessageToScrollback(addStatic, 'user', message.content, palette);
+        printMessageToScrollback(addStatic, 'user', message.content, palette, columns);
         return;
     }
     if (message.role === 'assistant' &&
         typeof message.content === 'string' &&
         message.content.trim().length > 0) {
-        printMessageToScrollback(addStatic, 'assistant', message.content, palette);
+        printMessageToScrollback(addStatic, 'assistant', message.content, palette, columns);
         return;
     }
     if (message.role === 'tool') {
@@ -211,13 +243,23 @@ function clipToRows(text, maxRows, columns) {
     const kept = [];
     let rows = 0;
     for (let index = lines.length - 1; index >= 0; index--) {
-        const lineRows = Math.max(1, Math.ceil(Array.from(lines[index]).length / width));
-        if (rows + lineRows > budget)
+        const line = lines[index];
+        const lineRows = Math.max(1, Math.ceil(Array.from(line).length / width));
+        if (rows + lineRows > budget) {
+            // A single line longer than the whole viewport (a reply with no breaks,
+            // or a minified blob) must be clipped too, or the live area renders the
+            // entire string every frame and pushes the composer off screen.
+            if (kept.length === 0) {
+                const chars = Array.from(line);
+                const maxChars = budget * width;
+                kept.unshift(chars.slice(Math.max(0, chars.length - maxChars)).join(''));
+            }
             break;
+        }
         rows += lineRows;
-        kept.unshift(lines[index]);
+        kept.unshift(line);
     }
-    return (kept.length > 0 ? kept : [lines[lines.length - 1] ?? '']).join('\n');
+    return (kept.length > 0 ? kept : ['']).join('\n');
 }
 /** Wrapped display rows for a block of text at a fixed column width. */
 function wrappedRowCount(text, width) {
@@ -365,52 +407,17 @@ const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode', 'theme', 'sta
 // Short intents shown beside each palette in the theme picker. Keep them brief
 // so names and swatches stay readable on narrow terminals.
 const THEME_INTENTS = {
-    black: 'warm gold on near-black',
-    sand: 'paper-light notebook',
-    dark: 'classic flat dark',
-    light: 'bright-room friendly',
-    'high-contrast': 'maximum contrast',
+    black: 'graphite canvas · warm gold',
+    midnight: 'deep navy · violet, for night work',
+    dark: 'neutral slate · confident blue',
+    light: 'paper white · ink, for daylight',
+    sand: 'warm notebook · terracotta',
+    moss: 'forest calm · olive, low glare',
+    'high-contrast': 'pure black/white · maximum contrast',
 };
 function buildClient(config, apiKeyOverride) {
-    const provider = getProvider(config.provider);
-    const apiKey = apiKeyOverride?.trim() || resolveApiKey(config);
-    if (!apiKey) {
-        const providerName = provider?.name || config.provider;
-        const envVar = provider?.apiKeyEnvVar;
-        throw new Error(envVar
-            ? `Missing API key for ${providerName}. Set it in config or export ${envVar}.`
-            : `Missing API key for ${providerName}.`);
-    }
-    const clientOptions = {
-        apiKey,
-    };
-    // baseURL: env var override takes precedence over provider default
-    const baseURLOverride = process.env.BITACODE_BASE_URL?.trim();
-    const baseURL = baseURLOverride || provider?.baseURL;
-    if (baseURL) {
-        clientOptions.baseURL = baseURL;
-    }
-    // Custom headers: env override takes precedence over provider defaults
-    const rawHeaders = process.env.BITACODE_CUSTOM_HEADERS?.trim();
-    if (rawHeaders) {
-        const defaultHeaders = {};
-        for (const line of rawHeaders.split('\n')) {
-            const sep = line.indexOf(': ');
-            if (sep === -1)
-                continue;
-            const key = line.slice(0, sep).trim();
-            const value = line.slice(sep + 2).trim();
-            if (key && value)
-                defaultHeaders[key] = value;
-        }
-        if (Object.keys(defaultHeaders).length > 0) {
-            clientOptions.defaultHeaders = defaultHeaders;
-        }
-    }
-    else if (provider?.headers && Object.keys(provider.headers).length > 0) {
-        clientOptions.defaultHeaders = provider.headers;
-    }
-    return new OpenAI(clientOptions);
+    // Delegates to the shared factory so headless mode and the TUI cannot drift.
+    return createProviderClient(config, apiKeyOverride ? { apiKey: apiKeyOverride } : {});
 }
 // ─── Main App ───
 const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, updateNotice, version, settings, setSettings, }) => {
@@ -472,7 +479,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             };
         }));
     }, []);
-    const handleMeasureItem = useCallback((id, rows) => {
+    // Heights are cached per rendered node, not only per transcript id. A card
+    // keeps two prebuilt nodes (collapsed and expanded); keying by node means a
+    // collapse can reuse the height that node had before it was expanded instead
+    // of waiting for a re-measure. Without this the transcript kept reserving the
+    // expanded height after a click, leaving a tall blank block behind.
+    const nodeHeightsRef = useRef(new WeakMap());
+    const nodeHeight = useCallback((node) => {
+        if (!node || typeof node !== 'object')
+            return undefined;
+        return nodeHeightsRef.current.get(node);
+    }, []);
+    const handleMeasureItem = useCallback((id, rows, node) => {
+        if (node && typeof node === 'object')
+            nodeHeightsRef.current.set(node, rows);
         setMeasuredHeights((prev) => (prev[id] === rows ? prev : { ...prev, [id]: rows }));
     }, []);
     // A restored transcript is fully measured before it is displayed. The timer
@@ -511,8 +531,19 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const [config, setConfig] = useState(null);
     const [completionMessages, setCompletionMessages] = useState([]);
     const [inputText, setInputText] = useState('');
+    // Wrapped rows the composer currently renders. The layout reserves them so a
+    // multi-line prompt never covers the transcript or the footer.
+    const [composerRows, setComposerRows] = useState(1);
+    // Wall-clock start of the current busy spell, plus a shared 1 s ticker so the
+    // activity strip can count seconds without re-rendering on every token.
+    const [busyStartedAt, setBusyStartedAt] = useState(null);
+    const [busyClock, setBusyClock] = useState(() => Date.now());
     const [isStreaming, setIsStreaming] = useState(false);
     const [streamingText, setStreamingText] = useState('');
+    // Decode rate is measured from delta length vs. wall clock, so it stays
+    // honest when the provider bursts tokens in uneven chunks.
+    const [decodeTps, setDecodeTps] = useState(null);
+    const decodeRef = useRef({ tracker: createDecodeSpeedTracker(), length: 0, shown: null });
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState(null);
     const [helpMessage, setHelpMessage] = useState(null);
@@ -587,6 +618,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // Child-agent activity. Kept as the full record for session persistence;
     // a separate flag drives the compact live panel and its auto-hide timer.
     const [subAgentActivities, setSubAgentActivities] = useState([]);
+    // Mirror for callbacks that run later: reading the state variable there
+    // captured the array as it was when the turn started, so a finished sub-agent
+    // was saved to disk in its "running" state.
+    const subAgentActivitiesRef = useRef([]);
+    subAgentActivitiesRef.current = subAgentActivities;
     const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
     // Input reset key — incremented on submit to force TextInput remount and clear
     const [inputResetKey, setInputResetKey] = useState(0);
@@ -616,6 +652,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const [activeTool, setActiveTool] = useState(null);
     // Session state
     const [session, setSession] = useState(null);
+    // Mirror of the message array for code that must save outside a render
+    // (turn end, quit, autosave). React state lags behind by one commit.
+    const completionMessagesRef = useRef([]);
     // OpenAI client ref (stable across renders)
     const clientRef = useRef(null);
     // Invalidates stale /models responses when the picker is reopened or closed.
@@ -626,6 +665,42 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const modelCacheTimeRef = useRef({});
     // Whether the transcript on disk matches what the user has seen
     const sessionSavedRef = useRef(false);
+    /**
+     * Autosave.
+     *
+     * Sessions used to be written only after a turn reached its final message, so
+     * a failed request, an abort or a killed process lost the whole conversation,
+     * and a brand-new session never appeared in the picker at all. Mirroring the
+     * transcript on a short idle debounce closes both holes: every committed
+     * state (including a local `/help`-style answer or a mid-turn error) reaches
+     * disk within a second, without writing on every streamed token.
+     */
+    useEffect(() => {
+        completionMessagesRef.current = completionMessages;
+        if (!session || !initialized)
+            return;
+        if (!hasConversationMessages(completionMessages))
+            return;
+        const targetId = session.id;
+        const timer = setTimeout(() => {
+            const messages = completionMessagesRef.current;
+            if (!hasConversationMessages(messages))
+                return;
+            const snapshot = {
+                ...session,
+                completionMessages: messages,
+                todos: getTodosForSession(targetId),
+                title: generateTitle(messages, session.title),
+                variant: variantId,
+                subAgentActivities: subAgentActivitiesRef.current,
+            };
+            void saveSession(snapshot)
+                .then(() => { sessionSavedRef.current = true; })
+                .catch((err) => logger.warn('Autosave failed', { error: String(err) }));
+        }, 700);
+        timer.unref?.();
+        return () => clearTimeout(timer);
+    }, [completionMessages, session, initialized, variantId]);
     // Session to advertise on exit, and a guard against saving twice on a fast
     // ctrl+c / /quit burst.
     const exitSessionIdRef = useRef(null);
@@ -716,6 +791,63 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         return () => clearTimeout(timer);
     }, [showSubAgentPanel, hasActiveSubAgent, subAgentActivities]);
     const didPrintIntroRef = useRef(false);
+    // ── Runtime policy: hooks, permission rules, custom commands ──
+    // Held in refs because the loop reads them at call time, while the UI only
+    // needs to re-render when the command palette changes.
+    const hooksRef = useRef([]);
+    const rulesRef = useRef({ allow: [], ask: [], deny: [], errors: [] });
+    const [customCommands, setCustomCommands] = useState([]);
+    const historyNavigatorRef = useRef(null);
+    const terminalProfile = useMemo(() => detectTerminalProfile({ animationsEnabled: settings.animations }), [settings.animations]);
+    // A terminal that repaints badly (Apple_Terminal) or not at all (TERM=dumb)
+    // gets a static footer instead of an animation loop.
+    const animationsEnabled = settings.animations && terminalProfile.animations;
+    const toolPolicy = useMemo(() => ({
+        permissionRules: rulesRef.current,
+        hooks: hooksRef.current,
+        guardUnreadEdits: settings.guardUnreadEdits !== false,
+        spillToolResults: settings.spillToolResults !== false,
+        verifyPostconditions: true,
+        journal: true,
+        cwd: process.cwd(),
+    }), [settings.guardUnreadEdits, settings.spillToolResults]);
+    /**
+     * Re-read project policy from disk. Runs at startup and after `/trust`, so a
+     * freshly trusted repository starts using its own rules without a restart.
+     */
+    const reloadRuntimePolicy = useCallback(async (activeSessionId) => {
+        const cwd = process.cwd();
+        const trusted = isProjectTrusted(cwd);
+        // Plugin-provided hooks/commands are additive; project and user sources
+        // keep their existing precedence. loadPlugins never throws.
+        const plugins = await loadPlugins({ cwd, trusted });
+        const loadedHooks = loadHooks({ cwd, trusted }, plugins.hooks);
+        hooksRef.current = loadedHooks.hooks;
+        const effective = loadEffectiveRules(cwd);
+        rulesRef.current = mergeRuleSets(effective.rules);
+        const commands = loadCustomCommands({ cwd, trusted }, plugins.commands);
+        setCustomCommands(commands.commands);
+        for (const warning of [...loadedHooks.errors, ...commands.errors, ...plugins.errors]) {
+            logger.warn('Runtime policy warning', { warning });
+        }
+        if (effective.projectError)
+            logger.debug('Project permission rules not loaded', { reason: effective.projectError });
+        if (historyNavigatorRef.current === null) {
+            historyNavigatorRef.current = new HistoryNavigator(loadHistory());
+        }
+        if (loadedHooks.hooks.length > 0) {
+            const outcome = await runHooks({
+                event: 'SessionStart',
+                hooks: loadedHooks.hooks,
+                cwd,
+                payload: { event: 'SessionStart', cwd, sessionId: activeSessionId },
+            });
+            if (outcome.context)
+                setHelpMessage(`[hook] ${outcome.context}`);
+            for (const error of outcome.errors)
+                logger.warn('SessionStart hook warning', { error });
+        }
+    }, []);
     const printedThreadErrorIdsRef = useRef(new Set());
     const initializeWithConfig = useCallback(async (loadedConfig) => {
         // The first-run wizard may have just written a new config, so refresh the
@@ -723,8 +855,40 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         await loadRuntimeConfig(true);
         setConfig(loadedConfig);
         clientRef.current = buildClient(loadedConfig);
+        // Warm the model list in the background so the first /model open is instant
+        // even on a slow provider.
+        try {
+            prefetchProviderModels(clientRef.current, loadedConfig.provider, {
+                baseURL: getProvider(loadedConfig.provider)?.baseURL,
+            });
+        }
+        catch {
+            // A missing key is reported by the client itself; warmup is optional.
+        }
+        // Other providers warm up a moment later, so switching providers is just
+        // as fast without delaying startup or spending data during the first turn.
+        const warmup = setTimeout(() => {
+            for (const provider of getAllProviders()) {
+                if (provider.id === loadedConfig.provider)
+                    continue;
+                if (resolveApiKey({ provider: provider.id }) === null)
+                    continue;
+                try {
+                    prefetchProviderModels(buildClient({ provider: provider.id, model: provider.models[0]?.id ?? '' }), provider.id, { baseURL: provider.baseURL });
+                }
+                catch {
+                    // Unusable provider (bad config); skip it.
+                }
+            }
+        }, 2_000);
+        warmup.unref?.();
         // Initialize MCP servers
         await initializeMcp();
+        // Load project policy (hooks, permission rules, custom commands) and fire
+        // the SessionStart hook. A warning here must never block startup.
+        await reloadRuntimePolicy(sessionId).catch((err) => {
+            logger.warn('Could not load runtime policy', { error: String(err) });
+        });
         // Load or create session
         let loadedSession = null;
         if (sessionId) {
@@ -793,13 +957,18 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             const newSession = createSession(loadedConfig.model, loadedConfig.provider);
             clearTodos(newSession.id);
             newSession.completionMessages = initialCompletionMessages;
+            // Register the session immediately so it is listed by /session and can be
+            // resumed even if this process dies before the first turn finishes.
+            await saveSession(newSession).catch((err) => {
+                logger.warn('Could not register new session', { error: String(err) });
+            });
             setSession(newSession);
             didPrintIntroRef.current = true;
         }
         setInitialized(true);
     }, [dangerouslySkipPermissions, sessionId, addStatic, columns, theme]);
     useEffect(() => {
-        if (!loading || !settings.animations) {
+        if (!loading || !animationsEnabled) {
             setSpinnerFrame(0);
             return;
         }
@@ -809,7 +978,31 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setSpinnerFrame((prev) => prev + 1);
         }, spinnerIntervalMs);
         return () => clearInterval(interval);
-    }, [loading, settings.animations]);
+    }, [loading, animationsEnabled]);
+    // Decode rate: fed by growth of the streaming buffer. The tracker ignores
+    // the first fraction of a second so the UI does not flash a bogus rate.
+    useEffect(() => {
+        const state = decodeRef.current;
+        if (!isStreaming) {
+            state.tracker.reset();
+            state.length = 0;
+            if (state.shown !== null) {
+                state.shown = null;
+                setDecodeTps(null);
+            }
+            return;
+        }
+        const length = streamingText.length;
+        if (length <= state.length)
+            return;
+        const delta = streamingText.slice(state.length);
+        state.length = length;
+        const sample = state.tracker.add(delta);
+        if (sample.display && sample.display !== state.shown) {
+            state.shown = sample.display;
+            setDecodeTps(sample.display);
+        }
+    }, [streamingText, isStreaming]);
     // Live thinking clock. One tick per second is enough and stays cheap on
     // Android; the archived record gets the exact elapsed value.
     useEffect(() => {
@@ -964,6 +1157,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         mode,
         toast?.length ?? 0,
         searchQuery?.length ?? 0,
+        composerRows,
     ].join(':');
     useEffect(() => {
         if (!viewportRef.current)
@@ -1043,10 +1237,42 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         return () => {
             clearApprovalHandler();
             closeMcp();
+            // Detached children would otherwise keep running after quit.
+            stopAllProcesses();
         };
     }, []);
     // Palette contents. Kept ahead of handleSubmit because Enter runs the highlighted row.
-    const commandItems = SLASH_COMMANDS.filter((cmd) => cmd.name.toLowerCase().startsWith(inputText.trim().toLowerCase())).map((cmd) => ({ id: cmd.name, label: cmd.name, description: cmd.description }));
+    // Command palette: prefix match on the name wins, keywords and the
+    // description keep a search like "/key" finding "/provider".
+    const commandQuery = inputText.trim().toLowerCase();
+    const commandNeedle = commandQuery.replace(/^\//, '');
+    const commandMatches = SLASH_COMMANDS.filter((cmd) => {
+        const name = cmd.name.toLowerCase();
+        if (name.startsWith(commandQuery))
+            return true;
+        if (!commandNeedle)
+            return false;
+        return (name.slice(1).startsWith(commandNeedle)
+            || (cmd.keywords ?? '').toLowerCase().includes(commandNeedle)
+            || cmd.description.toLowerCase().includes(commandNeedle));
+    });
+    const commandMeta = (name) => {
+        switch (name) {
+            case '/model': return config?.model;
+            case '/theme': return settings.theme;
+            case '/provider': return config?.provider;
+            case '/variant': return variantId;
+            case '/verify': return 'checks';
+            default: return undefined;
+        }
+    };
+    const commandItems = commandMatches.map((cmd) => ({
+        id: cmd.name,
+        label: cmd.name,
+        description: cmd.description,
+        section: cmd.category,
+        meta: commandMeta(cmd.name),
+    }));
     const providerItems = getAllProviders().map((provider) => {
         const keyReady = resolveApiKey({ provider: provider.id }) !== null;
         const modelCount = remoteModels[provider.id]?.length || provider.models.length;
@@ -1186,10 +1412,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     }, []);
     const loadModels = useCallback(async (providerId, client, preferredModelId) => {
         const cached = remoteModelsRef.current[providerId];
-        const cachedAt = modelCacheTimeRef.current[providerId] ?? 0;
-        if (cached?.length &&
-            cachedAt > 0 &&
-            Date.now() - cachedAt < MODEL_CACHE_TTL_MS) {
+        if (cached?.length) {
             if (!modelSearchRef.current && preferredModelId) {
                 const index = cached.findIndex((item) => item.id === preferredModelId);
                 if (index >= 0)
@@ -1200,7 +1423,10 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         const seq = ++modelFetchSeqRef.current;
         setModelsLoading(true);
         setModelNotice(null);
-        const result = await listProviderModels(client, providerId);
+        // Cache-first inside: a warm list resolves without a network round trip.
+        const result = await listProviderModels(client, providerId, {
+            baseURL: getProvider(providerId)?.baseURL,
+        });
         if (seq !== modelFetchSeqRef.current)
             return;
         setModelsLoading(false);
@@ -1302,33 +1528,40 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             });
             return;
         }
-        // First run straight from /provider: a saved key is already a usable
-        // config, so boot into chat with the provider's default model.
-        if (!config) {
-            const firstModel = getProvider(prompt.providerId)?.models[0]?.id ?? result.items[0]?.id;
-            setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
-            setKeyPrompt(null);
-            if (firstModel) {
-                finalizeFirstConfig(prompt.providerId, firstModel, {
-                    name: result.items[0]?.label,
-                    contextWindow: result.items[0]?.contextWindow,
-                });
-            }
-            return;
-        }
         if (result.items.length > 0) {
             setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
         }
+        // A saved key is a usable config on its own, so the provider and its
+        // default model are selected right here. Writing only the key is what
+        // used to leave the old provider selected and force a manual re-pick.
+        const providerModels = getProvider(prompt.providerId)?.models ?? [];
+        const firstModel = providerModels[0]?.id
+            ?? result.items[0]?.id
+            ?? (prompt.providerId === config?.provider ? config.model : undefined);
+        const modelInfo = {
+            name: result.items[0]?.label ?? providerModels[0]?.name,
+            contextWindow: result.items[0]?.contextWindow ?? providerModels[0]?.contextWindow,
+        };
         setKeyPrompt(null);
-        setPendingProviderId(prompt.providerId);
-        setPicker('model');
-        setPickerIndex(0);
-        setModelSearch('');
-        setModelsLoading(false);
-        setModelNotice(result.error
-            ? `Could not fetch models (${result.error}); using built-in list.`
-            : null);
-    }, [config, keyPrompt, finalizeFirstConfig]);
+        if (!firstModel) {
+            // Key saved, but the provider exposes no model: keep the provider
+            // selected so the picker can fill the model in.
+            persistActiveSelection(prompt.providerId, config?.model ?? '');
+            setError('API key saved, but this provider returned no models to select.');
+            return;
+        }
+        if (!config) {
+            finalizeFirstConfig(prompt.providerId, firstModel, modelInfo);
+            return;
+        }
+        if (prompt.providerId === config.provider && firstModel === config.model) {
+            return;
+        }
+        // Persist before opening the picker: cancelling the picker must not undo
+        // the selection the key just enabled.
+        persistActiveSelection(prompt.providerId, firstModel, modelInfo);
+        finalizeFirstConfig(prompt.providerId, firstModel, modelInfo);
+    }, [config, keyPrompt, finalizeFirstConfig, persistActiveSelection]);
     // Clear per-turn UI state without touching the saved session or transcript.
     const resetLiveState = useCallback(() => {
         setError(null);
@@ -1408,6 +1641,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             nextSession.variant = variantId;
             clearTodos(nextSession.id);
             nextSession.completionMessages = initialMessages;
+            await saveSession(nextSession).catch((err) => {
+                logger.warn('Could not register new session', { error: String(err) });
+            });
             setCompletionMessages(initialMessages);
             setSession(nextSession);
             setTodos([]);
@@ -1447,10 +1683,13 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 const model = summary.model ? summary.model.split('/').pop() : '';
                 const modelLabel = [summary.provider, model].filter(Boolean).join(' / ');
                 const current = summary.id === session?.id ? ' · current' : '';
+                const age = formatSessionAge(summary.updatedAt || summary.createdAt);
+                const count = summary.messageCount;
                 return {
                     id: summary.id,
                     label: title || 'Untitled session',
-                    description: `${modelLabel || 'unknown model'} · ${summary.messageCount} msg${summary.messageCount === 1 ? '' : 's'}${current}`,
+                    // Order: when · which model · how much · whether it is open now.
+                    description: `${age} · ${modelLabel || 'unknown model'} · ${count} msg${count === 1 ? '' : 's'}${current}`,
                 };
             });
             setSessionItems(items);
@@ -1751,6 +1990,96 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 }
                 return true;
             }
+            case '/mem':
+            case '/memory': {
+                setError(null);
+                const sub = (parts[1] ?? 'list').toLowerCase();
+                if (sub === 'add') {
+                    const text = parts.slice(2).join(' ').trim();
+                    if (!text) {
+                        setError('Usage: /memory add <text>');
+                        return true;
+                    }
+                    const saved = addMemory({ text, kind: 'note', source: 'user' });
+                    setHelpMessage('error' in saved ? `Could not save: ${saved.error}` : `Saved memory ${saved.id}`);
+                    return true;
+                }
+                if (sub === 'forget' || sub === 'delete') {
+                    const target = parts.slice(2).join(' ').trim();
+                    if (!target) {
+                        setError('Usage: /memory forget <id or text>');
+                        return true;
+                    }
+                    const removed = forgetMemory(target);
+                    setHelpMessage(removed > 0 ? `Removed ${removed} entr${removed === 1 ? 'y' : 'ies'}.` : 'No matching memory entry.');
+                    return true;
+                }
+                setHelpMessage(formatMemoryList(listMemory({ limit: 30 })).join('\n'));
+                return true;
+            }
+            case '/verify': {
+                setError(null);
+                const cwd = process.cwd();
+                const checks = await detectChecks({ cwd });
+                if (checks.length === 0) {
+                    setHelpMessage('No project checks detected (package.json scripts, Cargo.toml, Makefile, pyproject.toml).');
+                    return true;
+                }
+                setHelpMessage(`Running ${checks.map((check) => check.name).join(', ')}…`);
+                const results = await runChecks(checks, { cwd, stopOnFirstFailure: false });
+                const report = renderCheckReport(results, checks);
+                if (results.every((result) => result.status === 'pass'))
+                    setHelpMessage(report);
+                else
+                    setError(report);
+                return true;
+            }
+            case '/doctor': {
+                setError(null);
+                const report = await collectDoctorReport({ version: version ?? 'unknown' });
+                setHelpMessage(renderDoctorReport(report));
+                return true;
+            }
+            case '/trust': {
+                setError(null);
+                const canonical = trustProject(process.cwd());
+                await reloadRuntimePolicy(session?.id);
+                setHelpMessage(`Trusted ${canonical}. Project permission rules, hooks and commands are now active.`);
+                return true;
+            }
+            case '/checkpoint': {
+                const notes = getWorkingCheckpoint(session?.id);
+                setHelpMessage(notes
+                    ? notes
+                    : 'No working checkpoint. The model writes one with update_working_checkpoint; it survives compaction.');
+                return true;
+            }
+            case '/rewind': {
+                setError(null);
+                const steps = Number.parseInt(parts[1] ?? '0', 10);
+                const target = resolveRewind(session?.id ?? 'default', Number.isFinite(steps) ? steps : 0);
+                if (!target) {
+                    setError('Nothing to rewind yet.');
+                    return true;
+                }
+                let restored = 0;
+                for (const id of checkpointsForRewind(target)) {
+                    const result = await runToolCall('undo', { id }, { sessionId: session?.id });
+                    if (!result.toLowerCase().startsWith('error'))
+                        restored++;
+                }
+                const kept = completionMessages.slice(0, target.messageIndex);
+                setCompletionMessages(kept);
+                if (session) {
+                    session.completionMessages = kept;
+                    await saveSession(session);
+                }
+                if (session?.id)
+                    truncateTurns(session.id, target.turn - 1);
+                clearWorkingCheckpoint(session?.id);
+                setHelpMessage(`Rewound to turn #${target.turn}: restored ${restored} checkpoint(s) and dropped later messages.`);
+                return true;
+            }
             case '/undo': {
                 setError(null);
                 try {
@@ -1786,6 +2115,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         addStatic,
         showToast,
         theme,
+        version,
+        reloadRuntimePolicy,
     ]);
     // Shared save path for both entry points (settings row and /theme).
     const applyTheme = useCallback((name) => {
@@ -1953,6 +2284,56 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 return;
             }
         }
+        // Questions about this runtime never need a model round trip, and they stay
+        // answerable offline.
+        const localAnswer = answerLocally(trimmed, {
+            version: version ?? 'unknown',
+            cwd: process.cwd(),
+            ...(config?.model ? { model: config.model } : {}),
+            ...(config?.provider ? { provider: config.provider } : {}),
+            approvalMode: effectiveApprovalMode,
+            planMode: mode === 'plan',
+        });
+        if (localAnswer !== null) {
+            if (!keepInput) {
+                setInputText('');
+                setInputResetKey((prev) => prev + 1);
+            }
+            printMessageToScrollback(addStatic, 'user', trimmed, theme, columns);
+            printMessageToScrollback(addStatic, 'assistant', localAnswer, theme, columns);
+            setCompletionMessages((prev) => [
+                ...prev,
+                { role: 'user', content: trimmed },
+                { role: 'assistant', content: localAnswer },
+            ]);
+            return;
+        }
+        // A custom command (`/review src/app.ts`) expands into the prompt that follows.
+        let effectiveInput = trimmed;
+        if (trimmed.startsWith('/')) {
+            const [commandName, ...rest] = trimmed.slice(1).split(/\s+/);
+            const custom = customCommands.find((command) => command.name.toLowerCase() === (commandName ?? '').toLowerCase());
+            if (custom) {
+                if (custom.handler) {
+                    // Plugin commands may perform an action and optionally return a
+                    // prompt for the agent to process instead.
+                    const handled = await custom.handler(rest);
+                    if (typeof handled === 'string' && handled.trim()) {
+                        effectiveInput = handled.trim();
+                    }
+                    else {
+                        if (!keepInput) {
+                            setInputText('');
+                            setInputResetKey((key) => key + 1);
+                        }
+                        return;
+                    }
+                }
+                else {
+                    effectiveInput = expandCommand(custom, rest.join(' '));
+                }
+            }
+        }
         if (!clientRef.current || !config) {
             setError(API_MISSING_HINT);
             return;
@@ -1984,7 +2365,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         // Print the user message directly to scrollback so it is selectable/copyable.
         // We still push it into completionMessages for session saving. In plan mode
         // the model gets an explicit instruction it does not see in the transcript.
-        const userText = mode === 'plan' ? `${PLAN_MODE_NOTE}\n\n${trimmed}` : trimmed;
+        const userText = mode === 'plan' ? `${PLAN_MODE_NOTE}\n\n${effectiveInput}` : effectiveInput;
         const userMessage = { role: 'user', content: userText };
         // A /image attachment rides along as a separate user message note.
         const image = pendingImageRef.current;
@@ -1995,9 +2376,16 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         const nextMessages = imageMessage
             ? [...completionMessages, userMessage, imageMessage]
             : [...completionMessages, userMessage];
-        printMessageToScrollback(addStatic, 'user', trimmed, theme);
+        printMessageToScrollback(addStatic, 'user', trimmed, theme, columns);
+        // Append-only journal + per-turn manifest: replay and /rewind both need them.
+        const turnSessionId = session?.id ?? 'default';
+        appendJournal(turnSessionId, { type: 'user', content: trimmed.slice(0, 2_000) });
+        beginTurn(turnSessionId, completionMessages.length, trimmed);
         setCompletionMessages((prev) => imageMessage ? [...prev, userMessage, imageMessage] : [...prev, userMessage]);
         lastSubmitRef.current = trimmed;
+        // Prompt history survives restarts; consecutive duplicates are collapsed.
+        appendHistory(trimmed);
+        historyNavigatorRef.current?.replace(loadHistory());
         // Reset assistant message tracker (streamed indices were reset above)
         assistantMessageRef.current = null;
         try {
@@ -2013,12 +2401,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             }
             // Create abort controller for this completion
             abortControllerRef.current = new AbortController();
-            const updatedMessages = await runAgenticLoop(clientRef.current, config.model, nextMessages, trimmed, handleAgentEventWithSubAgents, {
+            const updatedMessages = await runAgenticLoop(clientRef.current, config.model, nextMessages, effectiveInput, handleAgentEventWithSubAgents, {
                 pricing: pricing || undefined,
                 abortSignal: abortControllerRef.current.signal,
                 sessionId: session?.id,
                 requestDefaults,
                 compactThreshold: settings.compactThreshold,
+                hooks: hooksRef.current,
+                toolPolicy,
             });
             // A newer run (or /new) superseded this one: drop the result instead of
             // writing the old conversation into the current session.
@@ -2026,6 +2416,32 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 return;
             // Final update to ensure we have the complete message history
             setCompletionMessages(updatedMessages);
+            const finishedTurn = endTurn(turnSessionId);
+            appendJournal(turnSessionId, {
+                type: 'assistant',
+                data: { messages: updatedMessages.length, model: config.model },
+            });
+            // Optional finish gate: only after a turn that actually touched files, and
+            // only when enabled, so a normal session never spawns a test suite.
+            const autoverifyEnabled = settings.autoverify === true || process.env.BITACODE_AUTOVERIFY === '1';
+            if (autoverifyEnabled && finishedTurn && finishedTurn.paths.length > 0) {
+                try {
+                    const cwd = process.cwd();
+                    const checks = await detectChecks({ cwd });
+                    if (checks.length > 0) {
+                        addToolResultView(addStatic, 'Autoverify', { checks: checks.map((c) => c.name) }, 'running…', theme);
+                        const results = await runChecks(checks, { cwd, stopOnFirstFailure: false });
+                        const report = renderCheckReport(results, checks);
+                        if (results.every((result) => result.status === 'pass'))
+                            setHelpMessage(report);
+                        else
+                            setError(report);
+                    }
+                }
+                catch (err) {
+                    logger.warn('Autoverify failed to run', { error: String(err?.message ?? err) });
+                }
+            }
             // Update session
             if (session) {
                 session.completionMessages = updatedMessages;
@@ -2034,7 +2450,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 session.provider = config.provider;
                 session.model = config.model;
                 session.variant = variantId;
-                session.subAgentActivities = subAgentActivities;
+                session.subAgentActivities = subAgentActivitiesRef.current;
                 await saveSession(session);
                 sessionSavedRef.current = true;
             }
@@ -2061,6 +2477,19 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setLoading(false);
         }
     }, [handleSubmit]);
+    // One tick per second while busy: drives the activity strip's elapsed time
+    // without touching the transcript or the token stream.
+    useEffect(() => {
+        const active = loading || isStreaming || Boolean(activeTool);
+        if (!active) {
+            setBusyStartedAt(null);
+            return;
+        }
+        setBusyStartedAt((prev) => prev ?? Date.now());
+        const timer = setInterval(() => setBusyClock(Date.now()), 1000);
+        timer.unref?.();
+        return () => clearInterval(timer);
+    }, [loading, isStreaming, activeTool]);
     // ── Layout and the live conversation tail ────────────────────────────
     // Thinking and the streaming tail are conversation content, not a footer
     // panel. They are appended to the measured transcript flow so they render
@@ -2069,6 +2498,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const layout = resolveLayout(columns, rows);
     const { paletteWindow, visibleTodos, gutter, dense } = layout;
     const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
+    // Grow with the text, but never take more than about a third of the screen:
+    // a long paste scrolls inside the composer instead of eating the transcript.
+    const composerMaxRows = Math.max(1, Math.min(10, Math.floor((rows - 4) / 2)));
     // Provider-driven only: the block appears when the model actually streams
     // reasoning, never just because a request is in flight.
     const hasThinkingBlock = initialized && !thinkingArchived && thinkingText.length > 0;
@@ -2079,6 +2511,18 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const todoRows = todoPanelRows(todos, visibleTodos);
     const helpRows = helpMessage ? helpMessage.split('\n').length + 3 : 0;
     const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
+    // Activity indicator: exactly one reserved row above the composer while the
+    // agent is working. Nothing is ever drawn on top of the input.
+    const busy = loading || isStreaming || Boolean(activeTool);
+    const liveActivity = activeTool
+        ? 'tool'
+        : isStreaming
+            ? 'streaming'
+            : loading
+                ? 'thinking'
+                : 'waiting';
+    const statusRows = busy ? 1 : 0;
+    const busyElapsedMs = busyStartedAt !== null ? Math.max(0, busyClock - busyStartedAt) : 0;
     // Panels that stay under the transcript (todos, help, child agents) reserve
     // their own rows; thinking and streaming live inside the transcript now.
     const area = splitLiveArea(frameHeight, {
@@ -2086,6 +2530,10 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         thinking: 0,
         help: helpRows,
         streaming: subAgentRows,
+        status: statusRows,
+        dense,
+        // Rows added by a grown composer beyond its single-line default.
+        composer: Math.max(0, composerRows - 1),
     });
     const maxStreamRows = Math.max(2, Math.min(MAX_LIVE_STREAM_ROWS, area.transcriptRows));
     const streamingIsDiff = isStreaming && looksLikeDiff(streamingText);
@@ -2123,7 +2571,12 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // items use the height Ink measured for them.
     const sizedItems = searchMatches.map((item) => ({
         item,
-        rows: liveRowMap.get(item.id) ?? measuredHeights[item.id] ?? fallbackItemRows(item.node),
+        rows: resolveItemRows({
+            live: liveRowMap.get(item.id),
+            node: nodeHeight(item.node),
+            measured: measuredHeights[item.id],
+            fallback: fallbackItemRows(item.node),
+        }),
     }));
     // The transcript is one flow: archived messages followed by the live tail.
     const liveSized = liveItems.map((item) => ({
@@ -2165,6 +2618,13 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         rows: entry.rows,
     }));
     const trimTop = windowSlice.trimTop;
+    // The window is sliced by measured rows, but measurement can lag a frame (a
+    // freshly archived card, a resize). Padding the region to exactly the
+    // viewport height makes the transcript a solid block: nothing from a previous
+    // frame can survive underneath it, and text can never be painted below the
+    // composer.
+    const usedRows = visibleRowItems.reduce((total, entry) => total + entry.rows, 0) - trimTop;
+    const fillerRows = transcriptFillerRows(viewportRows, usedRows);
     // Input handlers can fire faster than React re-renders (wheel bursts), so
     // keep the scroll position in a ref and clamp against the latest layout.
     const scrollStateRef = useRef({ userScroll: effectiveUserScroll, maxUserScroll });
@@ -2276,7 +2736,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 }
             }
             // The theme picker also accepts 1-5 as a direct pick.
-            if (picker === 'theme' && /^[1-5]$/.test(input)) {
+            if (picker === 'theme' && /^[1-9]$/.test(input) && Number(input) <= THEME_NAMES.length) {
                 const name = THEME_NAMES[Number(input) - 1];
                 if (name)
                     applyTheme(name);
@@ -2381,6 +2841,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         // confirming approval. a/e/u/w are left to PromptInput's text editing.
         const dismissible = !picker && settingsIndex === null && !keyPrompt && !pendingApproval && !pendingAsk;
         if (dismissible) {
+            // Tab inside an @mention belongs to completion, not to the mode toggle.
+            if (key.tab && findMentionToken(inputText, inputText.length))
+                return;
             // Tab switches build <-> plan mode. PromptInput ignores Tab, so focus and
             // composition are unaffected.
             if (key.tab) {
@@ -2523,10 +2986,15 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 return;
             }
             if (key.upArrow) {
+                // A grown composer owns the arrows: they move the caret between rows.
+                if (composerRows > 1 && !key.shift)
+                    return;
                 scrollBy(key.shift ? 3 : 1);
                 return;
             }
             if (key.downArrow) {
+                if (composerRows > 1 && !key.shift)
+                    return;
                 scrollBy(-(key.shift ? 3 : 1));
                 return;
             }
@@ -2631,7 +3099,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             : undefined, hint: "\u2191\u2193 pick \u00B7 tab to type \u00B7 enter send \u00B7 esc skip", columns: columns, compact: compactDialog, children: _jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onRespond: (response) => {
                 pendingAsk.resolve(response);
                 setPendingAsk(null);
-            } }) })) : keyPrompt ? (_jsx(Dialog, { title: "API key", badge: keyPrompt.providerName, hint: keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel', columns: columns, compact: compactDialog, children: _jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onSubmit: (value) => { void handleApiKeySubmit(value); } }) })) : settingsIndex !== null ? (_jsx(Dialog, { title: "Settings", badge: `${settingsIndex + 1}/${settingItems.length}`, hint: "\u2191\u2193 move \u00B7 enter toggle/open \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'theme' ? (_jsx(Dialog, { title: "Theme", accentGlyph: "\u25C8", borderStyle: "square", badge: `${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 1-5 pick \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: themeItems, selected: clampIndex(pickerIndex, themeItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'model' ? (_jsxs(Dialog, { title: "Select model", badge: modelProvider ? modelProvider.name : undefined, hint: "type to search \u00B7 \u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, children: "search  " }), _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: theme.text, wrap: "truncate-end", children: [modelSearch, _jsx(Text, { inverse: true, children: ' ' })] }) }), _jsx(Text, { color: theme.dim, children: `  ${modelItems.length}` })] }), (modelsLoading || modelNotice) && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
+            } }) })) : keyPrompt ? (_jsx(Dialog, { title: "API key", badge: keyPrompt.providerName, hint: keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel', columns: columns, compact: compactDialog, children: _jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onSubmit: (value) => { void handleApiKeySubmit(value); } }) })) : settingsIndex !== null ? (_jsx(Dialog, { title: "Settings", badge: `${settingsIndex + 1}/${settingItems.length}`, hint: "\u2191\u2193 move \u00B7 enter toggle/open \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'theme' ? (_jsx(Dialog, { title: "Theme", accentGlyph: "\u25C8", borderStyle: "square", badge: `${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`, hint: `↑↓ move · enter use · 1-${THEME_NAMES.length} pick · esc close`, columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: themeItems, selected: clampIndex(pickerIndex, themeItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'model' ? (_jsxs(Dialog, { title: "Select model", badge: modelProvider ? modelProvider.name : undefined, hint: "type to search \u00B7 \u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, children: "search  " }), _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: theme.text, wrap: "truncate-end", children: [modelSearch, _jsx(Text, { inverse: true, children: ' ' })] }) }), _jsx(Text, { color: theme.dim, children: `  ${modelItems.length}` })] }), (modelsLoading || modelNotice) && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
                     ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
                     : modelNotice })), _jsx(DialogList, { items: modelItems, selected: selectedModelIndex, maxVisible: paletteWindow, empty: modelEmptyMessage, compact: compactDialog })] })) : picker === 'provider' ? (_jsx(Dialog, { title: "Select provider", badge: `${providerItems.length} available`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: providerItems, selected: clampIndex(pickerIndex, providerItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'session' ? (_jsx(Dialog, { title: pendingSessionDelete ? 'Delete session?' : 'Select session', badge: pendingSessionDelete?.label, hint: pendingSessionDelete
             ? 'y delete permanently · n cancel'
@@ -2643,13 +3111,33 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // A dialog owns the full frame so its card floats on a clean canvas. This
     // can trigger Ink's full-repaint path while navigating, which is acceptable
     // for a modal that is not streaming.
-    return (_jsxs(Box, { flexDirection: "column", height: dialogActive ? rows : frameHeight, backgroundColor: theme.bg, children: [!dialogActive && (_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
+    return (_jsxs(Box, { flexDirection: "column", height: dialogActive ? rows : frameHeight, backgroundColor: theme.bg, overflow: "hidden", children: [!dialogActive && (_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", backgroundColor: theme.bg, children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
                                     // First item is partly above the viewport. Trim its top rows
                                     // by shifting it up inside a clipped, fixed-height box. A
                                     // blank spacer here shows empty rows and shoves the item's
                                     // bottom off-screen. The wrapper is registered for clicks so
                                     // the yoga lookup still sees the clipped geometry.
-                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id)))] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow }))] }), initialized && !dialogActive && (_jsx(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: 1, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: 1, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026", width: composerWidth }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: 1, flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] }) })), initialized && !dialogActive && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, folder: folderName, busy: loading, tool: activeTool, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense, segments: settings.statusLine ?? STATUS_LINE_ITEMS }))] }));
+                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id))), fillerRows > 0 && _jsx(Box, { height: fillerRows, flexShrink: 0 })] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow, query: inputText.trim(), columns: columns, hint: "\u2191\u2193 move \u00B7 tab complete \u00B7 enter run \u00B7 esc close" }))] }), initialized && !dialogActive && (_jsxs(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: [busy && !hasCriticalPrompt ? (_jsx(Box, { width: layout.inputWidth, flexShrink: 0, children: _jsx(LiveStatus, { columns: layout.inputWidth, activity: liveActivity, tool: activeTool, elapsedMs: busyElapsedMs, tps: decodeTps, frame: spinnerFrame, animate: animationsEnabled, gutter: 1 }) })) : null, _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: composerRows, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: composerRows, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026  (shift+enter newline \u00B7 @file \u00B7 /commands)", width: composerWidth, maxRows: composerMaxRows, onRowsChange: setComposerRows, onHistoryPrev: () => {
+                                        const nav = historyNavigatorRef.current;
+                                        if (!nav)
+                                            return null;
+                                        if (nav.position === -1)
+                                            nav.rememberDraft(inputText);
+                                        return nav.up();
+                                    }, onHistoryNext: () => historyNavigatorRef.current?.down() ?? null, onPaste: async (text) => {
+                                        const summary = await summarizePaste(text, { label: session?.id ?? 'paste' });
+                                        return summary.text;
+                                    }, onCompleteMention: async (value, cursor) => {
+                                        const mention = findMentionToken(value, cursor);
+                                        if (!mention)
+                                            return null;
+                                        const matches = await listMentionCandidates(process.cwd(), mention.token, 20);
+                                        if (matches.length === 0)
+                                            return null;
+                                        const replacement = matches.length === 1 ? matches[0] : commonPrefix(matches);
+                                        const applied = applyMention(value, mention, replacement);
+                                        return { value: applied.text, cursor: applied.cursor };
+                                    } }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: composerRows, flexShrink: 0, alignItems: "flex-end", children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] })] })), initialized && !dialogActive && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, tps: decodeTps, folder: folderName, busy: false, tool: null, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense, segments: settings.statusLine ?? STATUS_LINE_ITEMS }))] }));
 };
 /**
  * Owns the UI settings so the selected palette can be published to the whole

@@ -1,12 +1,12 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { CodeBlock } from '../components/CodeBlock.js';
-import { DiffView } from '../components/DiffView.js';
-import { ReadFileView } from '../components/ReadFileView.js';
+import { DiffView, DIFF_PREVIEW_LINES } from '../components/DiffView.js';
+import { ReadFileView, READ_PREVIEW_LINES } from '../components/ReadFileView.js';
 import { ShellView } from '../components/ShellView.js';
 import { getTheme } from '../theme.js';
 import { detectLanguage } from './code-highlight.js';
-import { displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
+import { annotateDiff, displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
 import { parseShellResult } from './shell-result.js';
 import { formatToolActivity } from './tool-display.js';
 import { isNotification } from '../tools/notify.js';
@@ -74,12 +74,20 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
     }
     const fileDiff = parseFileMutationDiff(toolName, toolArgs, rawResult);
     if (fileDiff) {
-        addStatic(_jsx(DiffView, { header: fileDiff.header, diff: fileDiff.diff, filePath: fileDiff.filePath, operation: fileDiff.operation }));
+        const collapsed = _jsx(DiffView, { ...fileDiff });
+        // Only offer expansion when there is actually more to see, so a short
+        // patch does not advertise a toggle that would do nothing.
+        const truncated = annotateDiff(fileDiff.diff).length > DIFF_PREVIEW_LINES;
+        const expanded = _jsx(DiffView, { ...fileDiff, expanded: true });
+        addStatic(collapsed, truncated ? { collapsed, expanded } : undefined);
         return;
     }
     const fileRead = parseFileReadResult(toolName, toolArgs, rawResult);
     if (fileRead) {
-        addStatic(_jsx(ReadFileView, { ...fileRead }));
+        const totalLines = fileRead.sections.reduce((total, section) => total + section.lines.length, 0);
+        const collapsed = _jsx(ReadFileView, { ...fileRead });
+        const expanded = _jsx(ReadFileView, { ...fileRead, expanded: true });
+        addStatic(collapsed, totalLines > READ_PREVIEW_LINES ? { collapsed, expanded } : undefined);
         return;
     }
     const shell = parseShellResult(toolName, toolArgs, rawResult);

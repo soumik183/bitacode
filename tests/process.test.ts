@@ -108,3 +108,28 @@ test('process tools report unknown ids clearly', () => {
   assert.match(writeProcessStdin('proc-missing', 'x'), /unknown process id/i);
   assert.match(stopProcess('proc-missing'), /unknown process id/i);
 });
+
+// ── Regression: the process tools share bash's gate ─────────────────────────
+// `start_process` used to check a command prefix only, then spawn through a
+// shell, so `cat /etc/hostname` ran with no approval and no path check.
+
+test('startProcess refuses paths outside the working directory', async () => {
+  const result = await startProcess('cat /etc/hostname');
+  assert.match(result, /blocked/i);
+  assert.match(result, /outside the allowed working directory/i);
+});
+
+test('startProcess refuses a command word that points outside the sandbox', async () => {
+  const result = await startProcess('/usr/bin/env');
+  assert.match(result, /blocked|outside/i);
+});
+
+test('startProcess hard-blocks dangerous commands even with approval', async () => {
+  const result = await startProcess('mkfs.ext4 /dev/sda');
+  assert.match(result, /blocked for safety/i);
+});
+
+test('startProcess validates its cwd like bash does', async () => {
+  const result = await startProcess('sleep 0.1', undefined, '/etc');
+  assert.match(result, /Invalid working directory|outside/i);
+});

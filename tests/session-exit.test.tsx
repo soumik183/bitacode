@@ -11,6 +11,7 @@ import { settle, waitForFrame } from './helpers/wait.js';
 
 test('ctrl+c saves the session and prints a resume card after Ink exits', async () => {
   const originalHome = process.env.HOME;
+  const originalCwd = process.cwd();
   const originalKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-exit-'));
   process.env.HOME = home;
@@ -24,6 +25,8 @@ test('ctrl+c saves the session and prints a resume card after Ink exits', async 
     })
   );
 
+  // The project config lives under <cwd>; keep the test inside its sandbox.
+  process.chdir(home);
   const app = render(<App />);
   try {
     await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
@@ -53,6 +56,7 @@ test('ctrl+c saves the session and prints a resume card after Ink exits', async 
   } finally {
     app.unmount();
     app.cleanup();
+    process.chdir(originalCwd);
     process.env.HOME = originalHome;
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalKey;

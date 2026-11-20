@@ -7,6 +7,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { validatePath } from '../utils/path-validation.js';
 
 export const readImageTool = {
   type: 'function' as const,
@@ -51,7 +52,9 @@ export async function readImage(filePath: string): Promise<string> {
   if (filePath.includes('\0')) return 'Error: file_path contains a null byte.';
 
   try {
-    const absolute = path.resolve(process.cwd(), filePath);
+    // Same sandbox as every other file tool: `../outside.png` must not turn
+    // into base64 bytes in the model context.
+    const absolute = await validatePath(filePath);
     const stat = await fs.stat(absolute);
     if (!stat.isFile()) return `Error: '${filePath}' is not a file.`;
     if (stat.size === 0) return `Error: '${filePath}' is empty.`;

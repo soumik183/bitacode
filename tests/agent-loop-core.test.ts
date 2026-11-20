@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runAgenticLoop, type AgentEvent } from '../src/agentic-loop.js';
+import { ensureUsableHistory, runAgenticLoop, type AgentEvent } from '../src/agentic-loop.js';
 
 /** Minimal OpenAI-shaped client: chat.completions.create resolves to an async stream. */
 function makeClient(create: (...args: any[]) => any): any {
@@ -98,4 +98,28 @@ test('duplicate tool_call ids are deduped before execution', async () => {
   assert.equal(running.length, 1, 'only one tool call executed after dedupe');
   const toolResults = result.filter((m) => m.role === 'tool');
   assert.equal(toolResults.length, 1, 'only one tool result message');
+});
+
+// ── Regression: never send a request with no conversation in it ─────────────
+test('ensureUsableHistory restores a system prompt and the user turn', () => {
+  const messages: any[] = [];
+  const events: any[] = [];
+  const repaired = ensureUsableHistory(messages, 'fix the bug', 'system prompt', (event) =>
+    events.push(event)
+  );
+
+  assert.equal(repaired, true);
+  assert.deepEqual(messages.map((message) => message.role), ['system', 'user']);
+  assert.equal(messages[0].content, 'system prompt');
+  assert.equal(messages[1].content, 'fix the bug');
+  assert.equal(events.length, 1, 'the recovery is reported to the UI');
+});
+
+test('ensureUsableHistory leaves a healthy history untouched', () => {
+  const messages: any[] = [
+    { role: 'system', content: 'system prompt' },
+    { role: 'user', content: 'hi' },
+  ];
+  assert.equal(ensureUsableHistory(messages, 'hi', 'system prompt'), false);
+  assert.equal(messages.length, 2);
 });

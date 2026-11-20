@@ -2,8 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   clampIndex,
+  composerBlockRows,
   composerTextWidth,
   finiteDim,
+  fixedChromeRows,
+  footerBlockRows,
   frameRows,
   resolveLayout,
   splitLiveArea,
@@ -108,9 +111,28 @@ test('transcript never collapses to zero on a tiny frame', () => {
 test('live rows sum every panel that is present', () => {
   const split = splitLiveArea(23, { todos: 3, thinking: 5, help: 0, streaming: 2 });
   assert.equal(split.liveRows, 10);
-  // Fixed chrome is composer + footer + gap (5 rows) now that the horizontal
-  // rule between chat and composer has been removed.
-  assert.equal(split.transcriptRows, 23 - 5 - 10);
+  // Fixed chrome is the padded composer card (3), the footer (2) and the gap
+  // above the composer (1). Budgeting only 5 was the row the live area used to
+  // steal from the input.
+  assert.equal(fixedChromeRows(), 6);
+  assert.equal(split.transcriptRows, 23 - 6 - 10);
+});
+
+test('the activity strip gets its own row so it cannot overlay the composer', () => {
+  const idle = splitLiveArea(23, { todos: 0, thinking: 0, help: 0, streaming: 0 });
+  const busy = splitLiveArea(23, { todos: 0, thinking: 0, help: 0, streaming: 0, status: 1 });
+  assert.equal(busy.liveRows, idle.liveRows + 1);
+  assert.equal(busy.transcriptRows, idle.transcriptRows - 1);
+});
+
+test('a dense terminal spends no rows on composer padding or footer margin', () => {
+  assert.equal(composerBlockRows(1, true), 1);
+  assert.equal(composerBlockRows(1, false), 3);
+  assert.equal(footerBlockRows(true), 1);
+  assert.equal(footerBlockRows(false), 2);
+  const denseSplit = splitLiveArea(12, { todos: 0, thinking: 0, help: 0, streaming: 0, dense: true });
+  const roomySplit = splitLiveArea(12, { todos: 0, thinking: 0, help: 0, streaming: 0 });
+  assert.equal(denseSplit.transcriptRows, roomySplit.transcriptRows + 3);
 });
 
 test('clampIndex keeps a picker selection inside a list that just shrank', () => {

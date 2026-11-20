@@ -4,8 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  countConversationMessages,
   createSession,
   deleteSession,
+  formatSessionAge,
+  generateTitle,
+  isValidSessionId,
+  titleFromText,
   ensureSystemPromptAtTop,
   hasConversationMessages,
   listSessions,
@@ -452,4 +457,66 @@ test('deleteSession removes a session that has sub-agent activities', async () =
   assert.equal(await deleteSession(session.id), true);
   assert.ok(!fs.existsSync(filePath));
   assert.equal(await loadSession(session.id), null);
+});
+
+// ─── Session titles, counts and ids ──────────────────────────────────────
+
+test('titles ignore harness wrappers, collapse lines and stay short', () => {
+  const messages = [
+    { role: 'system', content: 'You are Bitacode.' },
+    {
+      role: 'user',
+      content: '<system-reminder>context</system-reminder>\n\nfix the   login\nbug please',
+    },
+  ] as any;
+  assert.equal(generateTitle(messages), 'fix the login bug please');
+  assert.equal(titleFromText('```ts\nconst x = 1\n```\nName this session'), 'Name this session');
+  assert.equal(titleFromText('   ...   '), '', 'punctuation-only text has no title');
+  assert.equal(generateTitle([{ role: 'system', content: 'sys' }] as any, 'Untitled · today'), 'Untitled · today');
+  const long = generateTitle([{ role: 'user', content: 'word '.repeat(40) }] as any);
+  assert.ok(long.length <= 60, `title is ${long.length} chars`);
+  assert.ok(long.endsWith('…'));
+  // Only whole words are kept before the ellipsis.
+  assert.ok(!/\sw$/.test(long), 'title never cuts mid-word');
+});
+
+test('message counts exclude the system prompt', () => {
+  const messages = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'hi' },
+    { role: 'assistant', content: 'hello' },
+  ] as any;
+  assert.equal(countConversationMessages(messages), 2);
+});
+
+test('listing repairs blank titles and reports real message counts', async () => {
+  const session = createSession('m', 'p');
+  session.title = '';
+  session.completionMessages = [
+    { role: 'system', content: 'sys' },
+    { role: 'user', content: 'rename the config key' },
+    { role: 'assistant', content: 'done' },
+  ] as any;
+  await saveSession(session);
+
+  const [summary] = await listSessions();
+  assert.equal(summary.id, session.id);
+  assert.equal(summary.title, 'rename the config key');
+  assert.equal(summary.messageCount, 2, 'system prompt is not counted');
+});
+
+test('session age is human and monotonic', () => {
+  const now = Date.parse('2026-01-02T12:00:00.000Z');
+  const at = (ms: number) => new Date(now - ms).toISOString();
+  assert.equal(formatSessionAge(at(5_000), now), 'just now');
+  assert.equal(formatSessionAge(at(12 * 60_000), now), '12m ago');
+  assert.equal(formatSessionAge(at(3 * 3_600_000), now), '3h ago');
+  assert.equal(formatSessionAge(at(2 * 86_400_000), now), '2d ago');
+  assert.equal(formatSessionAge('not a date', now), 'unknown');
+});
+
+test('runtime tags are never accepted as session ids', () => {
+  assert.equal(isValidSessionId(createSession('m', 'p').id), true, 'generated ids are loadable');
+  assert.equal(isValidSessionId('headless-lz9k'), false, 'headless run tags are not session ids');
+  assert.equal(isValidSessionId('../escape'), false);
 });

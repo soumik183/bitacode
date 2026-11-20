@@ -44,6 +44,7 @@ test('live thinking renders directly after the user message', async () => {
   const port = (server.address() as { port: number }).port;
 
   const originalHome = process.env.HOME;
+  const originalCwd = process.cwd();
   const originalBase = process.env.BITACODE_BASE_URL;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-stream-'));
   process.env.HOME = home;
@@ -60,6 +61,8 @@ test('live thinking renders directly after the user message', async () => {
     })
   );
 
+  // Stay inside the sandbox so the project config never points at the repo.
+  process.chdir(home);
   const app = render(<App />);
   try {
     await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
@@ -69,10 +72,14 @@ test('live thinking renders directly after the user message', async () => {
     await waitForFrame(app.lastFrame, (f) => f.includes('999'));
     await settle(250);
     app.stdin.write('\r');
-    const frame = stripAnsi(await waitForFrame(app.lastFrame, (f) => f.includes('Thinking')));
+    // Wait for the reasoning text itself: the activity strip also says
+    // "Thinking" now, so matching the label alone would read the frame before
+    // the transcript block exists.
+    const frame = stripAnsi(await waitForFrame(app.lastFrame, (f) => f.includes('step one think')));
     const lines = frame.split('\n');
     const userRow = lines.findIndex((line) => line.includes('999'));
-    const thinkRow = lines.findIndex((line) => line.includes('Thinking'));
+    const thinkRow = lines.findIndex((line) => line.includes('step one think'));
+    assert.ok(frame.includes('Thinking'), 'the block keeps its label');
     assert.ok(userRow >= 0, 'user message rendered');
     assert.ok(thinkRow >= 0, 'thinking rendered');
     assert.ok(thinkRow > userRow, 'thinking comes after the user message');
@@ -81,6 +88,7 @@ test('live thinking renders directly after the user message', async () => {
     app.unmount();
     app.cleanup();
     server.close();
+    process.chdir(originalCwd);
     process.env.HOME = originalHome;
     if (originalBase === undefined) delete process.env.BITACODE_BASE_URL;
     else process.env.BITACODE_BASE_URL = originalBase;

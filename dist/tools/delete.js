@@ -36,7 +36,9 @@ export async function deletePath(filePath, recursive, sessionId) {
         if (isDirectory && !asBoolean(recursive)) {
             throw new Error(`'${requested}' is a directory; pass recursive: true to delete it.`);
         }
-        const approved = await approve('shell_command', `Delete ${requested}${isDirectory ? ' (recursive)' : ''}`, `Path: ${validated}\nType: ${isDirectory ? 'directory' : stat.isSymbolicLink() ? 'symlink' : 'file'}`, `delete:${validated}`, sessionId);
+        // Deleting a file is a file operation, not a shell command: the approval
+        // card used the shell wording and skipped the file-approval styling.
+        const approved = await approve('file_write', `Delete ${requested}${isDirectory ? ' (recursive)' : ''}`, `Path: ${validated}\nType: ${isDirectory ? 'directory' : stat.isSymbolicLink() ? 'symlink' : 'file'}`, `delete:${validated}`, sessionId);
         if (!approved)
             return cancelled(`deletion of ${requested}`);
         await fs.rm(validated, { recursive: asBoolean(recursive), force: false });

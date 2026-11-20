@@ -8,7 +8,7 @@
  * Logs are written to a file to avoid interfering with Ink UI rendering.
  */
 
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, createWriteStream, type WriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import stripAnsi from 'strip-ansi';
@@ -23,6 +23,9 @@ export enum LogLevel {
 
 let currentLevel: LogLevel = LogLevel.INFO;
 let logFilePath: string | null = null;
+// One kept-open stream instead of an append-and-open per line: debug logging on
+// every tool delta used to mean thousands of synchronous open/write/close calls.
+let logStream: WriteStream | null = null;
 
 // In-memory log buffer for UI display
 export interface LogEntry {
@@ -56,15 +59,16 @@ export function getRecentLogs(count: number = 50): LogEntry[] {
 }
 
 export function initLogFile(): string {
-  // Create logs directory
-  const logsDir = join(homedir(), '.local', 'share', 'bitacode', 'logs');
+  // Create logs directory private to the user: logs contain prompts and paths.
+  const logsDir = getLogDirectory();
   if (!existsSync(logsDir)) {
-    mkdirSync(logsDir, { recursive: true });
+    mkdirSync(logsDir, { recursive: true, mode: 0o700 });
   }
 
   // Create log file with timestamp
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   logFilePath = join(logsDir, `bitacode-${timestamp}.log`);
+  closeLogFile();
 
   // Write header
   writeToFile(`\n${'='.repeat(80)}\nBitacode Log - ${new Date().toISOString()}\n${'='.repeat(80)}\n`);
@@ -72,12 +76,40 @@ export function initLogFile(): string {
   return logFilePath;
 }
 
+/** Directory that holds the log files (created on first write). */
+export function getLogDirectory(): string {
+  return join(homedir(), '.local', 'share', 'bitacode', 'logs');
+}
+
+/** Path of the current log file, or the directory when logging is not enabled. */
+export function getLogFilePath(): string {
+  return logFilePath ?? getLogDirectory();
+}
+
+/** Flush and close the log stream (tests and process exit). */
+export function closeLogFile(): void {
+  if (!logStream) return;
+  try {
+    logStream.end();
+  } catch {
+    // Already closed.
+  }
+  logStream = null;
+}
+
 function writeToFile(message: string): void {
   if (!logFilePath) {
     initLogFile();
   }
   try {
-    appendFileSync(logFilePath!, message);
+    if (!logStream) {
+      logStream = createWriteStream(logFilePath!, { flags: 'a', mode: 0o600 });
+      // A failed log write must never take the TUI down.
+      logStream.on('error', () => {
+        logStream = null;
+      });
+    }
+    logStream.write(message);
   } catch (err) {
     // Emit to stderr since we can't write to log file
     process.stderr.write(`Failed to write to log file: ${err}\n`);

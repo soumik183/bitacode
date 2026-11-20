@@ -1,5 +1,7 @@
 import type { OpenAI } from 'openai';
-import { getModelDetails } from '../providers/index.js';
+import { getProvider, getModelDetails } from '../providers/index.js';
+import { readModelCache, writeModelCache } from './model-cache.js';
+import { logger } from './logger.js';
 
 export interface FetchedModel {
   id: string;
@@ -12,6 +14,10 @@ export interface ProviderModelList {
   items: FetchedModel[];
   error: string | null;
   authError: boolean;
+  /** Served without waiting for the network. */
+  fromCache?: boolean;
+  /** Cached but older than the TTL; a refresh is running in the background. */
+  stale?: boolean;
 }
 
 // Providers expose chat and non-chat models on the same OpenAI-compatible
@@ -22,6 +28,20 @@ const NON_CHAT_MODEL =
 
 const MAX_MODELS = 300;
 
+/**
+ * Network budget for a model-list request. The list is small and the endpoint
+ * answers in well under a second when it is healthy; four seconds keeps a
+ * hanging proxy from pinning the picker open.
+ */
+export const MODEL_FETCH_TIMEOUT_MS = 4_000;
+
+/** In-process layer so repeated picker opens skip both disk and network. */
+const memoryCache = new Map<string, { items: FetchedModel[]; fetchedAt: number }>();
+/** Shared promise per provider so concurrent callers make one request. */
+const inflight = new Map<string, Promise<ProviderModelList>>();
+
+const CACHE_TTL_MS = 5 * 60_000;
+
 export function formatContextWindow(contextWindow?: number): string | undefined {
   if (!contextWindow || contextWindow <= 0) return undefined;
   if (contextWindow >= 1_000_000) {
@@ -30,20 +50,65 @@ export function formatContextWindow(contextWindow?: number): string | undefined 
   return `${Math.round(contextWindow / 1000)}k ctx`;
 }
 
-/** Fetch a provider's live model list through its OpenAI-compatible API. */
-export async function listProviderModels(
+function keyFor(providerId: string, baseURL?: string): string {
+  return `${providerId}::${baseURL ?? ''}`;
+}
+
+/** Built-in/configured models, used when the network is slow, absent or partial. */
+export function staticModels(providerId: string): FetchedModel[] {
+  return (getProvider(providerId)?.models ?? []).map((model) => ({
+    id: model.id,
+    label: model.name || model.id,
+    description: formatContextWindow(model.contextWindow),
+    contextWindow: model.contextWindow,
+  }));
+}
+
+/** De-duplicates by id, keeping the richer of the two entries. */
+function mergeWithStatic(providerId: string, remote: FetchedModel[]): FetchedModel[] {
+  const merged = new Map<string, FetchedModel>();
+  for (const model of staticModels(providerId)) merged.set(model.id, model);
+  for (const model of remote) {
+    const known = merged.get(model.id);
+    merged.set(model.id, {
+      ...known,
+      ...model,
+      label: model.label || known?.label || model.id,
+      contextWindow: model.contextWindow ?? known?.contextWindow,
+      description: model.description ?? known?.description,
+    });
+  }
+  const chat = Array.from(merged.values()).filter((model) => !NON_CHAT_MODEL.test(model.id));
+  return (chat.length > 0 ? chat : Array.from(merged.values()))
+    .sort((a, b) => a.label.localeCompare(b.label))
+    .slice(0, MAX_MODELS);
+}
+
+function describeFetchError(err: any): { error: string; authError: boolean } {
+  const status = Number(err?.status ?? err?.response?.status ?? 0);
+  const message = String(err?.message ?? err ?? 'Unknown error').replace(/\s+/g, ' ').slice(0, 200);
+  // Some providers report a bad key as 400 (Google) instead of 401.
+  const keyRejected =
+    status === 401 ||
+    status === 403 ||
+    (status >= 400 && status < 500 && /(api.?key|unauthorized|authentication|permission)/i.test(message));
+  return { error: message, authError: keyRejected };
+}
+
+async function fetchFromNetwork(
   client: OpenAI,
-  providerId: string
+  providerId: string,
+  timeoutMs: number
 ): Promise<ProviderModelList> {
   try {
-    const page = await client.models.list({ timeout: 10_000, maxRetries: 0 });
+    const page = await client.models.list({ timeout: timeoutMs, maxRetries: 0 });
     const data = (page as { data?: unknown }).data;
     if (!Array.isArray(data)) {
-      return { items: [], error: 'The provider returned no model list.', authError: false };
+      return { items: staticModels(providerId), error: 'The provider returned no model list.', authError: false };
     }
 
     const seen = new Set<string>();
-    const all: FetchedModel[] = [];
+    const remote: FetchedModel[] = [];
     for (const raw of data as Array<Record<string, any>>) {
       const id = typeof raw?.id === 'string' ? raw.id.trim() : '';
       if (!id || seen.has(id)) continue;
@@ -54,7 +119,7 @@ export async function listProviderModels(
       const contextWindow = rawContext > 0 ? rawContext : details?.contextWindow;
       const name = typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : details?.name;
 
-      all.push({
+      remote.push({
         id,
         label: name ?? id,
         description: formatContextWindow(contextWindow),
@@ -62,20 +127,125 @@ export async function listProviderModels(
       });
     }
 
-    const chat = all.filter((model) => !NON_CHAT_MODEL.test(model.id));
-    const items = (chat.length > 0 ? chat : all)
-      .sort((a, b) => a.label.localeCompare(b.label))
-      .slice(0, MAX_MODELS);
-
-    return { items, error: null, authError: false };
+    return { items: mergeWithStatic(providerId, remote), error: null, authError: false };
   } catch (err: any) {
-    const status = Number(err?.status ?? err?.response?.status ?? 0);
-    const message = String(err?.message ?? err ?? 'Unknown error').replace(/\s+/g, ' ').slice(0, 200);
-    // Some providers report a bad key as 400 (Google) instead of 401.
-    const keyRejected =
-      status === 401 ||
-      status === 403 ||
-      (status >= 400 && status < 500 && /(api.?key|unauthorized|authentication|permission)/i.test(message));
-    return { items: [], error: message, authError: keyRejected };
+    return { items: staticModels(providerId), ...describeFetchError(err) };
   }
+}
+
+/**
+ * Fetch a provider's live model list through its OpenAI-compatible API.
+ *
+ * Fast path: a fresh disk/memory cache answers synchronously. When the cache is
+ * stale the stale list is returned immediately and a refresh runs in the
+ * background, so the picker never waits on a slow provider. The request itself
+ * is coalesced per provider and bounded by {@link MODEL_FETCH_TIMEOUT_MS}.
+ */
+export async function listProviderModels(
+  client: OpenAI,
+  providerId: string,
+  options: { timeoutMs?: number; baseURL?: string; useCache?: boolean; refresh?: boolean } = {}
+): Promise<ProviderModelList> {
+  const { timeoutMs = MODEL_FETCH_TIMEOUT_MS, baseURL, useCache = true, refresh = false } = options;
+  const key = keyFor(providerId, baseURL);
+  const now = Date.now();
+
+  if (useCache && !refresh) {
+    const memory = memoryCache.get(key);
+    if (memory && now - memory.fetchedAt < CACHE_TTL_MS) {
+      return { items: memory.items, error: null, authError: false, fromCache: true, stale: false };
+    }
+
+    const disk = await readModelCache(providerId, baseURL, now);
+    if (disk) {
+      const items = mergeWithStatic(providerId, disk.items);
+      memoryCache.set(key, { items, fetchedAt: disk.fetchedAt });
+      if (!disk.stale) {
+        return { items, error: null, authError: false, fromCache: true, stale: false };
+      }
+      // Stale-while-revalidate: hand back what we have and refresh behind it.
+      void refreshInBackground(client, providerId, key, baseURL, timeoutMs);
+      return { items, error: null, authError: false, fromCache: true, stale: true };
+    }
+  }
+
+  // Re-check after the disk read: a concurrent caller may have finished while
+  // this call was waiting on the file system.
+  const fresh = memoryCache.get(key);
+  if (fresh && Date.now() - fresh.fetchedAt < CACHE_TTL_MS) {
+    return { items: fresh.items, error: null, authError: false, fromCache: true, stale: false };
+  }
+
+  const pending = inflight.get(key);
+  if (pending) return pending;
+
+  const request = (async () => {
+    const result = await fetchFromNetwork(client, providerId, timeoutMs);
+    if (result.items.length > 0) {
+      memoryCache.set(key, { items: result.items, fetchedAt: Date.now() });
+      // Awaited so a one-shot process (headless -p, CLI subcommands) still
+      // leaves a warm cache behind; a small write is far cheaper than a fetch.
+      await writeModelCache(providerId, baseURL, result.items);
+    }
+    return result;
+  })();
+
+  inflight.set(key, request);
+  try {
+    return await request;
+  } finally {
+    inflight.delete(key);
+  }
+}
+
+async function refreshInBackground(
+  client: OpenAI,
+  providerId: string,
+  key: string,
+  baseURL: string | undefined,
+  timeoutMs: number
+): Promise<void> {
+  if (inflight.has(key)) return;
+  const request = (async () => {
+    try {
+      const result = await fetchFromNetwork(client, providerId, timeoutMs);
+      if (result.items.length > 0 && !result.error) {
+        memoryCache.set(key, { items: result.items, fetchedAt: Date.now() });
+        await writeModelCache(providerId, baseURL, result.items);
+      }
+    } catch (error: any) {
+      // Background refresh is best effort.
+      logger.debug('Model list refresh failed', { providerId, error: String(error?.message ?? error) });
+    }
+  })();
+  inflight.set(key, request as unknown as Promise<ProviderModelList>);
+  try {
+    await request;
+  } finally {
+    inflight.delete(key);
+  }
+}
+
+/** Warm the cache without blocking startup or the UI. */
+export function prefetchProviderModels(
+  client: OpenAI,
+  providerId: string,
+  options: { baseURL?: string; timeoutMs?: number } = {}
+): void {
+  const key = keyFor(providerId, options.baseURL);
+  const memory = memoryCache.get(key);
+  if (memory && Date.now() - memory.fetchedAt < CACHE_TTL_MS) return;
+  void refreshInBackground(
+    client,
+    providerId,
+    key,
+    options.baseURL,
+    options.timeoutMs ?? MODEL_FETCH_TIMEOUT_MS
+  );
+}
+
+/** Test hook: drop the in-process layer so disk behaviour is observable. */
+export function resetModelListMemoryCacheForTests(): void {
+  memoryCache.clear();
+  inflight.clear();
 }

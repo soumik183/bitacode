@@ -248,24 +248,69 @@ function readRuntimeConfigFileSync(configPath: string): RuntimeConfigFile | null
   }
 }
 
-// Returns the first provider with a valid model from the runtime config.
-// The active provider/model is determined by order: first provider in the
-// config with at least one model, and the first model under that provider.
-function getConfiguredProviderAndModel(runtimeConfig: RuntimeConfigFile): Config | null {
-  for (const [providerId, providerConfig] of Object.entries(runtimeConfig.providers || {})) {
-    const modelId = Object.keys(providerConfig.models || {})[0];
-    if (!modelId) continue;
-    const apiKey = typeof providerConfig.apiKey === 'string' && providerConfig.apiKey.trim().length > 0
-      ? providerConfig.apiKey.trim()
-      : undefined;
-    return {
-      provider: providerId,
-      model: modelId,
-      ...(apiKey ? { apiKey } : {}),
-    };
+function providerApiKeyOf(providerConfig: RuntimeProviderConfig | undefined): string | undefined {
+  const apiKey = providerConfig?.apiKey;
+  return typeof apiKey === 'string' && apiKey.trim().length > 0 ? apiKey.trim() : undefined;
+}
+
+/**
+ * Picks the provider/model the app starts with.
+ *
+ * An explicit `provider`/`model` pair in the config always wins, so saving a
+ * key, reordering providers or rewriting the file can no longer change which
+ * model boots. Configs written before that field existed still resolve by
+ * order, but a provider that actually has a key is preferred over one that
+ * does not, because a keyless entry cannot serve a request.
+ */
+export function selectActiveProviderAndModel(runtimeConfig: RuntimeConfigFile): Config | null {
+  const providers = runtimeConfig.providers || {};
+  const modelsOf = (providerId: string) => Object.keys(providers[providerId]?.models || {});
+
+  const withKey = (providerId: string): Config => {
+    const apiKey = providerApiKeyOf(providers[providerId]);
+    return { provider: providerId, model: runtimeConfig.model ?? '', ...(apiKey ? { apiKey } : {}) };
+  };
+
+  const explicitProvider = typeof runtimeConfig.provider === 'string' ? runtimeConfig.provider.trim() : '';
+  if (explicitProvider && providers[explicitProvider]) {
+    const models = modelsOf(explicitProvider);
+    const explicitModel = typeof runtimeConfig.model === 'string' ? runtimeConfig.model.trim() : '';
+    // A model that is no longer listed is almost always a stale config; fall
+    // back to the provider's first model instead of failing at request time.
+    const modelId = models.includes(explicitModel) ? explicitModel : models[0];
+    if (modelId) {
+      // An explicit choice is an instruction, even when its key comes from the
+      // environment; it is never overridden by provider order.
+      return { ...withKey(explicitProvider), model: modelId };
+    }
   }
 
-  return null;
+  const entries = Object.entries(providers);
+  const keyed = entries.find(([providerId, providerConfig]) =>
+    Object.keys(providerConfig.models || {}).length > 0
+    && resolveApiKey({ provider: providerId, apiKey: providerApiKeyOf(providerConfig) }) !== null);
+  const anyWithModel = keyed
+    ?? entries.find(([, providerConfig]) => Object.keys(providerConfig.models || {}).length > 0);
+
+  if (!anyWithModel) return null;
+  const [providerId, providerConfig] = anyWithModel;
+  const modelId = Object.keys(providerConfig.models || {})[0];
+  if (!modelId) return null;
+  const apiKey = providerApiKeyOf(providerConfig);
+  return { provider: providerId, model: modelId, ...(apiKey ? { apiKey } : {}) };
+}
+
+function getConfiguredProviderAndModel(runtimeConfig: RuntimeConfigFile): Config | null {
+  return selectActiveProviderAndModel(runtimeConfig);
+}
+
+/** Records an explicit selection, keeping the provider first for old readers. */
+function withExplicitSelection(
+  runtimeConfig: RuntimeConfigFile,
+  providerId: string,
+  modelId: string
+): RuntimeConfigFile {
+  return { ...runtimeConfig, provider: providerId, model: modelId };
 }
 
 function writeRuntimeConfigFile(configPath: string, runtimeConfig: RuntimeConfigFile): void {
@@ -300,15 +345,19 @@ function upsertSelectedConfig(
     delete nextProvider.apiKey;
   }
 
-  return {
-    ...existingRuntimeConfig,
-    providers: Object.fromEntries([
-      [newConfig.provider, nextProvider],
-      ...Object.entries(existingProviders).filter(
-        ([providerId]) => providerId !== newConfig.provider
-      ),
-    ]),
-  };
+  return withExplicitSelection(
+    {
+      ...existingRuntimeConfig,
+      providers: Object.fromEntries([
+        [newConfig.provider, nextProvider],
+        ...Object.entries(existingProviders).filter(
+          ([providerId]) => providerId !== newConfig.provider
+        ),
+      ]),
+    },
+    newConfig.provider,
+    newConfig.model
+  );
 }
 
 export function writeInitConfig(
@@ -374,14 +423,29 @@ export const writeProviderApiKey = (
   const configPath = getRuntimeConfigPath(target, cwd);
   const runtimeConfig = readRuntimeConfigFileSync(configPath) || { providers: {}, mcp: { servers: {} } };
   const providerConfig = runtimeConfig.providers?.[providerId] || {};
-
-  writeRuntimeConfigFile(configPath, {
+  const nextConfig: RuntimeConfigFile = {
     ...runtimeConfig,
     providers: {
       ...(runtimeConfig.providers || {}),
       [providerId]: { ...providerConfig, apiKey: apiKey.trim() },
     },
-  });
+  };
+
+  // A key on its own used to leave the selection implicit, so the next launch
+  // booted whichever provider happened to sit first in the file. If nothing
+  // usable is selected yet, make this provider (and its first model) the
+  // selection; if another provider is already selected and runnable, keep it.
+  const selected = selectActiveProviderAndModel(runtimeConfig);
+  const selectedHasKey = Boolean(
+    selected && providerApiKeyOf(runtimeConfig.providers?.[selected.provider])
+  );
+  const firstModel = Object.keys(providerConfig.models || {})[0];
+  if ((!selected || !selectedHasKey) && firstModel) {
+    writeRuntimeConfigFile(configPath, withExplicitSelection(nextConfig, providerId, firstModel));
+    return configPath;
+  }
+
+  writeRuntimeConfigFile(configPath, nextConfig);
   return configPath;
 };
 
@@ -420,13 +484,17 @@ export const writeActiveSelection = (
     ]),
   };
 
-  writeRuntimeConfigFile(configPath, {
-    ...runtimeConfig,
-    providers: {
-      [providerId]: nextProvider,
-      ...Object.fromEntries(Object.entries(providers).filter(([id]) => id !== providerId)),
+  writeRuntimeConfigFile(configPath, withExplicitSelection(
+    {
+      ...runtimeConfig,
+      providers: {
+        [providerId]: nextProvider,
+        ...Object.fromEntries(Object.entries(providers).filter(([id]) => id !== providerId)),
+      },
     },
-  });
+    providerId,
+    modelId
+  ));
   return configPath;
 };
 

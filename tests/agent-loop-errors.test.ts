@@ -328,3 +328,59 @@ test('generic errors redact secrets instead of echoing the raw message', async (
   assert.equal(result.handled, false);
   assert.doesNotMatch(result.errorMessage || '', /sk-secret-value/);
 });
+
+// ── Regression: `400 Input required: specify "prompt" or "messages"` ─────────
+// An empty history reached the provider and the generic repair ladder could not
+// fix it, so the turn ended with "Could not recover". These two cases are the
+// ones seen in the field: messages:[] and a system-only payload.
+
+test('400 with an empty history is repaired instead of declared unrecoverable', async () => {
+  const state = freshState();
+  const messages: any[] = [{ role: 'system', content: 'system prompt' }];
+
+  const result = await handleApiError(
+    { status: 400, message: 'Input required: specify "prompt" or "messages"' },
+    messages,
+    new Set(),
+    undefined,
+    state,
+    1,
+    noEvent,
+    ...tail,
+    undefined,
+    undefined,
+    'the original user request'
+  );
+
+  assert.equal(result.handled, true);
+  assert.equal(result.shouldAbort, false);
+  assert.equal(result.silentRetry, true);
+  assert.deepEqual(
+    messages.map((message) => message.role),
+    ['system', 'user'],
+    'history is reseeded with the system prompt and the user turn'
+  );
+  assert.equal(messages[1].content, 'the original user request');
+  assert.equal(state.repairCount, 0, 'the repair budget is not wasted on an empty history');
+});
+
+test('400 with a totally empty array still yields a usable payload', async () => {
+  const messages: any[] = [];
+  const result = await handleApiError(
+    { status: 400, message: 'messages: must be a non-empty array' },
+    messages,
+    new Set(),
+    undefined,
+    freshState(),
+    1,
+    noEvent,
+    ...tail,
+    undefined,
+    undefined,
+    undefined
+  );
+
+  assert.equal(result.handled, true);
+  assert.ok(messages.length >= 1);
+  assert.ok(messages.some((message) => message.role !== 'system'));
+});

@@ -19,7 +19,7 @@
 
 import type OpenAI from 'openai';
 import { setMaxListeners } from 'node:events';
-import { getAllTools } from './tools/index.js';
+import { getAllTools, TOOL_NAME_ALIASES } from './tools/index.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { subAgentTool, type SubAgentUsage } from './sub-agent.js';
 import {
@@ -29,9 +29,15 @@ import {
 import { compactIfNeeded, getCompactThreshold } from './utils/compactor.js';
 import { logger } from './utils/logger.js';
 import { processStream } from './agentic-loop/stream.js';
-import { executeToolCalls, type ToolExecutionContext } from './agentic-loop/executor.js';
+import { executeToolCalls, type ToolExecutionContext, type ToolPolicy } from './agentic-loop/executor.js';
 import { handleApiError, type RetryState } from './agentic-loop/errors.js';
 import { sanitizeMessagesForProvider } from './utils/message-sanitize.js';
+import { clearReadState } from './utils/read-state.js';
+import { workingCheckpointFrame } from './utils/working-checkpoint.js';
+import { memoryFrame } from './utils/memory.js';
+import { runHooks, type HookCommand } from './utils/hooks.js';
+import { appendJournal } from './utils/session-journal.js';
+import { isVolatileFrame, volatileFrame } from './utils/context-layers.js';
 
 // ─── Types ───
 
@@ -77,10 +83,57 @@ export interface AgenticLoopOptions {
   timeoutMs?: number;
   /** Context-utilization ratio (0.5–0.95) at which to compact. */
   compactThreshold?: number;
+  /** Lifecycle hooks loaded by the caller (see utils/hooks.ts). */
+  hooks?: readonly HookCommand[];
+  /** Tool policy: permission rules, guards, spill, verification. */
+  toolPolicy?: ToolPolicy;
 }
 
 function emitAbortAndFinish(handler: AgentEventHandler): void {
   handler({ type: 'done' });
+}
+
+/** True when the history still contains something a provider will accept. */
+export function hasConversationPayload(messages: Message[]): boolean {
+  return messages.some((message) => message.role !== 'system');
+}
+
+/**
+ * Guarantee the request carries a system prompt and at least one conversation
+ * message. A repair strategy (or a bug in one) can empty the array; providers
+ * then answer 400 "Input required: specify prompt or messages", which used to
+ * end the turn with an unrecoverable error.
+ */
+export function ensureUsableHistory(
+  messages: Message[],
+  userInput: string,
+  systemPrompt: string,
+  notify?: AgentEventHandler
+): boolean {
+  let repaired = false;
+
+  if (messages.length === 0 || messages[0]?.role !== 'system') {
+    const hasSystem = messages.some((message) => message.role === 'system');
+    if (!hasSystem) {
+      messages.unshift({ role: 'system', content: systemPrompt } as Message);
+      repaired = true;
+    }
+  }
+
+  if (!hasConversationPayload(messages)) {
+    const fallback = typeof userInput === 'string' ? userInput.trim() : '';
+    messages.push({ role: 'user', content: fallback || 'continue' } as Message);
+    repaired = true;
+  }
+
+  if (repaired) {
+    logger.warn('Restored an empty or unusable conversation history', {
+      messagesCount: messages.length,
+    });
+    notify?.({ type: 'error', error: 'Conversation history was empty. Restored the last request.', transient: true });
+  }
+
+  return repaired;
 }
 
 /**
@@ -90,14 +143,42 @@ function emitAbortAndFinish(handler: AgentEventHandler): void {
  * canonical tool, so advertising them would only confuse the model.
  */
 export function getValidToolNames(): Set<string> {
-  return new Set(
+  const names = new Set(
     [...getAllTools(), subAgentTool]
       .map((tool: any) => tool.function?.name)
       .filter((name: string | undefined): name is string => Boolean(name))
   );
+  // Aliases the dispatcher understands (grep, shell, list, …) are valid calls.
+  // Leaving them out made the 400-repair step delete working tool calls.
+  for (const alias of TOOL_NAME_ALIASES) names.add(alias);
+  return names;
 }
 
 
+
+/**
+ * Replace the volatile runtime frames at the tail of the conversation.
+ *
+ * Stable content (system prompt, history) stays at the front so provider prefix
+ * caching still hits; only these few hundred tokens change per turn.
+ */
+function applyRuntimeFrames(messages: Message[], sessionId: string | undefined): void {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index] as any;
+    if (message?.role === 'system' && isVolatileFrame(message.content)) {
+      messages.splice(index, 1);
+    }
+  }
+
+  const frames: Message[] = [];
+  const checkpoint = workingCheckpointFrame(sessionId);
+  if (checkpoint) frames.push({ role: 'system', content: volatileFrame('checkpoint', checkpoint) } as Message);
+
+  const memory = memoryFrame();
+  if (memory) frames.push({ role: 'system', content: volatileFrame('memory', memory) } as Message);
+
+  if (frames.length > 0) messages.push(...frames);
+}
 
 /**
  * Process a single user input through the agentic loop.
@@ -151,6 +232,22 @@ export async function runAgenticLoop(
   // (added by the caller in handleSubmit for immediate UI display)
   const updatedMessages: Message[] = [...messages];
 
+  // UserPromptSubmit hooks run before anything is sent. A blocking hook turns
+  // the turn into a no-op with an explanation instead of sending the prompt.
+  if (options.hooks && options.hooks.length > 0) {
+    const hookOutcome = await runHooks({
+      event: 'UserPromptSubmit',
+      hooks: options.hooks,
+      cwd: process.cwd(),
+      payload: { event: 'UserPromptSubmit', sessionId, cwd: process.cwd(), prompt: userInput },
+    });
+    if (hookOutcome.blocked) {
+      emit({ type: 'error', error: `Prompt blocked by a hook${hookOutcome.reason ? `: ${hookOutcome.reason}` : ''}` });
+      emit({ type: 'done' });
+      return updatedMessages;
+    }
+  }
+
   // Refresh system prompt to pick up any new skills or project changes
   const newSystemPrompt = await generateSystemPrompt();
   const systemMsgIndex = updatedMessages.findIndex((m) => m.role === 'system');
@@ -165,6 +262,7 @@ export async function runAgenticLoop(
     truncateCount: 0,
     continueCount: 0,
     retriggerCount: 0,
+    transientCount: 0,
   };
   const MAX_RETRIGGERS = 3;
   const MAX_CONSECUTIVE_INVALID_JSON = 3;
@@ -194,15 +292,18 @@ export async function runAgenticLoop(
     iterationCount++;
 
     // Check for compaction when we have pricing info (includes context window).
-    // Compaction preserves: (1) the system prompt at index 0, (2) any skill_content
-    // tool messages, and (3) the 5 most recent messages. Middle messages are
-    // summarized into a secondary system message. The length=0 + spread reassigns
-    // the array in place with the compacted structure.
+    // Compaction preserves: (1) the system prompt, (2) recent history, and
+    // (3) skill content whose parent tool call is still present. Middle
+    // messages are summarised into a secondary system message.
+    //
+    // The threshold from settings is a fraction (0.5–0.95) while
+    // `utilizationPercentage` is 0–100, so convert before comparing. Both
+    // sides use the same clamp, otherwise the outer gate can fire while the
+    // compactor decides there is nothing to do.
     if (pricing) {
       const contextInfo = getContextInfo(updatedMessages, pricing);
-      // `needsCompaction` uses the built-in 90% gate; also honor a user-set
-      // threshold so a lower setting can trigger compaction early.
-      if (contextInfo.needsCompaction || contextInfo.utilizationPercentage >= getCompactThreshold(options.compactThreshold)) {
+      const thresholdPercent = getCompactThreshold(options.compactThreshold) * 100;
+      if (contextInfo.needsCompaction || contextInfo.utilizationPercentage >= thresholdPercent) {
         const compacted = await compactIfNeeded(
           client,
           model,
@@ -212,11 +313,27 @@ export async function runAgenticLoop(
           sessionId,
           options.compactThreshold
         );
-        // Replace messages in-place with compacted version
-        updatedMessages.length = 0;
-        updatedMessages.push(...compacted);
+        // `compactIfNeeded` returns the input array by identity when it decides
+        // not to compact. Clearing first would then delete the whole
+        // conversation (the provider answered 400 "specify prompt or
+        // messages"). Only swap when a different, non-empty history comes back.
+        if (compacted !== updatedMessages && compacted.length > 0) {
+          updatedMessages.length = 0;
+          updatedMessages.push(...compacted);
+          // The bytes are gone from context, so "already read" is no longer true.
+          clearReadState(sessionId);
+          if (sessionId) appendJournal(sessionId, { type: 'compaction', data: { messages: compacted.length } });
+        }
       }
     }
+
+    // Last line of defence: a repair/compaction step must never leave a payload
+    // with no conversation in it. Re-seed with the system prompt and the user
+    // turn that started this run.
+    ensureUsableHistory(updatedMessages, userInput, newSystemPrompt, emit);
+
+    // Per-turn frames go at the tail: checkpoint notes and saved memory.
+    applyRuntimeFrames(updatedMessages, sessionId);
 
     // Declare assistantMessage outside try block so it's accessible in catch
     let assistantMessage: any;
@@ -328,6 +445,9 @@ export async function runAgenticLoop(
           client,
           model,
           pricing,
+          ...(options.toolPolicy || options.hooks
+            ? { policy: { hooks: options.hooks, ...(options.toolPolicy ?? {}) } }
+            : {}),
         };
 
         const executionResult = await executeToolCalls(
@@ -383,9 +503,11 @@ export async function runAgenticLoop(
         continue;
       }
 
-      // Reset retry counts on successful completion
+      // Reset retry counts on successful completion. The transient budget is
+      // per failure streak, so a good response clears it for the next turn.
       retryState.repairCount = 0;
       retryState.retriggerCount = 0;
+      retryState.transientCount = 0;
       emit({ type: 'done' });
       return updatedMessages;
 
@@ -437,7 +559,9 @@ export async function runAgenticLoop(
         model,
         requestDefaults,
         sessionId,
-        abortSignal
+        abortSignal,
+        undefined,
+        userInput
       );
 
       if (errorResult.shouldAbort) {

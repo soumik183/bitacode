@@ -1,6 +1,8 @@
 /** watch tool — watch a file or directory for changes for a bounded time. */
 import fs from 'node:fs';
 import { startProcess } from './process.js';
+import { isDangerousCommand, isSafeCommand } from '../utils/command-gate.js';
+import { validatePath } from '../utils/path-validation.js';
 import { cap, errorMessage, requestApprovalOrMessage } from './system-helpers.js';
 const MAX_WATCH_EVENTS = 200;
 const MAX_WATCH_COMMANDS = 10;
@@ -21,22 +23,6 @@ export const watchTool = {
         },
     },
 };
-// Mirrors bash/process safe-command gating so watch cannot run arbitrary shells.
-const WATCH_CONTROL_PATTERN = /[;&|<>()`$[\]{}!]/;
-const WATCH_SAFE_COMMANDS = [
-    'pwd', 'whoami', 'date', 'uname', 'uptime',
-    'git status', 'git log', 'git diff', 'git branch',
-    'node --version', 'npm --version', 'ls', 'cat', 'echo', 'sleep',
-];
-function isWatchSafe(command) {
-    const trimmed = command.trim();
-    if (!trimmed || WATCH_CONTROL_PATTERN.test(trimmed) || /[\r\n]/.test(trimmed))
-        return false;
-    const lower = trimmed.toLowerCase();
-    if (/(^|[;&|]\s*)(sudo|su)\b/.test(lower))
-        return false;
-    return WATCH_SAFE_COMMANDS.some((safe) => trimmed === safe || trimmed.startsWith(`${safe} `));
-}
 export async function watch(targetPath, durationMs = 5000, command, sessionId) {
     try {
         if (typeof targetPath !== 'string' || targetPath.trim() === '')
@@ -47,10 +33,14 @@ export async function watch(targetPath, durationMs = 5000, command, sessionId) {
         const duration = Math.min(Math.max(Math.floor(durationMs), 100), 60_000);
         if (command !== undefined && typeof command !== 'string')
             return 'Error: command must be a string.';
-        if (command !== undefined && !isWatchSafe(command)) {
+        // Hard-blocked commands never need a path check or an approval prompt.
+        if (command && isDangerousCommand(command)) {
             return `Error: watch command '${command}' is not a safe command.`;
         }
-        if (command) {
+        // The watch target is a path like any other: same sandbox as the file tools.
+        const watched = await validatePath(targetPath);
+        let runApproved = false;
+        if (command && !(await isSafeCommand(command))) {
             const denial = await requestApprovalOrMessage({
                 id: `watch-${Date.now()}`,
                 type: 'shell_command',
@@ -61,6 +51,7 @@ export async function watch(targetPath, durationMs = 5000, command, sessionId) {
             }, `Command cancelled by user: ${command}`);
             if (denial !== null)
                 return denial;
+            runApproved = true;
         }
         const events = [];
         let watcher;
@@ -81,13 +72,13 @@ export async function watch(targetPath, durationMs = 5000, command, sessionId) {
             };
             const timer = setTimeout(() => {
                 const lines = events.map((event) => `${event.type} ${event.path} @${event.at}`);
-                const summary = `Watched '${targetPath}' for ${duration}ms. ${events.length} event(s).`;
+                const summary = `Watched '${watched}' for ${duration}ms. ${events.length} event(s).`;
                 const body = lines.length ? lines.join('\n') : 'No changes detected.';
                 const note = runs > 0 ? `\nRan command ${runs} time(s).` : '';
                 finish(cap(`${summary}\n${body}${note}`));
             }, duration);
             try {
-                watcher = fs.watch(targetPath, (eventType, filename) => {
+                watcher = fs.watch(watched, (eventType, filename) => {
                     if (events.length < MAX_WATCH_EVENTS) {
                         events.push({ type: eventType, path: filename ? String(filename) : '(self)', at: Date.now() });
                     }
@@ -95,7 +86,7 @@ export async function watch(targetPath, durationMs = 5000, command, sessionId) {
                     if (command && Date.now() - lastRun >= 200 && runs < MAX_WATCH_COMMANDS) {
                         lastRun = Date.now();
                         runs += 1;
-                        void startProcess(command, sessionId);
+                        void startProcess(command, sessionId, undefined, runApproved);
                     }
                 });
                 watcher.on('error', (err) => finish(`Error watching '${targetPath}': ${errorMessage(err)}`));

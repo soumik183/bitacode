@@ -118,23 +118,27 @@ test('prompt input keeps a very long value on a single row', () => {
   assert.equal(frame.split('\n').length, 1, 'long text must never wrap the composer');
 });
 
-test('prompt input scrolls a long value so the tail and cursor stay visible', () => {
+test('prompt input grows one row per wrapped line and keeps the tail visible', () => {
   const value = `${'A'.repeat(40)}TAILEND`;
   const { lastFrame } = render(
     <PromptInput value={value} onChange={() => {}} onSubmit={() => {}} width={20} />
   );
-  const frame = plain(lastFrame() ?? '');
-  assert.equal(frame.split('\n').length, 1);
-  assert.ok(frame.length <= 20, `visible width ${frame.length} must be <= 20`);
-  assert.match(frame, /TAILEND$/, 'the tail is visible with the cursor at the end');
+  const rows = plain(lastFrame() ?? '').split('\n');
+  assert.equal(rows.length, 3, '47 chars at 20 columns must wrap onto three rows');
+  for (const row of rows) {
+    assert.ok(row.length <= 20, `row "${row}" exceeds 20 columns`);
+  }
+  assert.match(rows[rows.length - 1], /TAILEND$/, 'the tail is visible with the cursor at the end');
 });
 
-test('prompt input scrolls the window when the cursor moves into the middle', async () => {
+test('prompt input scrolls the row window when the cursor moves into the middle', async () => {
   // One write per arrow: ink-testing-library only dispatches one key per write.
   const value = `${'A'.repeat(40)}MIDDLE-MARK${'B'.repeat(20)}END`;
   const Harness = () => {
     const [state] = React.useState(value);
-    return <PromptInput value={state} onChange={() => {}} onSubmit={() => {}} width={20} />;
+    return (
+      <PromptInput value={state} onChange={() => {}} onSubmit={() => {}} width={20} maxRows={2} />
+    );
   };
   const { stdin, lastFrame } = render(<Harness />);
   await settle();
@@ -146,30 +150,37 @@ test('prompt input scrolls the window when the cursor moves into the middle', as
   }
   await settle(100);
 
-  const frame = plain(lastFrame() ?? '');
-  assert.equal(frame.split('\n').length, 1);
-  assert.ok(frame.length <= 20, `visible width ${frame.length} must be <= 20`);
-  assert.match(frame, /MIDDLE/, 'the window follows the cursor into the middle');
-  assert.doesNotMatch(frame, /END/, 'the tail scrolled out of view');
+  const rows = plain(lastFrame() ?? '').split('\n');
+  assert.equal(rows.length, 2, 'the window is capped at maxRows');
+  for (const row of rows) {
+    assert.ok(row.length <= 20, `row "${row}" exceeds 20 columns`);
+  }
+  assert.match(rows.join('\n'), /MIDDLE/, 'the window follows the cursor into the middle');
+  assert.doesNotMatch(rows.join('\n'), /END/, 'the tail scrolled out of view');
 });
 
 test('prompt input budgets wide characters by display columns', () => {
   const { lastFrame } = render(
     <PromptInput value={'漢'.repeat(20)} onChange={() => {}} onSubmit={() => {}} width={10} />
   );
-  const frame = plain(lastFrame() ?? '');
-  assert.equal(frame.split('\n').length, 1);
-  assert.ok(frame.length <= 5, `${frame.length} wide chars exceed 10 columns`);
+  const rows = plain(lastFrame() ?? '').split('\n');
+  assert.equal(rows.length, 4, 'twenty wide glyphs fill four five-glyph rows');
+  for (const row of rows) {
+    assert.ok(row.length <= 5, `${row.length} wide chars exceed 10 columns`);
+  }
 });
 
-test('prompt input keeps a long masked value on one row', () => {
+test('prompt input wraps a long masked value and caps the visible rows', () => {
   const { lastFrame } = render(
     <PromptInput value={'s'.repeat(200)} onChange={() => {}} onSubmit={() => {}} width={20} mask />
   );
-  const frame = plain(lastFrame() ?? '');
-  assert.equal(frame.split('\n').length, 1);
-  assert.ok(frame.length <= 20, `visible width ${frame.length} must be <= 20`);
-  assert.match(frame.trimEnd(), /^\*+$/, 'only asterisks are visible');
+  const rows = plain(lastFrame() ?? '').split('\n');
+  assert.ok(rows.length <= 6, `${rows.length} rows exceed the default row cap`);
+  assert.ok(rows.length > 1, 'ten wrapped rows must not collapse onto one');
+  for (const row of rows) {
+    assert.ok(row.length <= 20, `row "${row}" exceeds 20 columns`);
+    assert.match(row.trimEnd(), /^\*+$/, 'only asterisks are visible');
+  }
 });
 
 // Tracks the committed value so key-driven tests can assert whole-glyph edits.
@@ -190,7 +201,9 @@ test('prompt input backspace removes a whole emoji instead of half a surrogate p
   stdin.write('\x7f'); // delete 'b'
   await settle(80);
   stdin.write('\x7f'); // must delete the whole emoji, not one UTF-16 unit
-  await settle(100);
+  // Poll instead of a fixed sleep: this assertion is render-latency sensitive
+  // and the suite runs files in parallel.
+  await waitFor(() => value() === 'a', 1000).catch(() => {});
   assert.equal(value(), 'a');
 });
 
@@ -229,6 +242,51 @@ test('prompt input mask shows one star per glyph, not per UTF-16 unit', () => {
     <PromptInput value="a😀漢b" onChange={() => {}} onSubmit={() => {}} mask />
   );
   assert.equal(plain(lastFrame() ?? '').trim(), '****');
+});
+
+test('prompt input reports growing rows so the layout can reserve space', async () => {
+  const seen: number[] = [];
+  const Harness = () => {
+    const [state, setState] = React.useState('');
+    return (
+      <PromptInput
+        value={state}
+        onChange={setState}
+        onSubmit={() => {}}
+        width={10}
+        onRowsChange={(rows) => seen.push(rows)}
+      />
+    );
+  };
+  const { stdin } = render(<Harness />);
+  await settle();
+  stdin.write('abcdefghijklmnopqrstuvwxyz');
+  await settle(120);
+  assert.ok(seen.includes(3), `expected a 3-row report, saw ${seen.join(',')}`);
+});
+
+test('shift+enter inserts a newline and enter submits', async () => {
+  let submitted = '';
+  const Harness = () => {
+    const [state, setState] = React.useState('');
+    return (
+      <PromptInput value={state} onChange={setState} onSubmit={(text) => (submitted = text)} />
+    );
+  };
+  const { stdin, lastFrame } = render(<Harness />);
+  await settle();
+  stdin.write('one');
+  await settle(60);
+  stdin.write('\x1b[13;2u');
+  await settle(60);
+  stdin.write('two');
+  await settle(60);
+  const rows = plain(lastFrame() ?? '').split('\n');
+  assert.equal(rows.length, 2, 'the new line adds a second composer row');
+  assert.match(rows[0], /one/, 'the first line stays visible above the caret row');
+  stdin.write('\r');
+  await settle(80);
+  assert.equal(submitted, 'one\ntwo', 'enter submits the whole multi-line draft');
 });
 
 test('prompt input ignores SGR mouse reports', async () => {
@@ -554,6 +612,7 @@ test('max scroll uses the rendered window so the oldest row stays reachable', ()
 // isolated. Cwd is left alone: every store this touches lives under HOME.
 function renderApp(props: AppProps = {}, beforeRender?: (home: string) => void) {
   const originalHome = process.env.HOME;
+  const originalCwd = process.cwd();
   const originalApiKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-ui-'));
   process.env.HOME = home;
@@ -576,6 +635,9 @@ function renderApp(props: AppProps = {}, beforeRender?: (home: string) => void) 
     })
   );
   beforeRender?.(home);
+  // Run inside the sandbox: App reads <cwd>/.bitacode for the project config,
+  // and a test must never write the developer's real selection there.
+  process.chdir(home);
 
   const instance = render(<App {...props} />);
   return {
@@ -583,6 +645,7 @@ function renderApp(props: AppProps = {}, beforeRender?: (home: string) => void) 
     cleanupAll() {
       instance.unmount();
       instance.cleanup();
+      process.chdir(originalCwd);
       process.env.HOME = originalHome;
       if (originalApiKey === undefined) delete process.env.OPENAI_API_KEY;
       else process.env.OPENAI_API_KEY = originalApiKey;
@@ -655,6 +718,7 @@ test('the composer placeholder appears exactly once in the frame', async () => {
 });
 
 test('resuming a session replays saved reasoning line by line before its answer, once', async () => {
+  const originalCwd = process.cwd();
   const originalHome = process.env.HOME;
   const originalKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-reasoning-replay-'));
@@ -699,6 +763,9 @@ test('resuming a session replays saved reasoning line by line before its answer,
   );
 
   let instance: ReturnType<typeof render> | undefined;
+  // Resume inside the sandbox: the app pins the resumed session's selection,
+  // and that must not reach the developer's project config.
+  process.chdir(home);
   try {
     instance = render(<App sessionId={id} />);
     const frame = await waitForFrame(instance.lastFrame, (f) => f.includes('FINAL-ANSWER-MARKER'), 6000);
@@ -717,6 +784,7 @@ test('resuming a session replays saved reasoning line by line before its answer,
   } finally {
     instance?.unmount();
     instance?.cleanup();
+    process.chdir(originalCwd);
     process.env.HOME = originalHome;
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalKey;
@@ -726,6 +794,7 @@ test('resuming a session replays saved reasoning line by line before its answer,
 });
 
 test('replayed transcript frame orders user message, thought card, then answer', async () => {
+  const originalCwd = process.cwd();
   const originalHome = process.env.HOME;
   const originalKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-frame-order-'));
@@ -770,6 +839,7 @@ test('replayed transcript frame orders user message, thought card, then answer',
   );
 
   let instance: ReturnType<typeof render> | undefined;
+  process.chdir(home);
   try {
     instance = render(<App sessionId={id} />);
     const frame = await waitForFrame(instance.lastFrame, (f) => f.includes('ANSWER-MARKER'), 6000);
@@ -784,6 +854,7 @@ test('replayed transcript frame orders user message, thought card, then answer',
   } finally {
     instance?.unmount();
     instance?.cleanup();
+    process.chdir(originalCwd);
     process.env.HOME = originalHome;
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalKey;
@@ -983,7 +1054,7 @@ async function openThemeFromSettings(app: ReturnType<typeof renderApp>): Promise
   // Enter must be sent once: a second press would select the highlighted
   // palette and close the picker we are trying to inspect.
   app.stdin.write('\r');
-  const frame = await waitForFrameWhere(app, (f) => f.includes('1-5 pick'), 3000);
+  const frame = await waitForFrameWhere(app, (f) => f.includes(`1-${THEME_NAMES.length} pick`), 3000);
   assert.ok(frame, 'Theme row opened the picker');
   // The frame paints before Ink re-registers useInput for the new picker.
   await new Promise((resolve) => setImmediate(resolve));
@@ -1001,7 +1072,7 @@ async function openThemeViaSlash(app: ReturnType<typeof renderApp>): Promise<str
     await new Promise((resolve) => setImmediate(resolve));
     // One Enter only — a second would immediately pick a palette and close it.
     app.stdin.write('\r');
-    const frame = await waitForFrameWhere(app, (f) => f.includes('1-5 pick'), 3000, from);
+    const frame = await waitForFrameWhere(app, (f) => f.includes(`1-${THEME_NAMES.length} pick`), 3000, from);
     if (frame) {
       // Let Ink re-register useInput for the picker before sending more keys.
       await new Promise((resolve) => setImmediate(resolve));
@@ -1034,7 +1105,7 @@ test('theme picker from settings lists all five palettes with live swatches', as
       THEME_NAMES.length,
       'each palette shows a colour swatch'
     );
-    assert.ok(frame.includes('warm gold on near-black'), 'black intent is shown');
+    assert.ok(frame.includes('graphite canvas · warm gold'), 'black intent is shown');
     assert.ok(frame.includes('maximum contrast'), 'high-contrast intent is shown');
     assert.match(frame, /current/, 'the active palette is marked current');
   } finally {
@@ -1050,8 +1121,12 @@ test('theme selection repaints the full UI palette', async () => {
     assert.ok(painted('black'), 'new installs paint the black canvas');
 
     await openThemeFromSettings(app);
-    // Palette 2 is sand; the picker accepts 1-5 as a direct pick.
-    assert.ok(await pressOnce(app, '2', (f) => f.includes('Theme: sand')), 'sand was picked');
+    // Sand is the 5th palette in THEME_NAMES; the picker accepts 1-N as a direct pick.
+    const sandIndex = THEME_NAMES.indexOf('sand') + 1;
+    assert.ok(
+      await pressOnce(app, String(sandIndex), (f) => f.includes('Theme: sand')),
+      'sand was picked'
+    );
     await waitFor(() => painted('sand'), 2000, 'theme palette did not repaint');
     assert.ok(painted('sand'), 'canvas follows the choice');
     assert.ok(
@@ -1074,8 +1149,11 @@ test('/theme opens the picker and arrow + enter saves settings.theme', async () 
     const frame = await openThemeViaSlash(app);
     assert.match(frame, /Theme/, '/theme opens the theme picker');
 
-    // Move down to 'light' (index 3) and confirm with Enter.
-    for (const marker of ['› ■ sand', '› ■ dark', '› ■ light']) {
+    // Move down to 'light' and confirm with Enter. The picker opens on the
+    // active palette and steps through THEME_NAMES in order.
+    const steps = THEME_NAMES.indexOf('light') - THEME_NAMES.indexOf('black');
+    for (let i = 1; i <= steps; i += 1) {
+      const marker = `› ■ ${THEME_NAMES[i]}`;
       assert.ok(await pressOnce(app, '\x1b[B', (f) => f.includes(marker)), `${marker} selected`);
     }
     assert.ok(
@@ -1209,6 +1287,7 @@ test('sub-agent panel caps at four rows so it never hides the composer', () => {
 });
 
 test('sub-agent activities replay from a saved session, keep the composer and persist on quit', async () => {
+  const originalCwd = process.cwd();
   const originalHome = process.env.HOME;
   const originalKey = process.env.OPENAI_API_KEY;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'bitacode-subagents-'));
@@ -1254,6 +1333,7 @@ test('sub-agent activities replay from a saved session, keep the composer and pe
   );
 
   let instance: ReturnType<typeof render> | undefined;
+  process.chdir(home);
   try {
     instance = render(<App sessionId={id} />);
     const frame = await waitForFrame(
@@ -1289,6 +1369,7 @@ test('sub-agent activities replay from a saved session, keep the composer and pe
   } finally {
     instance?.unmount();
     instance?.cleanup();
+    process.chdir(originalCwd);
     process.env.HOME = originalHome;
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
     else process.env.OPENAI_API_KEY = originalKey;
@@ -1447,6 +1528,36 @@ for (const [columns, rows] of [
     }
   });
 }
+
+test('a multi-line draft grows the composer and keeps the frame inside the terminal', async () => {
+  const app = renderAppSized(80, 24);
+  try {
+    await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
+    // The composer's input handler subscribes a tick after the first frame; a
+    // key sent in between is dropped by Ink.
+    await settle(150);
+    // shift+enter arrives as the CSI-u sequence. Wait for each edit to land
+    // before sending the next key, otherwise the newline is inserted at a stale
+    // cursor position and the draft ends up with a leading blank line.
+    for (const chunk of ['line-one', '\x1b[13;2u', 'line-two', '\x1b[13;2u', 'line-three']) {
+      const before = app.stdout.frame();
+      app.stdin.write(chunk);
+      await waitFor(() => app.stdout.frame() !== before, 500).catch(() => {});
+      await settle(60);
+    }
+    await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('line-three'));
+    // Ink can flush a frame in chunks; read the settled frame, not the first
+    // one that happens to contain the last line.
+    await settle(120);
+    const rows = plain(app.stdout.frame()).split('\n');
+    assert.ok(rows.some((row) => row.includes('line-one')), 'first line stays visible');
+    assert.ok(rows.some((row) => row.includes('line-two')), 'second line stays visible');
+    assert.ok(rows.length <= 23, `frame grew to ${rows.length} rows on a 24-row terminal`);
+    assert.ok(lineWidth(app.stdout.frame()) <= 80, 'no line overflows the terminal width');
+  } finally {
+    app.cleanup();
+  }
+});
 
 test('rapid zoom bursts re-render at the new size without stale rows', async () => {
   const app = renderAppSized(80, 24);

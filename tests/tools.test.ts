@@ -374,7 +374,7 @@ test('new tools are registered and dispatched', async () => {
   );
 });
 
-test('getValidToolNames includes built-ins, dynamic tools and sub_agent but not aliases', () => {
+test('getValidToolNames includes built-ins, dynamic tools, sub_agent and dispatcher aliases', () => {
   const name = 'tmp_registry_probe_tool';
   registerDynamicTool({
     type: 'function',
@@ -387,8 +387,9 @@ test('getValidToolNames includes built-ins, dynamic tools and sub_agent but not 
     assert.ok(names.has('read_file'), 'built-ins included');
     assert.ok(names.has('sub_agent'), 'sub-agent tool included');
     assert.ok(names.has(name), 'dynamic tools included');
-    assert.ok(!names.has('grep'), 'aliases must not be advertised');
-    assert.ok(!names.has('list'), 'aliases must not be advertised');
+    // Aliases are accepted by the dispatcher, so a repair step must not delete them.
+    assert.ok(names.has('grep'), 'grep alias is a valid call');
+    assert.ok(names.has('list'), 'list alias is a valid call');
   } finally {
     unregisterDynamicTool(name);
   }

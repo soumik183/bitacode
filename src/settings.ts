@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { logger } from './utils/logger.js';
 import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
+import { THEME_NAMES, type ThemeName } from './theme/types.js';
 
 /** How write/edit/shell operations are approved. */
 export type ApprovalMode = 'manual' | 'auto' | 'yolo';
@@ -35,8 +36,8 @@ function isCompactThreshold(value: unknown): value is number {
   );
 }
 
-function isThemeName(value: unknown): value is 'black' | 'sand' | 'dark' | 'light' | 'high-contrast' {
-  return value === 'black' || value === 'sand' || value === 'dark' || value === 'light' || value === 'high-contrast';
+function isThemeName(value: unknown): value is ThemeName {
+  return typeof value === 'string' && (THEME_NAMES as readonly string[]).includes(value);
 }
 
 export interface UiSettings {
@@ -56,9 +57,27 @@ export interface UiSettings {
   /** Fraction of the context window (0.5–0.95) that triggers compaction. */
   compactThreshold?: number;
   /** Colour palette used by the UI. */
-  theme?: 'black' | 'sand' | 'dark' | 'light' | 'high-contrast';
+  theme?: ThemeName;
   /** Segments shown in the status line, in display order. */
   statusLine?: StatusLineItem[];
+  /**
+   * Declarative permission rules. Project rules live in
+   * `<repo>/.bitacode/permissions.json` and only load for trusted projects.
+   */
+  permissions?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+  };
+  /** Run the project's own checks (typecheck/lint/test) after a turn. */
+  autoverify?: boolean;
+  /**
+   * Refuse to edit a file the model has not read in this session. Read dedupe and
+   * this guard share one switch because they share the same bookkeeping.
+   */
+  guardUnreadEdits?: boolean;
+  /** Inline large tool output instead of spilling it to disk. */
+  spillToolResults?: boolean;
 }
 
 export const DEFAULT_SETTINGS: UiSettings = {
@@ -69,6 +88,10 @@ export const DEFAULT_SETTINGS: UiSettings = {
   compactThreshold: COMPACT_THRESHOLD_DEFAULT,
   theme: 'black',
   statusLine: [...STATUS_LINE_ITEMS],
+  permissions: { allow: [], ask: [], deny: [] },
+  autoverify: false,
+  guardUnreadEdits: true,
+  spillToolResults: true,
 };
 
 function getSettingsPath(): string {
@@ -78,6 +101,20 @@ function getSettingsPath(): string {
       ? path.join(home, 'AppData', 'Local', 'bitacode')
       : path.join(home, '.config', 'bitacode');
   return path.join(dir, 'settings.json');
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+function normalizePermissions(value: unknown): UiSettings['permissions'] {
+  const input = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  return {
+    allow: normalizeStringList(input.allow),
+    ask: normalizeStringList(input.ask),
+    deny: normalizeStringList(input.deny),
+  };
 }
 
 export function loadSettings(): UiSettings {
@@ -97,6 +134,10 @@ export function loadSettings(): UiSettings {
       statusLine: Array.isArray(parsed.statusLine)
         ? parsed.statusLine.filter((item) => STATUS_LINE_ITEMS.includes(item))
         : [...STATUS_LINE_ITEMS],
+      permissions: normalizePermissions(parsed.permissions),
+      autoverify: parsed.autoverify === true,
+      guardUnreadEdits: parsed.guardUnreadEdits !== false,
+      spillToolResults: parsed.spillToolResults !== false,
     };
   } catch {
     return { ...DEFAULT_SETTINGS, statusLine: [...STATUS_LINE_ITEMS] };

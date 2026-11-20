@@ -26,7 +26,8 @@ function hardenPermissions(targetPath: string, mode: number): void {
   chmodSync(targetPath, mode);
 }
 
-function isValidSessionId(id: string): boolean {
+/** True when an id is one this build can read and write safely. */
+export function isValidSessionId(id: string): boolean {
   // Accept both legacy UUIDs and new short IDs. The patterns include no path
   // separators or dots, so an accepted id can never escape the sessions dir.
   return SESSION_ID_PATTERN.test(id) || SHORT_ID_PATTERN.test(id);
@@ -72,6 +73,8 @@ export interface Session {
   completionMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[];
   /** Parallel sub-agent steps recorded during the session. */
   subAgentActivities?: SubAgentActivity[];
+  /** Pinned sessions float to the top of user-facing lists. */
+  pinned?: boolean;
 }
 
 export interface SessionSummary {
@@ -82,6 +85,7 @@ export interface SessionSummary {
   provider?: string;
   model?: string;
   messageCount: number;
+  pinned?: boolean;
 }
 
 /** True once the transcript has anything beyond the system prompt. */
@@ -355,12 +359,26 @@ export function createSession(model: string, provider: string): Session {
   };
 }
 
-/** Save a session to disk. */
+/**
+ * Save a session to disk.
+ *
+ * Written to a sibling temp file and renamed into place: `writeFile` truncates
+ * first, so a kill mid-write used to leave an unparseable session behind.
+ */
 export async function saveSession(session: Session): Promise<void> {
   await ensureSessionsDir();
   session.updatedAt = new Date().toISOString();
   const filePath = sessionPath(session.id);
-  await fs.writeFile(filePath, JSON.stringify(session, null, 2), { encoding: 'utf8', mode: SESSION_FILE_MODE });
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  const payload = JSON.stringify(session, null, 2);
+  try {
+    await fs.writeFile(tempPath, payload, { encoding: 'utf8', mode: SESSION_FILE_MODE });
+    await fs.rename(tempPath, filePath);
+  } catch (err) {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
+    logger.error(`Failed to save session ${session.id}: ${err}`);
+    throw err;
+  }
   hardenPermissions(filePath, SESSION_FILE_MODE);
   logger.debug(`Session saved: ${session.id}`);
 }
@@ -383,8 +401,14 @@ export async function loadSession(id: string): Promise<Session | null> {
         Array.isArray(session.completionMessages) ? session.completionMessages : []
       ),
       subAgentActivities: sanitizeSubAgentActivities(session.subAgentActivities),
+      // Older files have no pin field; only real booleans are trusted.
+      pinned: typeof session.pinned === 'boolean' ? session.pinned : undefined,
     };
-  } catch {
+  } catch (err) {
+    // A missing file is normal; anything else means a corrupt session, which the
+    // user should be able to see in the log instead of a bare "not found".
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== 'ENOENT') logger.error(`Failed to load session ${id}: ${err}`);
     return null;
   }
 }
@@ -409,17 +433,25 @@ export async function listSessions(): Promise<SessionSummary[]> {
     try {
       const content = await fs.readFile(path.join(dir, entry), 'utf8');
       const session = JSON.parse(content) as Session;
+      const messages = Array.isArray(session.completionMessages) ? session.completionMessages : [];
+      const storedTitle = typeof session.title === 'string' ? titleFromText(session.title) : '';
       summaries.push({
         id,
-        title: typeof session.title === 'string' ? session.title : 'New session',
+        // Older builds stored raw first lines (and sometimes wrapper text), so
+        // fall back to the conversation when the stored title is unusable.
+        title: storedTitle || generateTitle(messages, 'Untitled session'),
         createdAt: typeof session.createdAt === 'string' ? session.createdAt : '',
         updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt : '',
         provider: typeof session.provider === 'string' ? session.provider : undefined,
         model: typeof session.model === 'string' ? session.model : undefined,
-        messageCount: Array.isArray(session.completionMessages) ? session.completionMessages.length : 0,
+        // The system prompt is not a message the user sent.
+        messageCount: countConversationMessages(messages),
+        pinned: session.pinned === true ? true : undefined,
       });
-    } catch {
-      // Skip corrupt session files
+    } catch (err) {
+      // Skip corrupt session files, but leave a trace: silently dropping files
+      // makes "my session disappeared" impossible to diagnose.
+      logger.warn(`Skipping unreadable session file ${entry}: ${err}`);
     }
   }
 
@@ -441,17 +473,263 @@ export async function deleteSession(id: string): Promise<boolean> {
   }
 }
 
+/** Longest title kept in the store and in the picker. */
+export const MAX_TITLE_LENGTH = 60;
+
+/** Harness-injected wrapper that never makes a good session title. */
+const TITLE_NOISE_PATTERNS = [
+  /^<system-reminder>[\s\S]*?<\/system-reminder>/i,
+  /^\[Image #\d+\]/i,
+  /^@\S+\s*$/i,
+];
+
 /**
- * Generate a short title for a session from the first user message.
- * Uses the LLM to summarise if the message is long.
+ * Turn one user message into a readable single-line title.
+ *
+ * Messages can start with harness wrappers (system reminders, image markers)
+ * or span many lines, which used to produce titles like "<system-reminder>".
+ * The result is always one line, trimmed at a word boundary.
  */
-export function generateTitle(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): string {
-  const firstUserMsg = messages.find((m) => m.role === 'user');
-  if (!firstUserMsg || !('content' in firstUserMsg) || typeof firstUserMsg.content !== 'string') {
-    return 'New session';
+export function titleFromText(raw: string): string {
+  let text = raw;
+  for (const pattern of TITLE_NOISE_PATTERNS) text = text.replace(pattern, ' ');
+  // Drop fenced blocks and collapse every whitespace run (including newlines).
+  text = text.replace(/```[\s\S]*?```/g, ' ').replace(/\s+/g, ' ').trim();
+  // Leading punctuation (`:`, `-`, quotes) carries no meaning in a title.
+  text = text.replace(/^[\s:;,.!?'"`~^*#>-]+/, '').trim();
+  if (!text) return '';
+  if (text.length <= MAX_TITLE_LENGTH) return text;
+  const cut = text.slice(0, MAX_TITLE_LENGTH - 1);
+  const lastSpace = cut.lastIndexOf(' ');
+  const stem = lastSpace > MAX_TITLE_LENGTH / 2 ? cut.slice(0, lastSpace) : cut;
+  return `${stem.trimEnd()}…`;
+}
+
+/**
+ * Generate a short title for a session from the first meaningful user message.
+ *
+ * `fallback` is used when the conversation has no usable text yet, so a fresh
+ * or system-reminder-only session still gets a distinguishable label.
+ */
+export function generateTitle(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  fallback = 'New session'
+): string {
+  for (const message of messages) {
+    if (message.role !== 'user') continue;
+    const content = (message as { content?: unknown }).content;
+    let text = '';
+    if (typeof content === 'string') {
+      text = content;
+    } else if (Array.isArray(content)) {
+      text = content
+        .map((part) => (part && typeof part === 'object' && 'text' in part ? String((part as { text?: unknown }).text ?? '') : ''))
+        .join(' ');
+    }
+    const title = titleFromText(text);
+    if (title) return title;
   }
-  const content = firstUserMsg.content;
-  // Simple heuristic: take first 60 chars of the first user message
-  if (content.length <= 60) return content;
-  return content.slice(0, 57) + '...';
+  return fallback;
+}
+
+/** Messages that actually form the conversation (system prompt excluded). */
+export function countConversationMessages(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+): number {
+  return messages.filter((message) => message.role !== 'system').length;
+}
+
+/**
+ * Human "when" for a session row: `just now`, `12m ago`, `3h ago`, `2d ago`.
+ * Kept dependency-free so both the TUI picker and `bitacode sessions list`
+ * print the same thing.
+ */
+export function formatSessionAge(iso: string, now = Date.now()): string {
+  const stamp = Date.parse(iso);
+  if (!Number.isFinite(stamp)) return 'unknown';
+  const seconds = Math.max(0, Math.round((now - stamp) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(stamp).toISOString().slice(0, 10);
+}
+
+/* ------------------- fork / rename / pin / export ------------------- */
+
+/**
+ * Clone a saved session under a NEW id.
+ *
+ * The source is only read — a fresh file is written for the fork, so the
+ * original is never modified. When `uptoMessageIndex` is a finite number the
+ * message list is truncated to `[0, uptoMessageIndex)` (the system prompt at
+ * index 0 is kept for any positive bound).
+ */
+export async function forkSession(
+  id: string,
+  title?: string,
+  uptoMessageIndex?: number
+): Promise<Session | null> {
+  const source = await loadSession(id);
+  if (!source) return null;
+
+  const messages = Array.isArray(source.completionMessages)
+    ? [...source.completionMessages]
+    : [];
+  const kept =
+    typeof uptoMessageIndex === 'number' && Number.isFinite(uptoMessageIndex)
+      ? messages.slice(0, Math.max(0, Math.min(uptoMessageIndex, messages.length)))
+      : messages;
+
+  const fork: Session = {
+    id: generateSessionId(),
+    title: typeof title === 'string' && title.trim() ? title.trim() : source.title,
+    // Fresh timestamps: a fork is a new session, not a copy of the old clock.
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    model: source.model,
+    provider: source.provider,
+    ...(typeof source.variant === 'string' ? { variant: source.variant } : {}),
+    todos: Array.isArray(source.todos) ? source.todos.map((todo) => ({ ...todo })) : [],
+    completionMessages: kept.map(
+      (message) => ({ ...message }) as OpenAI.Chat.Completions.ChatCompletionMessageParam
+    ),
+    ...(source.subAgentActivities
+      ? { subAgentActivities: source.subAgentActivities.map((activity) => ({ ...activity })) }
+      : {}),
+    ...(source.pinned === true ? { pinned: true } : {}),
+  };
+
+  await saveSession(fork);
+  return fork;
+}
+
+/** Rename a saved session. Returns false when the id does not resolve. */
+export async function renameSession(id: string, title: string): Promise<boolean> {
+  const session = await loadSession(id);
+  if (!session) return false;
+  session.title = typeof title === 'string' ? title.trim() : '';
+  await saveSession(session);
+  return true;
+}
+
+/** Pin or unpin a saved session. Returns false when the id does not resolve. */
+export async function setSessionPinned(id: string, pinned: boolean): Promise<boolean> {
+  const session = await loadSession(id);
+  if (!session) return false;
+  session.pinned = pinned === true;
+  await saveSession(session);
+  return true;
+}
+
+export type SessionExportFormat = 'md' | 'txt' | 'json';
+
+/** Turn message content (string or multimodal parts) into plain text. */
+function messageContentToString(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part: any) =>
+        part && typeof part === 'object' && typeof part.text === 'string' ? part.text : ''
+      )
+      .filter(Boolean)
+      .join('\n');
+  }
+  return content == null ? '' : String(content);
+}
+
+interface ExportedMessage {
+  role: string;
+  content: string;
+}
+
+/**
+ * Build a secret-free, readable transcript. System/developer instructions and
+ * UI-only fields (reasoning, bitacode* metadata) are deliberately omitted — an
+ * export is meant to be shared, not to leak the harness prompt or chain of thought.
+ */
+function exportedMessages(session: Session): ExportedMessage[] {
+  const out: ExportedMessage[] = [];
+  const messages = Array.isArray(session.completionMessages) ? session.completionMessages : [];
+  for (const message of messages) {
+    const raw = message as any;
+    if (!raw || typeof raw !== 'object') continue;
+    const role = typeof raw.role === 'string' ? raw.role : '';
+    if (role === 'system' || role === 'developer') continue;
+
+    let content = messageContentToString(raw.content);
+    const calls = Array.isArray(raw.tool_calls) ? raw.tool_calls : [];
+    for (const call of calls) {
+      const name = call?.function?.name ?? call?.name ?? 'tool';
+      const args = typeof call?.function?.arguments === 'string' ? call.function.arguments : '';
+      content = content ? `${content}\n[tool call: ${name}(${args})]` : `[tool call: ${name}(${args})]`;
+    }
+    out.push({ role, content: content.trim() });
+  }
+  return out;
+}
+
+function exportMetadata(session: Session, messageCount: number): Record<string, unknown> {
+  const meta: Record<string, unknown> = {
+    id: session.id,
+    title: session.title,
+    provider: session.provider,
+    model: session.model,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    messageCount,
+  };
+  if (session.variant) meta.variant = session.variant;
+  if (session.pinned) meta.pinned = true;
+  return meta;
+}
+
+/** Render a saved session for sharing. Returns null when the id does not resolve. */
+export async function exportSession(
+  id: string,
+  format: SessionExportFormat
+): Promise<string | null> {
+  const session = await loadSession(id);
+  if (!session) return null;
+
+  const fmt: SessionExportFormat = format === 'txt' || format === 'json' ? format : 'md';
+  const messages = exportedMessages(session);
+  const meta = exportMetadata(session, messages.length);
+  const route = `${session.provider}/${session.model}`.trim();
+
+  if (fmt === 'json') {
+    return JSON.stringify({ metadata: meta, messages }, null, 2);
+  }
+
+  const header: string[] = [];
+  if (fmt === 'md') {
+    header.push(`# ${session.title || 'Untitled session'}`, '');
+    header.push(`- ID: \`${session.id}\``);
+    header.push(`- Route: ${route}`);
+    if (session.variant) header.push(`- Variant: ${session.variant}`);
+    header.push(`- Created: ${session.createdAt}`);
+    header.push(`- Updated: ${session.updatedAt}`);
+    if (session.pinned) header.push('- Pinned: yes');
+    header.push(`- Messages: ${messages.length}`, '');
+  } else {
+    header.push(`Session: ${session.title || 'Untitled session'}`);
+    header.push(`ID: ${session.id}`);
+    header.push(`Route: ${route}`);
+    if (session.variant) header.push(`Variant: ${session.variant}`);
+    header.push(`Created: ${session.createdAt}`);
+    header.push(`Updated: ${session.updatedAt}`);
+    if (session.pinned) header.push('Pinned: yes');
+    header.push(`Messages: ${messages.length}`, '');
+  }
+
+  const body = messages.map((message) => {
+    const label = message.role.charAt(0).toUpperCase() + message.role.slice(1);
+    const heading = fmt === 'md' ? `### ${label}` : `[${label}]`;
+    return `${heading}\n${message.content || '(empty)'}`;
+  });
+
+  return [...header, '---', '', ...body].join('\n');
 }

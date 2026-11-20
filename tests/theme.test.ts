@@ -20,7 +20,7 @@ const COLOR_KEYS = [
 
 test('every theme has the same complete set of hex colour keys', () => {
   const expected = [...COLOR_KEYS].sort();
-  assert.deepEqual(Object.keys(themes).sort(), ['black', 'dark', 'high-contrast', 'light', 'sand']);
+  assert.deepEqual(Object.keys(themes).sort(), ['black', 'dark', 'high-contrast', 'light', 'midnight', 'moss', 'sand']);
   for (const [name, palette] of Object.entries(themes)) {
     assert.deepEqual(Object.keys(palette).sort(), expected, `${name} theme keys`);
     for (const key of COLOR_KEYS) {
@@ -44,7 +44,7 @@ test('the legacy theme export is still the dark palette', () => {
 });
 
 test('THEME_NAMES lists the selectable palettes in cycle order', () => {
-  assert.deepEqual([...THEME_NAMES], ['black', 'sand', 'dark', 'light', 'high-contrast']);
+  assert.deepEqual([...THEME_NAMES], ['black', 'midnight', 'dark', 'light', 'sand', 'moss', 'high-contrast']);
 });
 
 /** Reads the palette a component sees, without rendering any visible chrome. */

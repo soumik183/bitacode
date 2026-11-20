@@ -12,12 +12,17 @@ test('exit card shows a ready-to-copy resume command with the session id', () =>
   assert.match(plain, /S E S S I O N {3}S A V E D/, 'display type is distinct from the chat wordmark');
 });
 
+function rgb(hex: string): string {
+  const value = hex.replace('#', '');
+  return `\x1b[38;2;${parseInt(value.slice(0, 2), 16)};${parseInt(value.slice(2, 4), 16)};${parseInt(value.slice(4, 6), 16)}m`;
+}
+
 test('exit card uses the active palette and disables cleanly', () => {
   const id = 'abc12345';
   const sand = formatSessionExit(id, themes.sand);
   const dark = formatSessionExit(id, themes.dark);
-  assert.ok(sand.includes('\x1b[38;2;58;46;37m'), 'sand ink foreground');
-  assert.ok(dark.includes('\x1b[38;2;245;245;245m'), 'dark foreground');
+  assert.ok(sand.includes(rgb(themes.sand.text)), 'sand ink foreground');
+  assert.ok(dark.includes(rgb(themes.dark.text)), 'dark foreground');
   assert.ok(sand.includes('\x1b[1m'), 'premium bold accents');
   assert.ok(stripAnsi(sand).endsWith('\n'), 'leaves a trailing newline after the alternate screen');
   assert.equal(formatSessionExit('  ', themes.sand), '', 'no id means no stale resume hint');

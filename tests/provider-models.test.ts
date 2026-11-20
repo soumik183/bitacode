@@ -23,17 +23,18 @@ test('listProviderModels maps live models, hides non-chat families and dedupes',
     { id: 'meta-llama/llama-3.1-70b-instruct', name: 'Llama 3.1 70B Instruct' },
   ]);
 
-  const result = await listProviderModels(client, 'openai');
+  const result = await listProviderModels(client, 'openai', { useCache: false });
 
   assert.equal(result.error, null);
   assert.equal(result.authError, false);
-  assert.deepEqual(result.items.map((item) => item.id), [
-    'acme/chat',
-    'gpt-5.4',
-    'meta-llama/llama-3.1-70b-instruct',
-  ]);
-  assert.equal(result.items[1].label, 'GPT-5.4');
-  assert.equal(result.items[0].description, '200k ctx');
+  const ids = result.items.map((item) => item.id);
+  for (const remoteId of ['acme/chat', 'gpt-5.4', 'meta-llama/llama-3.1-70b-instruct']) {
+    assert.ok(ids.includes(remoteId), `${remoteId} is listed`);
+  }
+  assert.ok(!ids.includes('text-embedding-3-small'), 'non-chat families are hidden');
+  assert.equal(new Set(ids).size, ids.length, 'ids are unique');
+  assert.equal(result.items.find((item) => item.id === 'gpt-5.4')?.label, 'GPT-5.4');
+  assert.equal(result.items.find((item) => item.id === 'acme/chat')?.description, '200k ctx');
 });
 
 test('listProviderModels flags rejected keys, including 400 responses', async () => {
@@ -41,11 +42,12 @@ test('listProviderModels flags rejected keys, including 400 responses', async ()
     throw Object.assign(new Error('Please pass a valid API key'), { status: 400 });
   });
 
-  const result = await listProviderModels(client, 'google');
+  const result = await listProviderModels(client, 'google', { useCache: false });
 
   assert.equal(result.authError, true);
   assert.match(result.error ?? '', /valid API key/);
-  assert.deepEqual(result.items, []);
+  // The picker still needs something to show, so the built-in list is kept.
+  assert.ok(result.items.length > 0);
 });
 
 test('formatContextWindow keeps compact labels', () => {

@@ -245,6 +245,8 @@ export async function initializeMcp() {
     if (Object.keys(servers).length === 0)
         return;
     logger.info('Loading MCP servers from merged runtime config');
+    const startedAt = Date.now();
+    const toConnect = [];
     for (const [name, serverConfig] of Object.entries(servers)) {
         // Re-init or config change: drop any prior connection and its tools first.
         const existing = connections.get(name);
@@ -259,23 +261,31 @@ export async function initializeMcp() {
             logger.error(`Skipping MCP server "${name}": ${configError}`);
             continue;
         }
-        try {
-            let conn;
-            if (serverConfig.type === 'stdio') {
-                logger.debug(`Connecting to stdio MCP server: ${name}`);
-                conn = await connectStdioServer(name, serverConfig);
-            }
-            else {
-                logger.debug(`Connecting to HTTP MCP server: ${name} (${serverConfig.url})`);
-                conn = await connectHttpServer(name, serverConfig);
-            }
-            connections.set(name, conn);
-            await registerMcpTools(conn);
-        }
-        catch (err) {
-            logger.error(`Failed to connect to MCP server "${name}": ${err}`);
-        }
+        toConnect.push([name, serverConfig]);
     }
+    // Connect in parallel. Sequentially, three slow servers meant three 15 s
+    // timeouts on a blank screen before the composer appeared.
+    const results = await Promise.allSettled(toConnect.map(async ([name, serverConfig]) => {
+        const conn = serverConfig.type === 'stdio'
+            ? await connectStdioServer(name, serverConfig)
+            : await connectHttpServer(name, serverConfig);
+        connections.set(name, conn);
+        await registerMcpTools(conn);
+        return { name, tools: conn.registeredToolNames.length };
+    }));
+    const failures = [];
+    results.forEach((result, index) => {
+        const name = toConnect[index][0];
+        if (result.status === 'rejected') {
+            failures.push(name);
+            logger.error(`Failed to connect to MCP server "${name}": ${result.reason}`);
+        }
+        else {
+            logger.debug(`Connected MCP server "${name}" with ${result.value.tools} tool(s)`);
+        }
+    });
+    logger.info(`MCP startup finished in ${Date.now() - startedAt}ms ` +
+        `(${toConnect.length - failures.length}/${toConnect.length} connected${failures.length > 0 ? `, failed: ${failures.join(', ')}` : ''})`);
 }
 /**
  * Close all MCP connections and unregister their dynamic tools/handlers.

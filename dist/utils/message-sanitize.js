@@ -71,15 +71,21 @@ export function sanitizeMessagesForProvider(messages) {
     const removed = new Set();
     const result = [];
     let dropped = 0;
+    // Track repairs explicitly: comparing by index breaks as soon as one message
+    // is dropped, which used to report a change (and log a warning) for arrays
+    // that only had an element removed from the middle.
+    let repaired = 0;
     for (const message of messages) {
         const clean = sanitizeOne(message, removed);
         if (clean === null) {
             dropped++;
             continue;
         }
+        if (clean !== message)
+            repaired++;
         result.push(clean);
     }
-    const changed = dropped > 0 || result.some((message, index) => message !== messages[index]);
+    const changed = dropped > 0 || repaired > 0;
     if (changed) {
         // Field names only — never message content.
         logger.warn('Sanitized messages for provider', {

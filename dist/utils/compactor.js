@@ -22,19 +22,82 @@ export function getCompactThreshold(threshold) {
 function isProtectedSkillMessage(message) {
     return message.role === 'tool' && typeof message.content === 'string' && message.content.includes('<skill_content ');
 }
-const COMPRESSION_PROMPT = `You are a conversation state manager. Your job is to compress a conversation history into a compact summary that preserves all important context.
+/**
+ * A `tool` message is only valid when the assistant message carrying its
+ * `tool_calls` comes right before the run of tool results. Trimming history by
+ * message count can cut in the middle of such a run, and providers reject the
+ * whole request with a 400. Extend the retained tail backwards until it starts
+ * on a message that can stand on its own.
+ */
+export function alignTailStart(messages, desiredStart) {
+    let start = Math.max(1, Math.min(desiredStart, messages.length));
+    while (start > 1 && messages[start]?.role === 'tool')
+        start--;
+    return start;
+}
+/**
+ * Drop any `tool` message that no longer has a preceding assistant message with
+ * a matching `tool_calls` id. Belt-and-braces for compacted histories.
+ */
+export function dropOrphanToolMessages(messages) {
+    const open = new Set();
+    const kept = [];
+    for (const message of messages) {
+        const anyMessage = message;
+        if (message.role === 'assistant' && Array.isArray(anyMessage.tool_calls)) {
+            for (const call of anyMessage.tool_calls) {
+                if (call && typeof call.id === 'string' && call.id)
+                    open.add(call.id);
+            }
+            kept.push(message);
+            continue;
+        }
+        if (message.role === 'tool') {
+            const id = typeof anyMessage.tool_call_id === 'string' ? anyMessage.tool_call_id : '';
+            if (!id || !open.has(id))
+                continue;
+            open.delete(id);
+            kept.push(message);
+            continue;
+        }
+        // A non-tool message closes any unanswered call group.
+        open.clear();
+        kept.push(message);
+    }
+    return kept;
+}
+const COMPRESSION_PROMPT = `You are a conversation state manager. Compress the history below into a summary that a competent engineer could resume from with no other context.
 
-Produce a structured summary in this format:
+Write exactly these sections, in this order, and omit a section only when it would be empty:
 
-<state_snapshot>
-<overall_goal>What the user is trying to accomplish</overall_goal>
-<key_knowledge>Important facts, conventions, constraints discovered</key_knowledge>
-<file_system_state>Files created, read, modified, or deleted (with paths)</file_system_state>
-<recent_actions>Last significant actions and their outcomes</recent_actions>
-<current_plan>Current step-by-step plan with status: [DONE], [IN PROGRESS], [TODO]</current_plan>
-</state_snapshot>
+## 1. Goal
+What the user is trying to accomplish, and what "done" looks like.
 
-Be thorough but concise. Do not lose any information that would be needed to continue the conversation.`;
+## 2. Constraints
+Rules, conventions, user preferences and hard limits that must keep being respected (style, libraries, files not to touch, approval requirements).
+
+## 3. Environment
+Branch, working directory, language/framework versions, commands that work, and anything learned about the machine.
+
+## 4. Files and state
+Every file created, read, modified or deleted, with its path and what changed. Note what is currently broken, mid-edit or untested.
+
+## 5. Decisions
+Approaches chosen, approaches rejected, and the reason for each. This prevents re-litigating settled questions.
+
+## 6. Errors and fixes
+Failures hit so far, the actual error text, and the fix that worked (or did not).
+
+## 7. Open questions
+Anything ambiguous that the user has not answered yet.
+
+## 8. Current plan
+Step-by-step plan with status per step: [DONE], [IN PROGRESS], [TODO].
+
+## 9. Next action
+The single next thing to do, stated concretely.
+
+Be specific: file paths, function names and exact command lines beat prose. Never invent facts that are not in the history.`;
 /**
  * Compact a conversation if it exceeds the context window threshold.
  * Returns the original messages if compaction isn't needed or fails.
@@ -55,13 +118,16 @@ export async function compactIfNeeded(client, model, messages, contextWindow, re
     }
 }
 async function compactConversation(client, model, messages, requestDefaults, sessionId) {
-    // Separate system message, history to compress, and recent messages
+    // Separate system message, history to compress, and recent messages. The tail
+    // boundary is realigned so a run of tool results keeps its assistant parent.
     const systemMessage = messages[0];
-    const recentMessages = messages.slice(-RECENT_MESSAGES_TO_KEEP);
-    const middleMessages = messages.slice(1, messages.length - RECENT_MESSAGES_TO_KEEP);
-    const protectedMessages = middleMessages.filter(isProtectedSkillMessage);
-    const historyToCompress = middleMessages.filter((message) => !isProtectedSkillMessage(message));
-    if (historyToCompress.length === 0) {
+    const tailStart = alignTailStart(messages, messages.length - RECENT_MESSAGES_TO_KEEP);
+    const recentMessages = messages.slice(tailStart);
+    const middleMessages = messages.slice(1, tailStart);
+    // Skill content is summarised like everything else: keeping the tool message
+    // without its parent assistant message is exactly what providers reject.
+    const protectedCount = middleMessages.filter(isProtectedSkillMessage).length;
+    if (middleMessages.length === 0) {
         logger.debug('Nothing to compact — conversation too short');
         return messages;
     }
@@ -74,29 +140,38 @@ async function compactConversation(client, model, messages, requestDefaults, ses
         { role: 'system', content: COMPRESSION_PROMPT },
         {
             role: 'user',
-            content: `Here is the conversation history to compress:\n\n${historyToCompress
+            content: `Here is the conversation history to compress:\n\n${middleMessages
                 .map((m) => `[${m.role}]: ${m.content || JSON.stringify(m.tool_calls || '')}`)
-                .join('\n\n')}${todoReminder}`,
+                .join('\n\n')}${protectedCount > 0
+                ? '\n\nSkill instructions were loaded during this history. Keep every rule, file path and constraint they established.'
+                : ''}${todoReminder}`,
         },
     ];
+    // Size the summary budget from the history being replaced instead of a fixed
+    // 2000-token cap that truncates long conversations mid-sentence.
+    const summaryBudget = Math.min(8000, Math.max(1024, Math.round(estimateConversationTokens(middleMessages) * 0.2)));
     const response = await client.chat.completions.create({
         ...requestDefaults,
         model,
         messages: sanitizeMessagesForProvider(compressionMessages),
-        max_tokens: 2000,
+        max_tokens: summaryBudget,
         temperature: 0.1,
     });
     const summary = response.choices[0]?.message?.content;
     if (!summary) {
         throw new Error('Compression returned empty response');
     }
-    // Reconstruct: system + summary + recent messages
-    const compacted = [
+    // Reconstruct: system + summary + a valid, tool-call-consistent tail.
+    const compacted = dropOrphanToolMessages([
         systemMessage,
         { role: 'system', content: `Previous conversation summary:\n\n${summary}` },
-        ...protectedMessages,
         ...recentMessages,
-    ];
+    ]);
+    // Never hand back something the provider cannot accept (or something empty).
+    if (compacted.length < 2 || !compacted.some((message) => message.role !== 'system')) {
+        logger.warn('Compaction produced an unusable history; keeping the original');
+        return messages;
+    }
     const oldTokens = estimateConversationTokens(messages);
     const newTokens = estimateConversationTokens(compacted);
     logger.info(`Compacted ${oldTokens} → ${newTokens} tokens (${((1 - newTokens / oldTokens) * 100).toFixed(0)}% reduction)`);

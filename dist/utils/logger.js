@@ -7,7 +7,7 @@
  * Set the level via `setLogLevel()` or the `--log-level` CLI flag.
  * Logs are written to a file to avoid interfering with Ink UI rendering.
  */
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { mkdirSync, existsSync, createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import stripAnsi from 'strip-ansi';
@@ -21,6 +21,9 @@ export var LogLevel;
 })(LogLevel || (LogLevel = {}));
 let currentLevel = LogLevel.INFO;
 let logFilePath = null;
+// One kept-open stream instead of an append-and-open per line: debug logging on
+// every tool delta used to mean thousands of synchronous open/write/close calls.
+let logStream = null;
 const logBuffer = [];
 let logListeners = [];
 export function setLogLevel(level) {
@@ -40,24 +43,52 @@ export function getRecentLogs(count = 50) {
     return logBuffer.slice(-count);
 }
 export function initLogFile() {
-    // Create logs directory
-    const logsDir = join(homedir(), '.local', 'share', 'bitacode', 'logs');
+    // Create logs directory private to the user: logs contain prompts and paths.
+    const logsDir = getLogDirectory();
     if (!existsSync(logsDir)) {
-        mkdirSync(logsDir, { recursive: true });
+        mkdirSync(logsDir, { recursive: true, mode: 0o700 });
     }
     // Create log file with timestamp
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     logFilePath = join(logsDir, `bitacode-${timestamp}.log`);
+    closeLogFile();
     // Write header
     writeToFile(`\n${'='.repeat(80)}\nBitacode Log - ${new Date().toISOString()}\n${'='.repeat(80)}\n`);
     return logFilePath;
+}
+/** Directory that holds the log files (created on first write). */
+export function getLogDirectory() {
+    return join(homedir(), '.local', 'share', 'bitacode', 'logs');
+}
+/** Path of the current log file, or the directory when logging is not enabled. */
+export function getLogFilePath() {
+    return logFilePath ?? getLogDirectory();
+}
+/** Flush and close the log stream (tests and process exit). */
+export function closeLogFile() {
+    if (!logStream)
+        return;
+    try {
+        logStream.end();
+    }
+    catch {
+        // Already closed.
+    }
+    logStream = null;
 }
 function writeToFile(message) {
     if (!logFilePath) {
         initLogFile();
     }
     try {
-        appendFileSync(logFilePath, message);
+        if (!logStream) {
+            logStream = createWriteStream(logFilePath, { flags: 'a', mode: 0o600 });
+            // A failed log write must never take the TUI down.
+            logStream.on('error', () => {
+                logStream = null;
+            });
+        }
+        logStream.write(message);
     }
     catch (err) {
         // Emit to stderr since we can't write to log file

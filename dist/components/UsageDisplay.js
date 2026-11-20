@@ -36,7 +36,7 @@ const Shimmer = ({ text, frame }) => {
  * Footer under the prompt: folder on the left — swapped for a live activity
  * wave while the agent works — and model · variant · context on the right.
  */
-export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, segments = STATUS_LINE_ITEMS, }) => {
+export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, segments = STATUS_LINE_ITEMS, tps = null, }) => {
     const theme = useTheme();
     const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
     const show = (segment) => segments.includes(segment);
@@ -59,5 +59,5 @@ export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, varia
     }
     return (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: show('tool') && busy ? (_jsxs(_Fragment, { children: [wave(frame)
                             .split('')
-                            .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] }))] })) : show('folder') ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) : null }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsx(Text, { wrap: "truncate-end", children: rightParts }) })] }));
+                            .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] })), !tool && tps && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Text, { color: theme.muted, children: tps })] }))] })) : show('folder') ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) : null }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsx(Text, { wrap: "truncate-end", children: rightParts }) })] }));
 };

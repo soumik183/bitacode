@@ -5,11 +5,22 @@ import { useTheme } from '../theme.js';
 /**
  * Floating dialog chrome.
  *
- * Ink has no cross-platform overlay, so a dialog is a fixed-width card placed
- * at the top of the live region by its parent (horizontally centred, vertically
- * upper). Keeping that geometry in one component means every picker, prompt
- * and future screen — providers, models, settings, MCP, skills — shares the
- * same thin brown frame instead of drifting into a dozen ad-hoc layouts.
+ * Ink has no cross-platform overlay, so a dialog is a fixed-width card placed at
+ * the top of the live region by its parent (horizontally centred, vertically
+ * upper). Keeping that geometry in one component means every picker, prompt and
+ * future screen — providers, models, settings, MCP, skills — shares the same
+ * frame instead of drifting into a dozen ad-hoc layouts.
+ *
+ * Anatomy (every dialog, without exception):
+ *
+ *   ╭────────────────────────────────────────╮
+ *   │ ◈ Title                        1/7     │  ← accent glyph + title, badge
+ *   │ ─────────────────────────────────────  │  ← hairline rule
+ *   │   Interface                            │  ← section caption
+ *   │ › Label · description           meta   │  ← row: pointer, text, value
+ *   │ ─────────────────────────────────────  │
+ *   │  ↑↓ move · enter select · esc close    │  ← keys in accent, rest dim
+ *   ╰────────────────────────────────────────╯
  */
 
 export interface DialogProps {
@@ -47,7 +58,43 @@ export function dialogInnerWidth(columns: number): number {
   return Math.max(1, dialogWidth(columns) - 4);
 }
 
-const rule = (columns: number): string => '─'.repeat(Math.max(1, dialogWidth(columns) - 2));
+/** Hairline that spans exactly the content box of an already-clamped card. */
+const rule = (cardWidth: number): string => '─'.repeat(Math.max(1, cardWidth - 4));
+
+/**
+ * Split a hint into key/action pairs so keys can carry the accent colour. A
+ * hint is `enter select · esc close` — the first word of each segment is the
+ * key, everything after it is the action.
+ */
+export function splitHint(hint: string): Array<{ key: string; action: string }> {
+  return hint
+    .split('·')
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => {
+      const space = segment.indexOf(' ');
+      if (space === -1) return { key: segment, action: '' };
+      return { key: segment.slice(0, space), action: segment.slice(space + 1).trim() };
+    });
+}
+
+/** `enter save · esc cancel` with the key names painted in the accent colour. */
+export const HintLine: React.FC<{ hint: string; compact?: boolean }> = ({ hint, compact }) => {
+  const theme = useTheme();
+  const parts = splitHint(hint);
+  if (parts.length === 0) return null;
+  return (
+    <Text wrap="truncate-end">
+      {parts.map((part, index) => (
+        <Text key={`${part.key}-${index}`}>
+          {index > 0 ? <Text color={theme.dim}>{'  ·  '}</Text> : null}
+          <Text color={theme.accent} bold={!compact}>{part.key}</Text>
+          {part.action ? <Text color={theme.dim}>{` ${part.action}`}</Text> : null}
+        </Text>
+      ))}
+    </Text>
+  );
+};
 
 export const Dialog: React.FC<DialogProps> = ({
   title,
@@ -62,20 +109,24 @@ export const Dialog: React.FC<DialogProps> = ({
   const theme = useTheme();
   const heading = accentGlyph ? `${accentGlyph} ${title}` : title;
   const width = dialogWidth(columns);
-  const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
 
   if (compact) {
     return (
       <Box flexDirection="column" width={width} flexShrink={0} overflow="hidden">
-        <Box flexDirection="row" overflow="hidden">
+        <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
           <Box flexShrink={1} minWidth={1}>
             <Text color={theme.accent} bold wrap="truncate-end">
               {heading}
             </Text>
           </Box>
+          {badge && width >= 30 ? (
+            <Box flexShrink={0} marginLeft={1}>
+              <Text color={theme.dim} wrap="truncate-end">{badge}</Text>
+            </Box>
+          ) : null}
         </Box>
         <Box flexDirection="column" flexShrink={1} overflow="hidden">{children}</Box>
-        {hint ? <Text color={theme.dim} wrap="truncate-end">{hint}</Text> : null}
+        {hint ? <HintLine hint={hint} compact /> : null}
       </Box>
     );
   }
@@ -99,17 +150,19 @@ export const Dialog: React.FC<DialogProps> = ({
         </Box>
         {badge ? (
           <Box flexShrink={0} marginLeft={1}>
-            <Text color={theme.dim} wrap="truncate-end">{badge}</Text>
+            <Text color={theme.muted} wrap="truncate-end">{` ${badge} `}</Text>
           </Box>
         ) : null}
       </Box>
-      <Text color={theme.border} wrap="truncate-end">{rule(cols)}</Text>
+      <Text color={theme.border} wrap="truncate-end">{rule(width)}</Text>
       <Box flexDirection="column" flexShrink={1} overflow="hidden">
         {children}
       </Box>
-      {hint ? <Text color={theme.border} wrap="truncate-end">{rule(cols)}</Text> : null}
       {hint ? (
-        <Text color={theme.dim} wrap="truncate-end">{hint}</Text>
+        <>
+          <Text color={theme.border} wrap="truncate-end">{rule(width)}</Text>
+          <HintLine hint={hint} />
+        </>
       ) : null}
     </Box>
   );
@@ -127,6 +180,8 @@ export interface DialogItem {
   swatch?: { accent: string; bg: string };
   /** Optional group heading rendered when the group changes. */
   section?: string;
+  /** Marks the row that is currently in effect (model, theme, …). */
+  active?: boolean;
 }
 
 export interface DialogListProps {
@@ -147,7 +202,8 @@ const MAX_VISIBLE = 8;
  *
  * No timers and no internal state: it renders the same frame as the keypress
  * that moved the cursor, which keeps Ink's diff small while holding an arrow
- * key. Section headings make the settings/model dialogs readable at a glance.
+ * key. Section headings, a right-aligned value column and a position chip make
+ * long dialogs readable at a glance.
  */
 export const DialogList: React.FC<DialogListProps> = ({
   items,
@@ -164,9 +220,14 @@ export const DialogList: React.FC<DialogListProps> = ({
   const windowSize = Math.max(3, Math.min(MAX_VISIBLE, maxVisible ?? MAX_VISIBLE));
   const start = Math.max(0, Math.min(selected - Math.floor(windowSize / 2), items.length - windowSize));
   const visible = items.slice(start, start + windowSize);
+  const hiddenAbove = start;
+  const hiddenBelow = Math.max(0, items.length - start - visible.length);
 
   return (
     <Box flexDirection="column">
+      {hiddenAbove > 0 && !compact ? (
+        <Text color={theme.dim} wrap="truncate-end">{`  ↑ ${hiddenAbove} more`}</Text>
+      ) : null}
       {visible.map((item, index) => {
         const itemIndex = start + index;
         const active = itemIndex === selected;
@@ -175,39 +236,51 @@ export const DialogList: React.FC<DialogListProps> = ({
         return (
           <Box key={item.id} flexDirection="column">
             {showSection ? (
-              <Text color={theme.dim} wrap="truncate-end">{item.section}</Text>
-            ) : null}
-            <Box flexDirection="row" overflow="hidden">
-              <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
-              {item.swatch ? (
-                <Box flexShrink={0} marginRight={1}>
-                  <Text color={item.swatch.accent} backgroundColor={item.swatch.bg}>■</Text>
-                </Box>
-              ) : null}
-              <Box flexGrow={1} flexShrink={1} minWidth={1}>
-                <Text
-                  color={item.color ?? (active ? theme.text : theme.muted)}
-                  bold={active || item.bold}
-                  wrap="truncate-end"
-                >
-                  {item.label}
-                  {item.description ? (
-                    <Text color={theme.dim}>{`  ${item.description}`}</Text>
-                  ) : null}
-                </Text>
+              <Box marginTop={itemIndex > 0 ? 0 : 0}>
+                <Text color={theme.dim} bold wrap="truncate-end">{`  ${item.section}`}</Text>
               </Box>
-              {item.meta ? (
+            ) : null}
+            <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+              <Box flexShrink={1} minWidth={1} flexDirection="row">
+                <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
+                {item.swatch ? (
+                  <Box flexShrink={0} marginRight={1}>
+                    <Text color={item.swatch.accent} backgroundColor={item.swatch.bg}>■</Text>
+                  </Box>
+                ) : null}
+                <Box flexShrink={1} minWidth={1}>
+                  <Text
+                    color={item.color ?? (active ? theme.text : theme.muted)}
+                    bold={active || item.bold}
+                    wrap="truncate-end"
+                  >
+                    {item.label}
+                    {item.description ? (
+                      <Text color={theme.dim}>{` · ${item.description}`}</Text>
+                    ) : null}
+                  </Text>
+                </Box>
+              </Box>
+              {item.meta || item.active ? (
                 <Box flexShrink={0} marginLeft={1}>
-                  <Text color={theme.dim} wrap="truncate-end">{item.meta}</Text>
+                  {item.meta ? (
+                    <Text color={active ? theme.accent : theme.dim} wrap="truncate-end">{item.meta}</Text>
+                  ) : null}
+                  {item.active ? (
+                    <Text color={theme.success} wrap="truncate-end">{item.meta ? ' ✓' : '✓'}</Text>
+                  ) : null}
                 </Box>
               ) : null}
             </Box>
           </Box>
         );
       })}
+      {hiddenBelow > 0 && !compact ? (
+        <Text color={theme.dim} wrap="truncate-end">{`  ↓ ${hiddenBelow} more`}</Text>
+      ) : null}
       {!compact && items.length > windowSize ? (
         <Text color={theme.dim} wrap="truncate-end">
-          {`${selected + 1}/${items.length}`}
+          {`  ${selected + 1}/${items.length}`}
         </Text>
       ) : null}
     </Box>

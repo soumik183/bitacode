@@ -13,6 +13,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { validatePath } from './path-validation.js';
 
 export interface Checkpoint {
   path: string;
@@ -103,7 +104,9 @@ export async function createCheckpoint(
         const createdAt = new Date().toISOString();
         const fileName = `${String(Date.now()).padStart(13, '0')}-${id}.json`;
         const checkpoint: Checkpoint = {
-          path: requested,
+          // Absolute, so /undo restores where the file lived when it was
+          // snapshotted, not relative to whatever cwd the session resumes in.
+          path: absolute,
           content,
           createdAt,
           tool: toolName,
@@ -159,14 +162,17 @@ export async function restoreCheckpoint(id: string, sessionId?: string): Promise
         const parsed: unknown = JSON.parse(await fs.readFile(file, 'utf8'));
         if (!isCheckpoint(parsed)) continue;
 
-        const absolute = path.resolve(process.cwd(), parsed.path);
+        // Validate at restore time too: a planted checkpoint file must not be
+        // able to write outside the allowed roots. Older checkpoints stored a
+        // relative path, so resolve it first and then validate.
+        const absolute = await validatePath(path.resolve(process.cwd(), parsed.path));
         if (parsed.content === null) {
           await fs.rm(absolute, { force: true });
         } else {
           await fs.mkdir(path.dirname(absolute), { recursive: true });
           await fs.writeFile(absolute, parsed.content, 'utf8');
         }
-        restored.push(parsed.path);
+        restored.push(absolute);
         await fs.rm(file, { force: true });
       } catch {
         // Keep the checkpoint if the restore failed so the user can retry.

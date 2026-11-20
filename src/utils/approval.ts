@@ -16,6 +16,7 @@
  */
 
 import type { ApprovalMode } from '../settings.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 export type ApprovalRequest = {
   id: string;
@@ -36,6 +37,25 @@ const sessionApprovals = new Set<string>(); // stores approval keys scoped by se
 
 // Callback that the Ink UI provides to handle interactive approval
 let approvalHandler: ((req: ApprovalRequest) => Promise<ApprovalResponse>) | null = null;
+
+/**
+ * Per-call override, used by the permission rule engine.
+ *
+ * A rule needs to grant or force approval for exactly one tool call, without
+ * mutating process-global mode (which parallel calls would race on).
+ * AsyncLocalStorage gives the override to the whole async subtree of that call.
+ */
+export type ApprovalOverride = 'granted' | 'required';
+
+const approvalOverrideStore = new AsyncLocalStorage<ApprovalOverride>();
+
+export function runWithApprovalOverride<T>(mode: ApprovalOverride, fn: () => Promise<T>): Promise<T> {
+  return approvalOverrideStore.run(mode, fn);
+}
+
+export function currentApprovalOverride(): ApprovalOverride | undefined {
+  return approvalOverrideStore.getStore();
+}
 
 function syncSkipPermissions(): void {
   dangerouslySkipPermissions = cliSkipPermissions || approvalMode === 'yolo';
@@ -87,9 +107,12 @@ function getApprovalScopeKey(req: ApprovalRequest): string {
  *  4. No handler registered → reject (fail closed)
  */
 export async function requestApproval(req: ApprovalRequest): Promise<boolean> {
-  if (approvalMode === 'auto' || approvalMode === 'yolo') return true;
-
-  if (dangerouslySkipPermissions) return true;
+  const override = approvalOverrideStore.getStore();
+  if (override === 'granted') return true;
+  if (override !== 'required') {
+    if (approvalMode === 'auto' || approvalMode === 'yolo') return true;
+    if (dangerouslySkipPermissions) return true;
+  }
 
   const sessionKey = getApprovalScopeKey(req);
   if (sessionApprovals.has(sessionKey)) return true;

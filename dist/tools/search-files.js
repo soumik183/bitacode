@@ -31,14 +31,21 @@ export const searchFilesTool = {
         },
     },
 };
-// Detect ripgrep availability at module load
-let hasRipgrep = false;
-try {
-    execFileSync('rg', ['--version'], { stdio: 'pipe' });
-    hasRipgrep = true;
-}
-catch {
-    // ripgrep not available, will use JS fallback
+// Detect ripgrep lazily and once. A synchronous spawn at import time slowed
+// every startup (and every test that imports the tool registry) by a full
+// process launch, and it ran before the user had asked for anything.
+let ripgrepAvailable = null;
+function hasRipgrep() {
+    if (ripgrepAvailable === null) {
+        try {
+            execFileSync('rg', ['--version'], { stdio: 'ignore', timeout: 2000 });
+            ripgrepAvailable = true;
+        }
+        catch {
+            ripgrepAvailable = false;
+        }
+    }
+    return ripgrepAvailable;
 }
 const MAX_RESULTS = 100;
 const MAX_PATTERN_LENGTH = 1000;
@@ -105,7 +112,7 @@ export async function searchFiles(searchTerm, directoryPath = '.', caseSensitive
         return `Error: '${directoryPath}' is not a directory. Pass a directory to search in.`;
     }
     const extensions = normalizeExtensions(fileExtensions);
-    if (hasRipgrep) {
+    if (hasRipgrep()) {
         return searchWithRipgrep(searchTerm, validated, directoryPath, caseSensitive !== false, extensions, abortSignal);
     }
     return searchWithJs(searchTerm, validated, directoryPath, caseSensitive !== false, extensions);

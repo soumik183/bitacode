@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useTheme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
+import { HintLine } from './Dialog.js';
 import { stripMouseReports } from '../utils/mouse.js';
 import type { AskQuestion, AskResponse } from '../tools/ask.js';
 
@@ -223,14 +224,20 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
     <LeftBar color={theme.accent} marginTop={gap} marginBottom={gap}>
       <Box flexDirection="column">
         {!embedded && (
-          <Text>
-            <Text color={theme.accent} bold>
-              Agent question
+          <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+            <Text wrap="truncate-end">
+              <Text color={theme.accent} bold>◆ </Text>
+              <Text color={theme.accent} bold>Agent question</Text>
             </Text>
-            {total > 1 && (
-              <Text color={theme.dim}>{`  ${index + 1}/${total}`}</Text>
-            )}
-          </Text>
+            {total > 1 ? (
+              <Text color={theme.dim} wrap="truncate-end">
+                <Text color={theme.success}>{'●'.repeat(index)}</Text>
+                <Text color={theme.accent}>{'◉'}</Text>
+                <Text color={theme.dim}>{'○'.repeat(Math.max(0, total - index - 1))}</Text>
+                <Text color={theme.dim}>{`  ${index + 1}/${total}`}</Text>
+              </Text>
+            ) : null}
+          </Box>
         )}
 
         <Text color={theme.text} bold wrap="truncate-end">
@@ -254,7 +261,12 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
               // labels keep as much room as the terminal allows.
               const labelMax = Math.max(1, cols - GUTTER - indent - recWidth);
               return (
-                <Box key={`${option.label}-${optionIndex}`} flexDirection="column">
+                <Box
+                  key={`${option.label}-${optionIndex}`}
+                  flexDirection="column"
+                  backgroundColor={active ? theme.surfaceAlt : undefined}
+                  paddingRight={1}
+                >
                   <Text wrap="truncate-end">
                     <Text color={isPicked ? theme.accent : theme.dim}>{`${active ? '❯' : ' '} `}</Text>
                     {multiple && (
@@ -262,8 +274,9 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
                         {`${isPicked ? CHECKED : UNCHECKED} `}
                       </Text>
                     )}
+                    <Text color={theme.dim}>{`${optionIndex + 1}. `}</Text>
                     <Text color={active ? theme.text : theme.muted} bold={active}>
-                      {`${optionIndex + 1}. ${clampText(option.label, labelMax)}`}
+                      {clampText(option.label, labelMax)}
                     </Text>
                     {option.recommended && (
                       <Text color={theme.success}>
@@ -294,18 +307,21 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
 
         {!embedded && (
           <Box marginTop={gap}>
-            <Text color={theme.dim} wrap="truncate-end">
-              {typing
-                ? 'type your answer · enter send · esc skip'
-                : [
-                    hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
-                    hasOptions && canType ? 'tab type' : '',
-                    question.multiple ? 'enter toggle/confirm' : 'enter send',
-                    'esc skip',
-                  ]
-                    .filter(Boolean)
-                    .join(' · ')}
-            </Text>
+            <HintLine
+              compact={compact}
+              hint={
+                typing
+                  ? 'enter send · esc skip'
+                  : [
+                      hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
+                      hasOptions && canType ? 'tab type' : '',
+                      question.multiple ? 'enter toggle/confirm' : 'enter send',
+                      'esc skip',
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+              }
+            />
           </Box>
         )}
       </Box>

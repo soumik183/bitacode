@@ -6,7 +6,8 @@
  * callers poll it and explicitly stop it.
  */
 import { spawn } from 'node:child_process';
-import { requestApproval } from '../utils/approval.js';
+import { gateCommand } from '../utils/command-gate.js';
+import { logger } from '../utils/logger.js';
 const MAX_PROCESSES = 16;
 const MAX_BUFFER_CHARS = 200_000;
 const CLEANUP_DELAY_MS = 60_000;
@@ -22,6 +23,10 @@ export const startProcessTool = {
             type: 'object',
             properties: {
                 command: { type: 'string', description: 'The shell command to run in the background.' },
+                cwd: {
+                    type: 'string',
+                    description: 'Working directory for the process. Must be within the allowed roots. Defaults to the current directory.',
+                },
             },
             required: ['command'],
         },
@@ -70,27 +75,6 @@ export const stopProcessTool = {
         },
     },
 };
-// Minimal copy of bash's safe-command pattern: obvious read-only commands skip
-// approval, everything else (and anything with shell control characters) does not.
-const CONTROL_PATTERN = /[;&|<>()`$[\]]{}!]/;
-const DANGEROUS_PATTERNS = ['mkfs', 'dd if=', ':(){ :|:& };:'];
-const SAFE_COMMANDS = [
-    'pwd', 'whoami', 'date', 'uname', 'uptime',
-    'git status', 'git log', 'git diff', 'git branch',
-    'node --version', 'npm --version', 'ls', 'cat', 'echo', 'sleep',
-];
-function isSafe(command) {
-    const trimmed = command.trim();
-    if (!trimmed || CONTROL_PATTERN.test(trimmed) || trimmed.includes('\n') || trimmed.includes('\r')) {
-        return false;
-    }
-    const lower = trimmed.toLowerCase();
-    if (/(^|[;&|]\s*)(sudo|su)\b/.test(lower))
-        return false;
-    if (DANGEROUS_PATTERNS.some((pattern) => lower.includes(pattern)))
-        return false;
-    return SAFE_COMMANDS.some((safe) => trimmed === safe || trimmed.startsWith(`${safe} `));
-}
 function killTree(child, signal) {
     if (process.platform === 'win32') {
         if (child.pid) {
@@ -124,22 +108,19 @@ function appendOutput(entry, chunk) {
         entry.dropped += excess;
     }
 }
-export async function startProcess(command, sessionId) {
-    if (typeof command !== 'string' || command.trim().length === 0) {
-        return 'Error: command is required.';
-    }
-    if (!(await isSafe(command))) {
-        const approved = await requestApproval({
-            id: `start-process-${Date.now()}`,
-            type: 'shell_command',
-            description: `Start background process: ${command}`,
-            detail: `Working directory: ${process.cwd()}\nCommand: ${command}`,
-            sessionId,
-            sessionScopeKey: `shell:${command}`,
-        });
-        if (!approved)
-            return `Command cancelled by user: ${command}`;
-    }
+export async function startProcess(command, sessionId, cwd, assumeApproved = false) {
+    // Same three layers as `bash`: hard block, path sandbox, approval. The
+    // previous prefix allowlist ran `cat ~/.ssh/id_rsa` unapproved.
+    const gate = await gateCommand({
+        command,
+        cwd,
+        sessionId,
+        approvalType: 'shell_command',
+        detail: 'Background process',
+        assumeApproved,
+    });
+    if (!gate.ok)
+        return gate.reason;
     // Evict finished processes first; only refuse when all slots are live.
     if (processes.size >= MAX_PROCESSES) {
         const finished = [...processes.values()]
@@ -156,7 +137,7 @@ export async function startProcess(command, sessionId) {
     try {
         child = spawn(command, [], {
             shell: true,
-            cwd: process.cwd(),
+            cwd: gate.cwd,
             env: { ...process.env },
             stdio: ['pipe', 'pipe', 'pipe'],
             // Own process group so stop_process can kill grandchildren too.
@@ -166,6 +147,7 @@ export async function startProcess(command, sessionId) {
     catch (err) {
         return `Error starting process: ${err.message}`;
     }
+    ensureExitHook();
     const entry = {
         id, command, child, pending: '', dropped: 0, running: true,
         exitCode: null, signal: null, error: null, startedAt: Date.now(),
@@ -221,6 +203,37 @@ export function writeProcessStdin(id, data) {
     catch (err) {
         return `Error writing to stdin of ${id}: ${err.message}`;
     }
+}
+let exitHookInstalled = false;
+/**
+ * Children are spawned detached, so they outlive the TUI unless something kills
+ * them. Register on the first spawn; the handler must stay synchronous, which
+ * SIGTERM-only teardown is.
+ */
+function ensureExitHook() {
+    if (exitHookInstalled)
+        return;
+    exitHookInstalled = true;
+    process.once('exit', () => {
+        stopAllProcesses();
+    });
+}
+/**
+ * Kill every managed process and its group. Called from the exit cleanup so a
+ * quit does not leave `npm run dev` or a watcher running with no handle.
+ */
+export function stopAllProcesses() {
+    let stopped = 0;
+    for (const entry of processes.values()) {
+        if (entry.running) {
+            killTree(entry.child, 'SIGTERM');
+            stopped++;
+        }
+    }
+    if (stopped > 0)
+        logger.debug(`Stopped ${stopped} background process(es) on exit`);
+    processes.clear();
+    return stopped;
 }
 export function stopProcess(id) {
     const entry = typeof id === 'string' ? processes.get(id) : undefined;

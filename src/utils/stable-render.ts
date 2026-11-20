@@ -30,7 +30,14 @@ function erasePrefixLength(text: string): number {
   return index + ERASE_LINE.length + ERASE_END.length;
 }
 
+const instrumented = new WeakSet<object>();
+
 export function installStableRenderer(stdout: WriteStream): void {
+  // Installing twice would wrap the wrapper, so every frame would be rewritten
+  // twice (double newlines, drifting cursor). Guard per stream.
+  if (instrumented.has(stdout)) return;
+  instrumented.add(stdout);
+
   const originalWrite = stdout.write.bind(stdout);
   let paintedRows = 0;
 

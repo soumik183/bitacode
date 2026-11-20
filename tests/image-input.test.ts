@@ -58,3 +58,17 @@ test('readImage rejects files above the 5 MB cap', async () => {
     await fsp.rm(DIR, { recursive: true, force: true });
   }
 });
+
+// Regression: read_image used path.resolve() with no sandbox check, so
+// `../outside.png` turned into base64 bytes in the model context.
+test('readImage refuses paths outside the working directory', async () => {
+  const outside = path.join(path.dirname(process.cwd()), `outside-probe-${process.pid}.png`);
+  await fsp.writeFile(outside, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  try {
+    const result = await readImage(path.relative(process.cwd(), outside));
+    assert.doesNotMatch(result, /base64/, 'must not return image bytes');
+    assert.match(result, /outside the working directory/i);
+  } finally {
+    await fsp.rm(outside, { force: true });
+  }
+});

@@ -141,7 +141,7 @@ Treat requests for action as instructions. Continue until the goal is fully met 
 - Safe shell commands run automatically; others need approval. Never log secrets.
 
 # TODO lists
-- Use for multi-step work (3+ steps): start with the full list up front, then keep it current as you go.
+- Use for multi-step work (3+ steps); keep the list current as you go.
 - \`todo_write\` replaces the whole list — pass every item each time; call \`todo_read\` after to confirm it stuck.
 - Keep one item \`in_progress\` while working and flip finished items to \`completed\`. Keep items short and actionable — one verb-led outcome each.
 - Skip todos for trivial single-step tasks.

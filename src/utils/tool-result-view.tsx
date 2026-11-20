@@ -1,12 +1,12 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { CodeBlock } from '../components/CodeBlock.js';
-import { DiffView } from '../components/DiffView.js';
-import { ReadFileView } from '../components/ReadFileView.js';
+import { DiffView, DIFF_PREVIEW_LINES } from '../components/DiffView.js';
+import { ReadFileView, READ_PREVIEW_LINES } from '../components/ReadFileView.js';
 import { ShellView } from '../components/ShellView.js';
 import { getTheme, type Theme } from '../theme.js';
 import { detectLanguage, type HighlightLanguage } from './code-highlight.js';
-import { displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
+import { annotateDiff, displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
 import { parseShellResult } from './shell-result.js';
 import { formatToolActivity } from './tool-display.js';
 import type { AddStaticFn } from './transcript.js';
@@ -92,20 +92,21 @@ export function addToolResultView(
 
   const fileDiff = parseFileMutationDiff(toolName, toolArgs, rawResult);
   if (fileDiff) {
-    addStatic(
-      <DiffView
-        header={fileDiff.header}
-        diff={fileDiff.diff}
-        filePath={fileDiff.filePath}
-        operation={fileDiff.operation}
-      />
-    );
+    const collapsed = <DiffView {...fileDiff} />;
+    // Only offer expansion when there is actually more to see, so a short
+    // patch does not advertise a toggle that would do nothing.
+    const truncated = annotateDiff(fileDiff.diff).length > DIFF_PREVIEW_LINES;
+    const expanded = <DiffView {...fileDiff} expanded />;
+    addStatic(collapsed, truncated ? { collapsed, expanded } : undefined);
     return;
   }
 
   const fileRead = parseFileReadResult(toolName, toolArgs, rawResult);
   if (fileRead) {
-    addStatic(<ReadFileView {...fileRead} />);
+    const totalLines = fileRead.sections.reduce((total, section) => total + section.lines.length, 0);
+    const collapsed = <ReadFileView {...fileRead} />;
+    const expanded = <ReadFileView {...fileRead} expanded />;
+    addStatic(collapsed, totalLines > READ_PREVIEW_LINES ? { collapsed, expanded } : undefined);
     return;
   }
 

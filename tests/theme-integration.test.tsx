@@ -34,15 +34,20 @@ function todoFrame(name: string): string {
 }
 
 test('todo status icons use the active palette, not a module-level singleton', () => {
+  // A row now starts with a gutter and a priority chip, so assert on the row
+  // that carries the glyph rather than on a contiguous colour/icon substring.
+  const rowWith = (frame: string, glyph: string): string =>
+    frame.split('\n').find((line) => line.includes(glyph)) ?? '';
+
   const light = todoFrame('light');
-  assert.ok(light.includes(`${rgb(themes.light.success)}✓ `), 'completed uses success');
-  assert.ok(light.includes(`${rgb(themes.light.info)}◐ `), 'in progress uses info');
-  assert.ok(light.includes(`${rgb(themes.light.dim)}○ `), 'pending uses dim');
+  assert.ok(rowWith(light, '✓').includes(rgb(themes.light.success)), 'completed uses success');
+  assert.ok(rowWith(light, '▸').includes(rgb(themes.light.info)), 'in progress uses info');
+  assert.ok(rowWith(light, '○').includes(rgb(themes.light.dim)), 'pending uses dim');
 
   const black = todoFrame('black');
-  assert.ok(black.includes(`${rgb(themes.black.success)}✓ `), 'success repaints on theme change');
-  assert.ok(black.includes(`${rgb(themes.black.info)}◐ `), 'info repaints on theme change');
-  assert.ok(!black.includes(`${rgb(themes.light.success)}✓ `), 'old palette colour is gone');
+  assert.ok(rowWith(black, '✓').includes(rgb(themes.black.success)), 'success repaints on theme change');
+  assert.ok(rowWith(black, '▸').includes(rgb(themes.black.info)), 'info repaints on theme change');
+  assert.ok(!black.includes(rgb(themes.light.success)), 'old palette colour is gone');
 });
 
 const activities: SubAgentActivityItem[] = [

@@ -50,6 +50,7 @@ import { planTool, plan } from './plan.js';
 import { parallelTool, runParallel, setParallelExecutor } from './parallel.js';
 import { agentStatusTool, agentStatus } from './agent-status.js';
 import { agentMessageTool, agentMessage } from './agent-message.js';
+import { teamPostTool, teamReadTool, teamListTool, teamSpawnTool, agentDefineTool, teamPost, teamRead, teamList, teamSpawn, agentDefine, } from './team.js';
 import { taskResultTool, taskResult } from './task-result.js';
 import { notifyTool, notify } from './notify.js';
 import { progressTool, progress } from './progress.js';
@@ -57,8 +58,10 @@ import { openUrlTool, openUrl } from './open-url.js';
 import { undoTool, undo } from './undo.js';
 import { readImageTool, readImage } from './image-input.js';
 import { goToDefinitionTool, goToDefinition, findReferencesTool, findReferences, diagnosticsTool, diagnostics, } from './lsp.js';
+import { updateWorkingCheckpointTool, updateWorkingCheckpoint, memoryAddTool, memoryAdd, memoryListTool, memoryList, memoryForgetTool, memoryForget, verifyProjectTool, verifyProject, } from './memory-tools.js';
 export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
 export { recordSubAgentStatus } from './agent-status.js';
+export { DEFAULT_TEAM, TEAM_CHANNEL, postMessage, readMessages, listTeams, clearTeam, teamRoster, defineAgent, getAgent, listAgents, clearAgents, recordSpawnIntent, listSpawnIntents, clearSpawnIntents, } from '../utils/team.js';
 export { isNotification } from './notify.js';
 export { parseProgress } from './progress.js';
 // `parallel` delegates back to this dispatcher without a circular static import.
@@ -115,6 +118,11 @@ export const tools = [
     parallelTool,
     agentStatusTool,
     agentMessageTool,
+    teamPostTool,
+    teamReadTool,
+    teamListTool,
+    teamSpawnTool,
+    agentDefineTool,
     taskResultTool,
     notifyTool,
     progressTool,
@@ -124,6 +132,12 @@ export const tools = [
     goToDefinitionTool,
     findReferencesTool,
     diagnosticsTool,
+    // Harness state: notes, memory, verification
+    updateWorkingCheckpointTool,
+    memoryAddTool,
+    memoryListTool,
+    memoryForgetTool,
+    verifyProjectTool,
 ];
 // Mutable tools list — MCP and sub-agent tools get appended at runtime
 let dynamicTools = [];
@@ -145,6 +159,9 @@ export function getAllTools() {
 const dynamicHandlers = new Map();
 export function registerDynamicHandler(name, handler) {
     dynamicHandlers.set(name, handler);
+}
+export function isDynamicToolName(name) {
+    return dynamicHandlers.has(name);
 }
 export function unregisterDynamicHandler(name) {
     dynamicHandlers.delete(name);
@@ -236,7 +253,7 @@ const TOOL_ARGS = {
     which: [S.name],
     command_exists: [S.name],
     watch: [{ canonical: 'path', aliases: [...ARG_KEYS.filePath], required: true }],
-    start_process: [S.command],
+    start_process: [S.command, S.directory],
     write_process_stdin: [S.id, { canonical: 'data', aliases: [], required: true }],
     poll_process: [S.id],
     stop_process: [S.id],
@@ -248,12 +265,25 @@ const TOOL_ARGS = {
     parallel: [{ canonical: 'calls', aliases: [], required: true }],
     notify: [{ canonical: 'message', aliases: [], required: true }],
     progress: [{ canonical: 'percent', aliases: [], required: true }],
+    team_post: [{ canonical: 'body', aliases: ['message', 'text'], required: true }],
+    team_spawn: [
+        { canonical: 'name', aliases: ['agent_name', 'agent'], required: true },
+        { canonical: 'task', aliases: ['prompt', 'instructions'], required: true },
+    ],
+    agent_define: [
+        { canonical: 'name', aliases: ['agent_name'], required: true },
+        { canonical: 'description', aliases: [], required: true },
+        { canonical: 'system_prompt', aliases: ['systemPrompt', 'prompt'], required: true },
+    ],
     // New tools
     undo: [{ canonical: 'id', aliases: [] }],
     read_image: [S.filePath],
     go_to_definition: [{ canonical: 'symbol', aliases: [], required: true }, S.directory],
     find_references: [{ canonical: 'symbol', aliases: [], required: true }, S.directory],
     diagnostics: [S.directory],
+    update_working_checkpoint: [{ canonical: 'content', aliases: [], required: true }],
+    memory_add: [{ canonical: 'text', aliases: [], required: true }],
+    memory_forget: [{ canonical: 'target', aliases: [], required: true }],
     // Aliases — same specs as the canonical tool they delegate to.
     grep: [S.searchTerm, S.directory],
     search_text: [S.searchTerm, S.directory],
@@ -326,7 +356,43 @@ const MUTATING_TOOLS = new Set([
     'write_file', 'edit_file', 'apply_patch', 'multiedit', 'delete', 'rename', 'move',
     'copy', 'mkdir', 'git_add', 'git_commit', 'git_stash', 'undo', 'bash', 'shell',
     'terminal', 'run', 'start_process', 'background', 'kill', 'stop_process', 'watch',
-    'sub_agent',
+    'sub_agent', 'verify_project',
+]);
+/**
+ * Alternative names the dispatcher accepts. Models invent these constantly, so
+ * they must also appear in `getValidToolNames()` — otherwise the 400-repair path
+ * deletes a call the dispatcher would have executed happily.
+ */
+export const TOOL_NAME_ALIASES = new Set([
+    'grep',
+    'search_text',
+    'list',
+    'find_file',
+    'shell',
+    'terminal',
+    'run',
+    'fetch_url',
+    'websearch',
+    'task',
+    'subagent',
+    'question',
+    'confirm',
+    'select',
+    'input',
+    'approval',
+    'background',
+    'kill',
+    'plan',
+    'agent_status',
+    'agent_message',
+    'task_result',
+    'notify',
+    'progress',
+    'open_url',
+    'codesearch',
+    'search_docs',
+    'find_symbol',
+    'command_exists',
 ]);
 export async function handleToolCall(toolName, args, context = {}) {
     if (planMode && MUTATING_TOOLS.has(toolName)) {
@@ -387,7 +453,7 @@ async function dispatchToolCall(toolName, rawArgs, context) {
         case 'apply_patch':
             return await applyPatch(args.patch, context.sessionId);
         case 'start_process':
-            return await startProcess(args.command, context.sessionId);
+            return await startProcess(args.command, context.sessionId, args.cwd ?? args.directory_path ?? args.directory);
         case 'poll_process':
             return pollProcess(args.id);
         case 'write_process_stdin':
@@ -456,6 +522,16 @@ async function dispatchToolCall(toolName, rawArgs, context) {
             return await agentStatus(args);
         case 'agent_message':
             return await agentMessage(args);
+        case 'team_post':
+            return await teamPost(args);
+        case 'team_read':
+            return await teamRead(args);
+        case 'team_list':
+            return await teamList(args);
+        case 'team_spawn':
+            return await teamSpawn(args);
+        case 'agent_define':
+            return await agentDefine(args);
         case 'task_result':
             return await taskResult(args, context);
         case 'notify':
@@ -475,6 +551,17 @@ async function dispatchToolCall(toolName, rawArgs, context) {
             return await findReferences(args.symbol, args.directory_path);
         case 'diagnostics':
             return await diagnostics(args.directory_path);
+        // ── Harness state: working notes, durable memory, project checks ──
+        case 'update_working_checkpoint':
+            return await updateWorkingCheckpoint(args, context.sessionId);
+        case 'memory_add':
+            return await memoryAdd(args);
+        case 'memory_list':
+            return await memoryList(args);
+        case 'memory_forget':
+            return await memoryForget(args);
+        case 'verify_project':
+            return await verifyProject(args);
         // ── Aliases for common tool names (same implementation, friendly names) ──
         // Args are normalized above, so alias-style keys arrive under canonical names.
         case 'grep':

@@ -50,7 +50,8 @@ test('command_exists returns a boolean string using the same lookup', async () =
 });
 
 test('watch resolves after a short duration and reports a change', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'system-tools-watch-'));
+  // Inside cwd: watch validates its target like every other path-taking tool.
+  const dir = fs.mkdtempSync(path.join(process.cwd(), 'system-tools-watch-'));
   const file = path.join(dir, 'watched.txt');
   fs.writeFileSync(file, 'start');
   try {

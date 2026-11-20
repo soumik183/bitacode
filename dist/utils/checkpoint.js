@@ -12,6 +12,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { validatePath } from './path-validation.js';
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_CHECKPOINTS_PER_SESSION = 100;
 const DEFAULT_SESSION = 'default';
@@ -83,7 +84,9 @@ export async function createCheckpoint(paths, sessionId, tool) {
                 const createdAt = new Date().toISOString();
                 const fileName = `${String(Date.now()).padStart(13, '0')}-${id}.json`;
                 const checkpoint = {
-                    path: requested,
+                    // Absolute, so /undo restores where the file lived when it was
+                    // snapshotted, not relative to whatever cwd the session resumes in.
+                    path: absolute,
                     content,
                     createdAt,
                     tool: toolName,
@@ -142,7 +145,10 @@ export async function restoreCheckpoint(id, sessionId) {
                 const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
                 if (!isCheckpoint(parsed))
                     continue;
-                const absolute = path.resolve(process.cwd(), parsed.path);
+                // Validate at restore time too: a planted checkpoint file must not be
+                // able to write outside the allowed roots. Older checkpoints stored a
+                // relative path, so resolve it first and then validate.
+                const absolute = await validatePath(path.resolve(process.cwd(), parsed.path));
                 if (parsed.content === null) {
                     await fs.rm(absolute, { force: true });
                 }
@@ -150,7 +156,7 @@ export async function restoreCheckpoint(id, sessionId) {
                     await fs.mkdir(path.dirname(absolute), { recursive: true });
                     await fs.writeFile(absolute, parsed.content, 'utf8');
                 }
-                restored.push(parsed.path);
+                restored.push(absolute);
                 await fs.rm(file, { force: true });
             }
             catch {

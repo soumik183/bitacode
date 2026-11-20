@@ -12,8 +12,56 @@ export function normalizeTranscriptText(text) {
     if (!text || !text.trim()) {
         return '';
     }
-    // Collapse multiple newlines to single, trim ends
-    return text.replace(/\n{2,}/g, '\n').trim();
+    // Keep paragraph breaks: markdown meaning depends on them (a table needs the
+    // header row, its separator and the body as consecutive lines; a fenced block
+    // keeps its blank lines). Collapsing to a single newline used to flatten every
+    // paragraph and break tables, so only runs of three or more collapse to one.
+    return text.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+/**
+ * Split streamed markdown into completed blocks plus the still-growing tail.
+ *
+ * A markdown block is a run of lines separated by a blank line — and blank
+ * lines inside a fenced code block do not end it. Flushing whole blocks instead
+ * of single lines is what keeps tables, lists and fences intact while text
+ * streams in: the old line-by-line flush handed `renderFormattedText` one line
+ * at a time, so a table never saw its separator row and a fence was never
+ * closed.
+ */
+export function splitMarkdownBlocks(text) {
+    const source = text ?? '';
+    if (!source)
+        return { complete: '', tail: '' };
+    const lines = source.split('\n');
+    let fence = null;
+    let blankRunStart = -1;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const trimmed = line.trim();
+        // Fence tracking: an opened fence swallows blank lines until it closes.
+        if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+            const marker = trimmed.startsWith('```') ? '```' : '~~~';
+            if (!fence)
+                fence = marker;
+            else if (fence === marker)
+                fence = null;
+            blankRunStart = -1;
+            continue;
+        }
+        if (trimmed === '') {
+            if (!fence && blankRunStart < 0)
+                blankRunStart = i;
+            continue;
+        }
+        if (blankRunStart >= 0 && !fence) {
+            // Text resumed after a blank line: everything above it is one block.
+            const complete = lines.slice(0, i).join('\n');
+            const tail = lines.slice(i).join('\n');
+            return { complete, tail };
+        }
+        blankRunStart = -1;
+    }
+    return { complete: '', tail: source };
 }
 /**
  * Rich Markdown-ish renderer for chat text. Returns only <Text> nodes so the
@@ -70,6 +118,11 @@ const TASK = /^(\s*)([-*+])\s+\[([ xX])\]\s+(.*)$/;
 const UNORDERED = /^(\s*)([-*+])\s+(.*)$/;
 const ORDERED = /^(\s*)(\d+\.)\s+(.*)$/;
 const CALLOUT = /^\s*(ERROR|WARNING|WARN|TIP|NOTE|TODO|FIXME)\s*:\s*(.*)$/i;
+/**
+ * Cheap "might need the parser" test. Anything that can start a block or an
+ * inline span matches; plain prose (the usual streaming tail) does not.
+ */
+const MARKDOWN_HINT = /[*_`#>|[\]~]|^\s*(?:\d+\.\s|[-+]\s|[-*_]{3,}\s*$)|https?:\/\//m;
 /**
  * Bounded memo so repeated frames do not re-tokenize identical code. Cached
  * tokens carry palette colours, so the memo is keyed by palette object rather
@@ -279,7 +332,7 @@ function detectTable(lines, start) {
     return { header, aligns, body, endIndex: i };
 }
 /** Visible width of a cell, treating wide CJK/emoji as two terminal columns. */
-function displayWidth(text) {
+export function displayWidth(text) {
     let width = 0;
     for (const ch of text) {
         const cp = ch.codePointAt(0) ?? 0;
@@ -306,14 +359,28 @@ function displayWidth(text) {
     }
     return width;
 }
-/** Strip inline markers (and flatten <br>) for width measurement only. */
-function cellDisplayText(raw) {
+/**
+ * The text a cell actually paints, with inline markers resolved.
+ *
+ * Width maths must use this, not the raw markdown: `[a](url)` renders as
+ * `a (url)`, so measuring the raw string under-counted the printed width and
+ * every column after it drifted out of alignment.
+ */
+function cellPlainText(raw) {
     return raw
         .replace(/<br\s*\/?>/gi, ' ')
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-        .replace(/[`*_~]/g, '');
+        .replace(/<[^>]+>/g, '')
+        .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, url) => label === url ? label : `${label} (${url})`)
+        .replace(/`([^`]*)`/g, '$1')
+        .replace(/\*\*\*([^*]+)\*\*\*/g, '$1')
+        .replace(/\*\*([^*]+)\*\*/g, '$1')
+        .replace(/__([^_]+)__/g, '$1')
+        .replace(/~~([^~]+)~~/g, '$1')
+        .replace(/(^|[^\w*])\*([^*\n]+)\*/g, '$1$2')
+        .replace(/(^|[^\w_])_([^_\n]+)_/g, '$1$2');
 }
-/** Trim a cell to a display-column budget so a table cannot outgrow the screen. */
+/** Trim text to a display-column budget (hard cut, used for one long token). */
 function truncateToWidth(text, width) {
     if (width <= 0)
         return '';
@@ -328,80 +395,184 @@ function truncateToWidth(text, width) {
     }
     return out;
 }
-function renderTableCell(raw, width, align, key, isHeader, ctx) {
-    // Inline markdown is rendered on the original cell; <br> degrades to a space.
-    const content = raw.replace(/<br\s*\/?>/gi, ' ');
-    // When a column budget is supplied, cut the cell text itself (not just its
-    // padding) so the rendered row never exceeds the terminal width.
-    const limited = displayWidth(cellDisplayText(content)) > width
-        ? truncateToWidth(content, width)
-        : content;
-    const missing = Math.max(0, width - displayWidth(cellDisplayText(limited)));
-    let padLeft = 0;
-    let padRight = 0;
-    if (align === 'right') {
-        padLeft = missing;
-    }
-    else if (align === 'center') {
-        padLeft = Math.floor(missing / 2);
-        padRight = missing - padLeft;
-    }
-    else {
-        padRight = missing;
-    }
-    const style = isHeader ? { bold: true, color: ctx.palette.accent } : {};
-    return (_jsxs(Text, { ...style, children: [padLeft > 0 ? ' '.repeat(padLeft) : null, renderInline(limited, key, ctx), padRight > 0 ? ' '.repeat(padRight) : null] }, key));
+/** Space to add before/after a cell so it fills its column exactly. */
+function cellPadding(printed, width, align) {
+    const missing = Math.max(0, width - displayWidth(printed));
+    if (align === 'right')
+        return { left: missing, right: 0 };
+    if (align === 'center')
+        return { left: Math.floor(missing / 2), right: missing - Math.floor(missing / 2) };
+    return { left: 0, right: missing };
 }
-function renderTableRow(row, colCount, widths, aligns, key, isHeader, ctx) {
+/**
+ * Break a cell into display lines of at most `width` columns.
+ *
+ * Wrapping (rather than cutting) is what makes a table responsive: on a narrow
+ * terminal a long cell grows downward while the table keeps square borders,
+ * instead of losing its text or pushing the row past the screen edge.
+ */
+function wrapCellText(text, width) {
+    if (width <= 0)
+        return [''];
+    if (displayWidth(text) <= width)
+        return [text];
+    const lines = [];
+    let current = '';
+    let currentWidth = 0;
+    const words = text.split(/(\s+)/); // keep separators so spacing survives
+    const flush = () => {
+        if (current.trim() === '') {
+            current = '';
+            currentWidth = 0;
+            return;
+        }
+        lines.push(current.trimEnd());
+        current = '';
+        currentWidth = 0;
+    };
+    for (const word of words) {
+        if (!word)
+            continue;
+        const wordWidth = displayWidth(word);
+        if (currentWidth === 0 && word.trim() === '')
+            continue; // no leading spaces
+        if (currentWidth + wordWidth <= width) {
+            current += word;
+            currentWidth += wordWidth;
+            continue;
+        }
+        if (currentWidth > 0)
+            flush();
+        if (wordWidth <= width) {
+            current = word.replace(/^\s+/, '');
+            currentWidth = displayWidth(current);
+            continue;
+        }
+        // A single token wider than the column: hard-cut it, keeping the ellipsis.
+        let rest = word;
+        while (displayWidth(rest) > width) {
+            const piece = truncateToWidth(rest, Math.max(1, width - 1));
+            lines.push(`${piece}…`);
+            rest = rest.slice(piece.length);
+        }
+        current = rest;
+        currentWidth = displayWidth(rest);
+    }
+    flush();
+    return lines.length > 0 ? lines : [''];
+}
+/** One physical table line: `│ a │ b │` with every cell padded to its column. */
+function renderTableLine(cells, colCount, widths, aligns, key, isHeader, ctx) {
+    const style = isHeader ? { bold: true, color: ctx.palette.accent } : {};
     const parts = [_jsx(Text, { color: ctx.palette.dim, children: '│ ' }, `${key}-edge`)];
     for (let ci = 0; ci < colCount; ci++) {
         if (ci > 0) {
             parts.push(_jsx(Text, { color: ctx.palette.dim, children: ' │ ' }, `${key}-sep${ci}`));
         }
-        parts.push(renderTableCell(row[ci] ?? '', widths[ci], aligns[ci], `${key}-c${ci}`, isHeader, ctx));
+        const cell = cells[ci] ?? { raw: '', plain: '' };
+        const pad = cellPadding(cell.plain, widths[ci], aligns[ci]);
+        parts.push(_jsxs(Text, { ...style, children: [pad.left > 0 ? ' '.repeat(pad.left) : null, cell.raw ? renderInline(cell.raw, `${key}-c${ci}-inline`, ctx) : null, pad.right > 0 ? ' '.repeat(pad.right) : null] }, `${key}-c${ci}`));
     }
     parts.push(_jsx(Text, { color: ctx.palette.dim, children: ' │' }, `${key}-end`));
     return _jsx(Text, { children: parts }, key);
+}
+/**
+ * Responsive physical rows for one logical row.
+ *
+ * A cell that fits is rendered with its inline markdown. A cell that has to
+ * wrap falls back to its plain text, because a marker split across two lines
+ * would render as literal asterisks.
+ */
+function renderLogicalRow(row, colCount, widths, aligns, keyPrefix, isHeader, ctx) {
+    const cellLines = Array.from({ length: colCount }, (_, ci) => {
+        const raw = (row[ci] ?? '').slice(0, MAX_TABLE_CELL_CHARS);
+        const plain = cellPlainText(raw);
+        const wrapped = wrapCellText(plain, widths[ci]);
+        // Inline styling survives only when the cell stays on one line.
+        if (wrapped.length <= 1)
+            return [{ raw, plain }];
+        return wrapped.map((line) => ({ raw: line, plain: line }));
+    });
+    const height = Math.max(1, ...cellLines.map((lines) => lines.length));
+    const rows = [];
+    for (let lineIndex = 0; lineIndex < height; lineIndex++) {
+        const key = `${keyPrefix}-l${lineIndex}`;
+        const cells = cellLines.map((lines) => lines[lineIndex] ?? { raw: '', plain: '' });
+        rows.push(renderTableLine(cells, colCount, widths, aligns, key, isHeader, ctx));
+    }
+    return rows;
 }
 function renderTableDivider(widths, key, ctx) {
     const segments = widths.map((width) => '─'.repeat(Math.max(1, width + 2)));
     return _jsx(Text, { color: ctx.palette.dim, children: `├${segments.join('┼')}┤` }, key);
 }
+/** Column widths that fit `columns`, keeping every column readable. */
+export function tableColumnWidths(naturalWidths, columns) {
+    const count = Math.max(1, naturalWidths.length);
+    const natural = naturalWidths.map((width) => Math.max(1, Math.floor(width || 1)));
+    if (!Number.isFinite(columns) || columns <= 0)
+        return natural;
+    const overhead = count * 3 + 1; // '│ ' + ' │ ' per column + trailing ' │'
+    const budget = Math.floor(columns) - overhead;
+    const naturalTotal = natural.reduce((sum, width) => sum + width, 0);
+    if (budget >= naturalTotal)
+        return natural;
+    if (budget <= count)
+        return natural.map(() => 1);
+    // Minimum per column adapts to the space actually available, so a very
+    // narrow terminal still fits instead of flooring every column at 3.
+    const minCol = Math.max(1, Math.min(3, Math.floor(budget / count)));
+    const widths = natural.map((width) => Math.max(minCol, Math.min(width, Math.floor((width * budget) / naturalTotal))));
+    let remaining = budget - widths.reduce((sum, width) => sum + width, 0);
+    while (remaining > 0) {
+        // Hand leftover space to the currently narrowest column: this evens the
+        // table out and can never skip past the budget.
+        let narrowest = 0;
+        for (let i = 1; i < count; i++)
+            if (widths[i] < widths[narrowest])
+                narrowest = i;
+        widths[narrowest] += 1;
+        remaining -= 1;
+    }
+    while (remaining < 0) {
+        let widest = 0;
+        for (let i = 1; i < count; i++)
+            if (widths[i] > widths[widest])
+                widest = i;
+        if (widths[widest] <= 1)
+            break;
+        widths[widest] -= 1;
+        remaining += 1;
+    }
+    return widths;
+}
 function renderTable(table, keyPrefix, columns = 0, ctx) {
     const colCount = Math.min(MAX_TABLE_COLS, Math.max(1, table.header.length, ...table.body.map((row) => row.length)));
     const cellAt = (row, ci) => (row[ci] ?? '').slice(0, MAX_TABLE_CELL_CHARS);
-    const widths = [];
+    // Natural width = widest printed cell in the column (markers resolved).
+    const naturalWidths = [];
     for (let ci = 0; ci < colCount; ci++) {
-        let width = displayWidth(cellDisplayText(cellAt(table.header, ci)));
+        let width = displayWidth(cellPlainText(cellAt(table.header, ci)));
         for (const row of table.body) {
-            width = Math.max(width, displayWidth(cellDisplayText(cellAt(row, ci))));
+            width = Math.max(width, displayWidth(cellPlainText(cellAt(row, ci))));
         }
-        widths.push(Math.min(MAX_TABLE_CELL_CHARS, width));
+        naturalWidths.push(Math.min(MAX_TABLE_CELL_CHARS, Math.max(1, width)));
     }
-    // Scale the columns down to the available terminal width. `columns` is 0
-    // when the caller does not constrain width, which preserves the old layout.
-    if (columns > 0) {
-        const overhead = colCount * 3 + 1; // '│ ' + ' │ ' per column + trailing '│'
-        const budget = Math.max(colCount, columns - overhead);
-        const total = widths.reduce((sum, width) => sum + width, 0);
-        if (total > budget) {
-            const scale = budget / total;
-            for (let ci = 0; ci < colCount; ci++) {
-                widths[ci] = Math.max(1, Math.floor(widths[ci] * scale));
-            }
-        }
-    }
+    const widths = tableColumnWidths(naturalWidths, columns);
     const rows = [
-        renderTableRow(table.header, colCount, widths, table.aligns, `${keyPrefix}-head`, true, ctx),
+        ...renderLogicalRow(table.header, colCount, widths, table.aligns, `${keyPrefix}-head`, true, ctx),
         renderTableDivider(widths, `${keyPrefix}-div`, ctx),
     ];
-    const shown = Math.min(table.body.length, MAX_TABLE_OUTPUT_ROWS - 3);
-    for (let i = 0; i < shown; i++) {
-        rows.push(renderTableRow(table.body[i], colCount, widths, table.aligns, `${keyPrefix}-r${i}`, false, ctx));
-    }
-    const hidden = table.body.length - shown;
-    if (hidden > 0) {
-        rows.push(_jsx(Text, { color: ctx.palette.dim, children: `  … ${hidden} more row${hidden === 1 ? '' : 's'}` }, `${keyPrefix}-more`));
+    let usedRows = 1;
+    for (let i = 0; i < table.body.length; i++) {
+        const physical = renderLogicalRow(table.body[i], colCount, widths, table.aligns, `${keyPrefix}-r${i}`, false, ctx);
+        if (usedRows + physical.length > MAX_TABLE_OUTPUT_ROWS - 2) {
+            const hidden = table.body.length - i;
+            rows.push(_jsx(Text, { color: ctx.palette.dim, children: `  … ${hidden} more row${hidden === 1 ? '' : 's'}` }, `${keyPrefix}-more`));
+            return rows;
+        }
+        rows.push(...physical);
+        usedRows += physical.length;
     }
     return rows;
 }
@@ -417,6 +588,17 @@ export function renderFormattedText(text, columns = 0, palette = getTheme()) {
             return '';
         }
         const capped = raw.length > MAX_RENDER_CHARS ? raw.slice(0, MAX_RENDER_CHARS) : raw;
+        // Fast path: no markdown markers and no multi-line constructs means the
+        // frame can use the plain string. This is what keeps a long prose reply
+        // cheap to re-render on every streamed frame.
+        if (!MARKDOWN_HINT.test(capped)) {
+            // Even plain text respects the row budget: a wall of prose should not
+            // grow the frame without bound.
+            const plainLines = capped.split('\n');
+            if (plainLines.length <= MAX_OUTPUT_ROWS)
+                return capped;
+            return `${plainLines.slice(0, MAX_OUTPUT_ROWS).join('\n')}\n  … ${plainLines.length - MAX_OUTPUT_ROWS} more rows`;
+        }
         const lines = capped.split('\n');
         const rows = [];
         let index = 0;

@@ -1,22 +1,27 @@
 import type { Theme } from '../types.js';
 
-/** Light, with dark foregrounds so text stays readable on white. */
+/**
+ * Paper — daylight reading.
+ *
+ * A cool off-white canvas keeps glare down versus #ffffff, and ink-blue text
+ * (not pure black) is softer on the eyes while staying far above AA.
+ */
 const light: Theme = {
   bg: '#ffffff',
-  surface: '#f3f4f6',
-  surfaceAlt: '#e5e7eb',
-  border: '#cbd5e1',
+  surface: '#f4f7fb',
+  surfaceAlt: '#e8edf4',
+  border: '#9aa8ba',
   borderFocus: '#1d4ed8',
   text: '#111827',
-  userText: '#0b3d91',
+  userText: '#0b2f6b',
   userBorder: '#1d4ed8',
-  placeholder: '#6b7280',
+  placeholder: '#5f6a7a',
   muted: '#4b5563',
-  dim: '#6b7280',
-  error: '#b91c1c',
+  dim: '#5f6875',
+  error: '#b3261e',
   accent: '#1d4ed8',
   success: '#15803d',
-  info: '#1d4ed8',
+  info: '#0e7490',
 };
 
 export default light;

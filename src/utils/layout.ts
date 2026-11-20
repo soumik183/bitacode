@@ -118,6 +118,44 @@ export interface ChromeHeights {
   help: number;
   /** Rows used by the streaming preview (0 when not streaming). */
   streaming: number;
+  /**
+   * Extra rows taken by a grown composer (multi-line prompt). Counts the rows
+   * beyond its one-line default so callers that omit it keep the old geometry.
+   */
+  composer?: number;
+  /** Rows used by the live activity strip above the composer (0 or 1). */
+  status?: number;
+  /** Dense mode drops the composer padding and the footer margin. */
+  dense?: boolean;
+}
+
+/**
+ * Rows the composer card occupies: one text row plus its vertical padding.
+ * Kept here so the layout budget and the rendered card can never disagree —
+ * the old fixed `5` under-counted the padded card by a row, which is what
+ * pushed the live area onto the input on short terminals.
+ */
+export function composerBlockRows(textRows: number, dense: boolean): number {
+  return finiteDim(textRows, 1) + (dense ? 0 : 2);
+}
+
+/** Rows the status footer occupies: one line plus its bottom margin. */
+export function footerBlockRows(dense: boolean): number {
+  return dense ? 1 : 2;
+}
+
+/**
+ * Total fixed chrome below the transcript: composer card, activity strip,
+ * footer and the single breathing gap above the composer.
+ */
+export function fixedChromeRows(options: { composerRows?: number; status?: number; dense?: boolean } = {}): number {
+  const dense = options.dense ?? false;
+  return (
+    composerBlockRows(options.composerRows ?? 1, dense)
+    + finiteDim(options.status ?? 0, 0)
+    + footerBlockRows(dense)
+    + 1
+  );
 }
 
 /**
@@ -132,14 +170,40 @@ export function splitLiveArea(frameHeight: number, chrome: ChromeHeights): {
   transcriptRows: number;
   liveRows: number;
 } {
-  const fixed = 5; // composer (2) + footer (2) + gap above it (dense mode trims this)
   const h = finiteDim(frameHeight, 1);
+  const dense = chrome.dense ?? false;
+  const status = Math.max(0, finiteDim(chrome.status, 0));
+  // The composer card is budgeted with its real padding. The activity strip is
+  // counted in `live` below, not here, so it is never double-counted.
+  const fixed = fixedChromeRows({ composerRows: 1, status: 0, dense });
   const panelSum =
     finiteDim(chrome.todos, 0) +
     finiteDim(chrome.thinking, 0) +
     finiteDim(chrome.help, 0) +
     finiteDim(chrome.streaming, 0);
-  const live = Math.max(0, panelSum);
-  const transcriptRows = finiteDim(h - fixed - live, 1);
+  // A multi-line composer grows downward, so its extra rows come out of the
+  // transcript budget instead of being clipped by it. One transcript row is
+  // always kept, and the live column never claims more than it can have.
+  const maxLive = Math.max(0, h - fixed - 1);
+  const growthBudget = Math.max(0, maxLive - panelSum - status);
+  const composerGrowth = Math.min(Math.max(0, finiteDim(chrome.composer, 0)), growthBudget);
+  const live = Math.min(maxLive, Math.max(0, panelSum) + status + composerGrowth);
+  const transcriptRows = Math.max(1, h - fixed - live);
   return { transcriptRows, liveRows: live };
+}
+
+/**
+ * Blank rows needed to make the transcript a solid block of exactly
+ * `viewportRows`.
+ *
+ * The window is sliced from measured rows, and measurement can lag by a frame
+ * (a card just archived, a resize, a fold). When the slice is shorter than the
+ * viewport, the difference used to be left unpainted, so rows from the previous
+ * frame could survive underneath the transcript and appear below the composer.
+ * Padding the region removes that class of glitch entirely.
+ */
+export function transcriptFillerRows(viewportRows: number, usedRows: number): number {
+  const viewport = Math.max(0, Math.floor(Number.isFinite(viewportRows) ? viewportRows : 0));
+  const used = Math.max(0, Math.floor(Number.isFinite(usedRows) ? usedRows : 0));
+  return Math.max(0, viewport - used);
 }

@@ -21,6 +21,13 @@ import { installStableRenderer, installTerminalRestore } from './utils/stable-re
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import { formatInstalled, formatUpdateAvailable, formatUpdateNotice, formatUpdateUnavailable, formatUpToDate, } from './utils/cli-update-format.js';
 import { ConfigureComponent, InitComponent, writeConfig, writeInitConfig, detectConfigFromEnvironment } from './config.js';
+import { runHeadless } from './headless.js';
+import { runPermissionsCommand } from './commands/permissions.js';
+import { runPluginsCommand } from './commands/plugins.js';
+import { runSessionsCommand } from './commands/sessions.js';
+import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
+import { completionScript, isShellName } from './utils/completion.js';
+import { pruneSpillFiles } from './utils/tool-result-budget.js';
 // A rejected promise in a background fetch should be logged, not kill the TUI.
 process.on('unhandledRejection', (reason) => {
     logger.error('Unhandled promise rejection', {
@@ -44,7 +51,39 @@ program
     .option('--dangerously-skip-permissions', 'Auto-approve all file writes and shell commands')
     .option('--log-level <level>', 'Log level: TRACE, DEBUG, INFO, WARN, ERROR', 'DEBUG')
     .option('--session <id>', 'Resume a previous session by ID')
-    .action((options) => {
+    .option('-p, --print <prompt>', 'Run one prompt non-interactively and exit')
+    .option('--json', 'With -p: emit one JSON object per event on stdout')
+    .option('--approval <mode>', 'Approval mode for -p: manual, auto or yolo')
+    .option('--provider <id>', 'Override the configured provider')
+    .option('--model <id>', 'Override the configured model')
+    .option('--cwd <dir>', 'Run in this directory')
+    .option('--max-iterations <n>', 'Cap loop iterations for -p', (value) => Number.parseInt(value, 10))
+    .option('--save-session', 'With -p: also save the run as a session')
+    .option('--autoverify', 'Run project checks after a turn that changed files')
+    .action(async (options) => {
+    // Non-interactive mode: no Ink, no alternate screen, machine-readable exit code.
+    if (options.print) {
+        const approval = typeof options.approval === 'string' && ['manual', 'auto', 'yolo'].includes(options.approval)
+            ? options.approval
+            : 'manual';
+        const code = await runHeadless({
+            prompt: String(options.print),
+            json: Boolean(options.json),
+            ...(options.cwd ? { cwd: options.cwd } : {}),
+            ...(options.provider ? { provider: options.provider } : {}),
+            ...(options.model ? { model: options.model } : {}),
+            ...(options.session ? { sessionId: options.session } : {}),
+            ...(Number.isFinite(options.maxIterations) ? { maxIterations: options.maxIterations } : {}),
+            approval,
+            saveSession: Boolean(options.saveSession),
+        });
+        process.exitCode = code;
+        return;
+    }
+    if (options.autoverify)
+        process.env.BITACODE_AUTOVERIFY = '1';
+    // Spill files are a cache, not data: prune old ones in the background.
+    void pruneSpillFiles().catch(() => undefined);
     // If the process is killed without a React unmount (Termux, terminal
     // closing, SIGTERM), App's cleanup never runs. Restore at process level.
     installTerminalRestore(process.stdout);
@@ -166,5 +205,61 @@ program
         console.error('Update failed:', error instanceof Error ? error.message : String(error));
         process.exitCode = 1;
     }
+});
+program
+    .command('doctor')
+    .description('Diagnose configuration, permissions, hooks, storage and terminal support')
+    .option('--json', 'Emit the report as JSON')
+    .option('--no-checks', 'Skip project check detection')
+    .action(async (options) => {
+    const report = await collectDoctorReport({
+        version: packageJson.version,
+        detectProjectChecks: options.checks !== false,
+    });
+    if (options.json) {
+        console.log(JSON.stringify(report, null, 2));
+    }
+    else {
+        console.log(renderDoctorReport(report));
+    }
+    process.exitCode = report.ok ? 0 : 1;
+});
+program
+    .command('permissions [action] [target]')
+    .description('Show, trust or untrust project permission rules')
+    .option('--json', 'Emit JSON')
+    .action((action, target, options) => {
+    process.exitCode = runPermissionsCommand([action ?? 'show', ...(target ? [target] : [])].filter(Boolean), { json: Boolean(options.json) });
+});
+program
+    .command('sessions [args...]')
+    .description('List, inspect, replay, fork, rename, pin or export saved sessions')
+    .option('--json', 'Emit JSON')
+    .option('--out <file>', 'For export: write to this file')
+    .action(async (args, options) => {
+    // Variadic args so subcommands like `rename <id> <title...>` and
+    // `export <id> md --out file.md` reach the command handler intact.
+    const parts = [...(args ?? [])];
+    if (options.out)
+        parts.push('--out', String(options.out));
+    process.exitCode = await runSessionsCommand(parts, { json: Boolean(options.json) });
+});
+program
+    .command('plugins [action] [name]')
+    .description('List, enable, disable or inspect plugins')
+    .option('--json', 'Emit JSON')
+    .action((action, name, options) => {
+    process.exitCode = runPluginsCommand([action ?? 'list', ...(name ? [name] : [])].filter(Boolean), { json: Boolean(options.json) });
+});
+program
+    .command('completion <shell>')
+    .description('Print a shell completion script (bash, zsh or fish)')
+    .action((shell) => {
+    if (!isShellName(shell)) {
+        console.error(`Unsupported shell: ${shell}. Use bash, zsh or fish.`);
+        process.exitCode = 1;
+        return;
+    }
+    process.stdout.write(completionScript(shell));
 });
 program.parse(process.argv);

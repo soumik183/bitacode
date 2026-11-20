@@ -11,9 +11,16 @@ export interface TodoPanelProps {
 
 const STATUS_ICON: Record<TodoItem['status'], string> = {
   completed: '✓',
-  in_progress: '◐',
+  in_progress: '▸',
   pending: '○',
   cancelled: '✕',
+};
+
+/** Short priority chip: high tasks read as urgent without shouting. */
+const PRIORITY_CHIP: Record<string, { label: string; key: keyof Theme }> = {
+  high: { label: 'P1', key: 'error' },
+  medium: { label: 'P2', key: 'info' },
+  low: { label: 'P3', key: 'dim' },
 };
 
 /** Status → semantic palette key, resolved from the active palette at render. */
@@ -82,58 +89,73 @@ export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible
   const hiddenBelow = Math.max(0, total - start - visible.length);
 
   const safeColumns = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+  // The bar is a luxury: under ~40 columns it truncates the count, so hide it
+  // and let the numeric percentage carry the same information.
+  const showBar = safeColumns >= 40;
   const barWidth = safeColumns >= 80 ? 10 : 6;
   const filled = total > 0 ? Math.round((done / total) * barWidth) : 0;
-  const digits = String(total).length;
-  // "  " indent + icon + space + index column + space, plus the panel's own
-  // paddingX(2) on both sides. A tiny terminal cannot afford the old 10-col
-  // floor, so clamp all the way down to 1 instead of overflowing the frame.
-  const reserved = 2 + 2 + digits + 1 + (hiddenAbove + hiddenBelow > 0 ? 2 : 0);
+  const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+  // Gutter bar (2) + priority chip (3) + icon + space, plus the panel's own
+  // paddingX(2) on both sides. A tiny terminal cannot afford a fixed floor, so
+  // clamp all the way down to 1 instead of overflowing the frame.
+  const reserved = 2 + 3 + 1 + 1 + (hiddenAbove + hiddenBelow > 0 ? 2 : 0);
   const contentWidth = Math.max(1, safeColumns - 4 - reserved);
+  const active = visible.find((todo) => todo.status === 'in_progress');
 
   return (
     <Box flexDirection="column" paddingX={2} marginBottom={1}>
-      <Text wrap="truncate-end">
-        <Text color={theme.text} bold>
-          Tasks
+      <Box flexDirection="row" justifyContent="space-between">
+        <Text wrap="truncate-end">
+          <Text color={theme.accent} bold>▤ </Text>
+          <Text color={theme.text} bold>Tasks</Text>
+          <Text color={theme.dim}>{`  ${done}/${total} done`}</Text>
+          {showBar ? (
+            <>
+              <Text color={theme.dim}>{'  '}</Text>
+              <Text color={filled > 0 ? theme.success : theme.border}>{'▰'.repeat(filled)}</Text>
+              <Text color={theme.border}>{'▱'.repeat(Math.max(0, barWidth - filled))}</Text>
+            </>
+          ) : null}
         </Text>
-        <Text color={theme.dim}>{`  ${done}/${total} done  `}</Text>
-        <Text color={theme.success}>{'▰'.repeat(filled)}</Text>
-        <Text color={theme.border}>{'▱'.repeat(barWidth - filled)}</Text>
-      </Text>
+        <Text color={percent === 100 ? theme.success : theme.dim}>{`${percent}%`}</Text>
+      </Box>
 
       {hiddenAbove > 0 && (
-        <Text color={theme.dim}>{`  ↑ ${hiddenAbove} more`}</Text>
+        <Text color={theme.dim} wrap="truncate-end">{`  ↑ ${hiddenAbove} more`}</Text>
       )}
 
       {visible.map((todo, index) => {
         const dimmed = todo.status === 'completed' || todo.status === 'cancelled';
+        const running = todo.status === 'in_progress';
+        const chip = PRIORITY_CHIP[todo.priority] ?? PRIORITY_CHIP.low;
         return (
-          <Box key={`${todo.id}-${start + index}`}>
+          <Box key={`${todo.id}-${start + index}`} flexDirection="row">
+            <Text color={running ? theme.accent : theme.border}>{running ? '▌' : ' '}</Text>
+            <Text color={theme[chip.key]}>{`${chip.label} `}</Text>
             <Text color={theme[STATUS_COLOR_KEY[todo.status]]}>{`${STATUS_ICON[todo.status]} `}</Text>
             <Text
-              color={
-                dimmed
-                  ? theme.dim
-                  : todo.status === 'in_progress'
-                    ? theme.text
-                    : theme.muted
-              }
-              bold={todo.status === 'in_progress'}
-              strikethrough={dimmed}
+              color={dimmed ? theme.dim : running ? theme.text : theme.muted}
+              bold={running}
+              strikethrough={todo.status === 'completed'}
               wrap="truncate-end"
             >
-              {todo.status === 'in_progress'
-                ? truncateTodo(todo.content, contentWidth)
-                : `(${todo.priority}) ${truncateTodo(todo.content, Math.max(1, contentWidth - todo.priority.length - 3))}`}
+              {truncateTodo(todo.content, contentWidth)}
             </Text>
           </Box>
         );
       })}
 
       {hiddenBelow > 0 && (
-        <Text color={theme.dim}>{`  ↓ ${hiddenBelow} more`}</Text>
+        <Text color={theme.dim} wrap="truncate-end">{`  ↓ ${hiddenBelow} more`}</Text>
       )}
+
+      {active ? (
+        <Text color={theme.dim} wrap="truncate-end">
+          {'  '}
+          <Text color={theme.info}>{active.id}</Text>
+          <Text color={theme.dim}> in progress</Text>
+        </Text>
+      ) : null}
     </Box>
   );
 };
@@ -141,7 +163,8 @@ export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible
 /**
  * Exact row count for a given list, matching what this component renders:
  * header + one row per visible task + an "↑ N more" row when tasks are hidden
- * above + a "↓ N more" row when tasks are hidden below, plus the bottom margin.
+ * above + a "↓ N more" row when tasks are hidden below + one caption row while
+ * a task is in progress, plus the bottom margin.
  *
  * App uses this to budget the live area, so the panel and the transcript always
  * agree and the composer never gets pushed off-screen.
@@ -151,6 +174,7 @@ export function todoPanelRows(todos: TodoItem[], maxVisible: number): number {
   const { start, items } = visibleTodoWindow(todos, maxVisible);
   const hiddenAbove = start > 0 ? 1 : 0;
   const hiddenBelow = todos.length > start + items.length ? 1 : 0;
-  // header + tasks + overflow markers + trailing margin
-  return 1 + items.length + hiddenAbove + hiddenBelow + 1;
+  // header + tasks + overflow markers + the "in progress" caption + margin
+  const activeRow = items.some((todo) => todo.status === 'in_progress') ? 1 : 0;
+  return 1 + items.length + hiddenAbove + hiddenBelow + activeRow + 1;
 }

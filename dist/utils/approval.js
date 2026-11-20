@@ -14,6 +14,7 @@
  * In the Ink UI, approvals are handled by emitting an event and waiting
  * for the UI to resolve it (instead of blocking on stdin with inquirer).
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 // Global state
 let approvalMode = 'manual';
 let cliSkipPermissions = false; // remembers the --dangerously-skip-permissions override
@@ -21,6 +22,13 @@ let dangerouslySkipPermissions = false;
 const sessionApprovals = new Set(); // stores approval keys scoped by session
 // Callback that the Ink UI provides to handle interactive approval
 let approvalHandler = null;
+const approvalOverrideStore = new AsyncLocalStorage();
+export function runWithApprovalOverride(mode, fn) {
+    return approvalOverrideStore.run(mode, fn);
+}
+export function currentApprovalOverride() {
+    return approvalOverrideStore.getStore();
+}
 function syncSkipPermissions() {
     dangerouslySkipPermissions = cliSkipPermissions || approvalMode === 'yolo';
 }
@@ -62,10 +70,15 @@ function getApprovalScopeKey(req) {
  *  4. No handler registered → reject (fail closed)
  */
 export async function requestApproval(req) {
-    if (approvalMode === 'auto' || approvalMode === 'yolo')
+    const override = approvalOverrideStore.getStore();
+    if (override === 'granted')
         return true;
-    if (dangerouslySkipPermissions)
-        return true;
+    if (override !== 'required') {
+        if (approvalMode === 'auto' || approvalMode === 'yolo')
+            return true;
+        if (dangerouslySkipPermissions)
+            return true;
+    }
     const sessionKey = getApprovalScopeKey(req);
     if (sessionApprovals.has(sessionKey))
         return true;

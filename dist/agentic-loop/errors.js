@@ -14,6 +14,15 @@ const LIMITS = {
     MAX_CONTINUE: 1,
     MAX_SANITIZE: 1,
 };
+/**
+ * Backoff schedule for transient failures: dropped connections, provider 5xx,
+ * and rate limits that arrive without a usable Retry-After hint. Five retries
+ * means six attempts in total; after that the loop stops with a clear message
+ * instead of hammering the endpoint forever.
+ */
+export const TRANSIENT_BACKOFF_MS = [1_000, 3_000, 5_000, 10_000, 15_000];
+export const MAX_TRANSIENT_RETRIES = TRANSIENT_BACKOFF_MS.length;
+export const MAX_TRANSIENT_ATTEMPTS = MAX_TRANSIENT_RETRIES + 1;
 // Providers and proxies disagree on status codes, so classify by message too.
 // These only match error text, never response bodies (those stay redacted).
 const AUTH_ERROR_PATTERN = /invalid[_\s-]?api[_\s-]?key|incorrect api key|authentication[_\s-]?error|unauthorized|permission[_\s-]?denied|access denied|forbidden|no auth credentials|expired (api )?(key|token)|invalid token/i;
@@ -47,10 +56,33 @@ export async function sleepWithAbort(delayMs, abortSignal) {
         abortSignal.addEventListener('abort', onAbort, { once: true });
     });
 }
+/**
+ * Books one retry against the shared transient budget and returns the delay to
+ * wait. Every transient path (rate limit, 5xx, dropped socket) draws from the
+ * same counter, so a flapping provider cannot cause an endless retry storm by
+ * alternating failure kinds.
+ */
+function planTransientRetry(retryState, reason, retryAfterMs) {
+    const attempt = (retryState.transientCount ?? 0) + 1;
+    if (attempt > MAX_TRANSIENT_RETRIES) {
+        return {
+            retry: false,
+            errorMessage: `Gave up after ${MAX_TRANSIENT_ATTEMPTS} attempts: the provider kept failing `
+                + `(${reason === 'rate' ? 'rate limited' : 'server or network error'}).`,
+        };
+    }
+    retryState.transientCount = attempt;
+    const scheduled = TRANSIENT_BACKOFF_MS[Math.min(attempt, MAX_TRANSIENT_RETRIES) - 1];
+    // A provider-supplied Retry-After always wins when it asks for a longer wait.
+    const delayMs = retryAfterMs !== null && retryAfterMs > scheduled ? retryAfterMs : scheduled;
+    return { retry: true, delayMs, attempt };
+}
 // Handle an API error with appropriate retry strategy.
 export async function handleApiError(apiError, messages, validToolNames, pricing, retryState, iterationCount, onEvent, client, model, requestDefaults, sessionId, abortSignal, 
 // Injectable for tests; production always uses the abort-aware default.
-sleepFn = sleepWithAbort) {
+sleepFn = sleepWithAbort, 
+// Original user turn, used to rebuild a history that a repair step emptied.
+fallbackUserContent) {
     const errMsg = apiError?.message || 'Unknown API error';
     const status = apiError?.status;
     const msg = typeof errMsg === 'string' ? errMsg : '';
@@ -114,24 +146,38 @@ sleepFn = sleepWithAbort) {
     }
     // Rate limit - backoff (some proxies report quota exhaustion with other statuses)
     if (rateMessage || status === 429) {
-        const backoff = parseRetryAfterMs(apiError?.headers);
-        logger.info(`Rate limited, retrying in ${backoff / 1000}s...`);
-        onEvent({ type: 'error', error: `Rate limited. Retrying...`, transient: true });
+        const plan = planTransientRetry(retryState, 'rate', parseRetryAfterMs(apiError?.headers));
+        if (!plan.retry) {
+            return { handled: false, shouldAbort: false, silentRetry: false, errorMessage: plan.errorMessage };
+        }
+        logger.info(`Rate limited, retrying in ${plan.delayMs / 1000}s (attempt ${plan.attempt}/${MAX_TRANSIENT_RETRIES})`);
+        onEvent({
+            type: 'error',
+            error: `Rate limited. Retrying in ${Math.round(plan.delayMs / 1000)}s (attempt ${plan.attempt}/${MAX_TRANSIENT_RETRIES})...`,
+            transient: true,
+        });
         try {
-            await sleepFn(backoff, abortSignal);
+            await sleepFn(plan.delayMs, abortSignal);
         }
         catch {
             return { handled: true, shouldAbort: true, silentRetry: false };
         }
         return { handled: true, shouldAbort: false, silentRetry: true };
     }
-    // Server or network error - exponential backoff
+    // Server or network error - scheduled backoff
     if ((status !== undefined && status >= 500) || retryableStatus || retryableCode) {
-        const backoff = Math.min(2 ** iterationCount * 1000, 30_000);
-        logger.info(`Request failed, retrying in ${backoff / 1000}s...`);
-        onEvent({ type: 'error', error: `Request failed. Retrying...`, transient: true });
+        const plan = planTransientRetry(retryState, 'server', null);
+        if (!plan.retry) {
+            return { handled: false, shouldAbort: false, silentRetry: false, errorMessage: plan.errorMessage };
+        }
+        logger.info(`Request failed, retrying in ${plan.delayMs / 1000}s (attempt ${plan.attempt}/${MAX_TRANSIENT_RETRIES})`);
+        onEvent({
+            type: 'error',
+            error: `Request failed. Retrying in ${Math.round(plan.delayMs / 1000)}s (attempt ${plan.attempt}/${MAX_TRANSIENT_RETRIES})...`,
+            transient: true,
+        });
         try {
-            await sleepFn(backoff, abortSignal);
+            await sleepFn(plan.delayMs, abortSignal);
         }
         catch {
             return { handled: true, shouldAbort: true, silentRetry: false };
@@ -149,7 +195,7 @@ sleepFn = sleepWithAbort) {
     }
     // Generic 400 errors - try repair/truncate/continue
     if (status === 400) {
-        return await handle400Error(messages, validToolNames, retryState, onEvent, shortErrorReason(errMsg));
+        return await handle400Error(messages, validToolNames, retryState, onEvent, shortErrorReason(errMsg), fallbackUserContent);
     }
     // Non-retryable - short, user-facing messages; never leak raw response bodies.
     if (status === 404) {
@@ -168,7 +214,35 @@ sleepFn = sleepWithAbort) {
     };
 }
 // Handle 400 errors: repair tool calls → remove orphaned → truncate → continue → sanitize.
-async function handle400Error(messages, validToolNames, retryState, onEvent, reason) {
+/**
+ * Providers answer this when the body has no usable conversation: the request
+ * reached them with `messages: []`. It is not a model or config problem, so the
+ * generic "repair / truncate / continue" ladder cannot fix it.
+ */
+const EMPTY_HISTORY_PATTERN = /input required|specify[^.]*(prompt|messages)|messages[^.]*(required|non-empty|must be)|no messages|empty messages/i;
+/** True when `messages` still has something a provider will accept. */
+function hasPayload(messages) {
+    return messages.some((message) => message.role !== 'system');
+}
+async function handle400Error(messages, validToolNames, retryState, onEvent, reason, fallbackUserContent) {
+    // 0. Empty/unusable history — reseed instead of burning the repair ladder.
+    // This is the failure that surfaced as `400 Input required: specify "prompt"
+    // or "messages"` and ended the turn with "Could not recover".
+    if (!hasPayload(messages) || (EMPTY_HISTORY_PATTERN.test(reason) && messages.length <= 1)) {
+        const system = messages.find((message) => message.role === 'system');
+        const fallback = typeof fallbackUserContent === 'string' ? fallbackUserContent.trim() : '';
+        messages.length = 0;
+        if (system)
+            messages.push(system);
+        messages.push({ role: 'user', content: fallback || 'continue' });
+        logger.warn('400 response: restored an empty conversation history');
+        onEvent({
+            type: 'error',
+            error: 'Conversation history was empty. Restored the last request.',
+            transient: true,
+        });
+        return { handled: true, shouldAbort: false, silentRetry: true };
+    }
     // 1. Repair tool-call structure and arguments.
     // Models emit invalid escapes (\| from grep regex), unquoted arguments,
     // duplicate ids and empty assistant messages — all rejected until fixed.
@@ -200,10 +274,19 @@ async function handle400Error(messages, validToolNames, retryState, onEvent, rea
     // If repairs didn't work, remove the last message (usually the problematic one)
     // and retry. We keep at least system + 1 user message.
     if (retryState.truncateCount < LIMITS.MAX_TRUNCATE && messages.length > 2) {
+        // Remove the last *assistant/tool* exchange, never the user's request: a
+        // history that ends with a tool result and no assistant message is one of
+        // the shapes providers reject.
+        let index = messages.length - 1;
+        while (index > 1 && messages[index].role === 'tool')
+            index--;
+        if (index <= 1 || messages[index].role === 'user') {
+            index = messages.length - 1;
+        }
         retryState.truncateCount++;
-        const removed = messages.splice(-1);
-        logger.debug('400 error: removed last message', {
-            role: removed[0]?.role,
+        const removed = messages.splice(index, messages.length - index);
+        logger.debug('400 error: removed trailing messages', {
+            roles: removed.map((message) => message.role).join(','),
             remaining: messages.length,
         });
         return { handled: true, shouldAbort: false, silentRetry: true };
@@ -236,7 +319,8 @@ async function handle400Error(messages, validToolNames, retryState, onEvent, rea
         handled: false,
         shouldAbort: false,
         silentRetry: false,
-        errorMessage: `Could not recover: ${reason}. Try /new or check the model config.`,
+        errorMessage: `Could not recover: ${reason}. ` +
+            'The conversation may be malformed. Press ctrl+r to retry, or /new to start fresh.',
     };
 }
 // Repair tool calls and message structure that providers reject on sight.

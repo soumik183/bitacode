@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { logger } from './utils/logger.js';
 import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
+import { THEME_NAMES } from './theme/types.js';
 function isApprovalMode(value) {
     return value === 'manual' || value === 'auto' || value === 'yolo';
 }
@@ -24,7 +25,7 @@ function isCompactThreshold(value) {
         value <= COMPACT_THRESHOLD_MAX);
 }
 function isThemeName(value) {
-    return value === 'black' || value === 'sand' || value === 'dark' || value === 'light' || value === 'high-contrast';
+    return typeof value === 'string' && THEME_NAMES.includes(value);
 }
 export const DEFAULT_SETTINGS = {
     animations: true,
@@ -34,6 +35,10 @@ export const DEFAULT_SETTINGS = {
     compactThreshold: COMPACT_THRESHOLD_DEFAULT,
     theme: 'black',
     statusLine: [...STATUS_LINE_ITEMS],
+    permissions: { allow: [], ask: [], deny: [] },
+    autoverify: false,
+    guardUnreadEdits: true,
+    spillToolResults: true,
 };
 function getSettingsPath() {
     const home = os.homedir();
@@ -41,6 +46,19 @@ function getSettingsPath() {
         ? path.join(home, 'AppData', 'Local', 'bitacode')
         : path.join(home, '.config', 'bitacode');
     return path.join(dir, 'settings.json');
+}
+function normalizeStringList(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value.filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
+}
+function normalizePermissions(value) {
+    const input = (value && typeof value === 'object' ? value : {});
+    return {
+        allow: normalizeStringList(input.allow),
+        ask: normalizeStringList(input.ask),
+        deny: normalizeStringList(input.deny),
+    };
 }
 export function loadSettings() {
     try {
@@ -59,6 +77,10 @@ export function loadSettings() {
             statusLine: Array.isArray(parsed.statusLine)
                 ? parsed.statusLine.filter((item) => STATUS_LINE_ITEMS.includes(item))
                 : [...STATUS_LINE_ITEMS],
+            permissions: normalizePermissions(parsed.permissions),
+            autoverify: parsed.autoverify === true,
+            guardUnreadEdits: parsed.guardUnreadEdits !== false,
+            spillToolResults: parsed.spillToolResults !== false,
         };
     }
     catch {

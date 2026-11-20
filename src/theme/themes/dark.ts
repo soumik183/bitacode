@@ -1,26 +1,27 @@
 import type { Theme } from '../types.js';
 
-/** The historical flat-dark palette, kept for users who prefer it. */
+/**
+ * Slate — the neutral classic.
+ *
+ * Pure neutrals with one confident blue accent: the palette most terminals are
+ * calibrated for. Kept for users who want zero warmth in the canvas.
+ */
 const dark: Theme = {
-  // Page canvas. Pure black keeps the terminal's natural contrast; the
-  // composer surface stays a lighter charcoal so it reads as separate.
-  bg: '#000000',
-  // Input surface is intentionally lighter than the chat so it reads as a
-  // separate composer.
-  surface: '#1e1e1e',
-  surfaceAlt: '#181818',
-  border: '#2f2f2f',
-  borderFocus: '#8a8a8a',
-  text: '#f5f5f5',
+  bg: '#0c0e11',
+  surface: '#171a1f',
+  surfaceAlt: '#1f232a',
+  border: '#535a63',
+  borderFocus: '#7fb1ff',
+  text: '#f4f6f8',
   userText: '#ffffff',
-  userBorder: '#b5b5b5',
-  placeholder: '#a3a3a3',
-  muted: '#9a9a9a',
-  dim: '#6f6f6f',
-  error: '#f87171',
-  accent: '#4f8cff',
-  success: '#4ade80',
-  info: '#60a5fa',
+  userBorder: '#7fb1ff',
+  placeholder: '#979ea8',
+  muted: '#b6bcc5',
+  dim: '#8d949d',
+  error: '#ff8080',
+  accent: '#7fb1ff',
+  success: '#5ee08a',
+  info: '#53d8e6',
 };
 
 export default dark;

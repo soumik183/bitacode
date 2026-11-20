@@ -204,8 +204,11 @@ test('long input is capped so rendering stays cheap', () => {
   assert.ok(textOf(node).length <= 50_000);
 });
 
-test('normalizeTranscriptText keeps its original behaviour', () => {
-  assert.equal(normalizeTranscriptText('  a\n\n\nb  '), 'a\nb');
+test('normalizeTranscriptText trims the ends but keeps paragraph breaks', () => {
+  // Blank lines carry markdown structure (tables, fenced blocks, paragraphs),
+  // so they are preserved; only runs of three or more collapse to one break.
+  assert.equal(normalizeTranscriptText('  a\n\n\nb  '), 'a\n\nb');
+  assert.equal(normalizeTranscriptText('a\n\n\n\n\nb'), 'a\n\nb');
   assert.equal(normalizeTranscriptText('   '), '');
 });
 

@@ -1,22 +1,27 @@
 import type { Theme } from '../types.js';
 
-/** Pure black/white with bright accents for maximum terminal contrast. */
+/**
+ * High contrast — accessibility first.
+ *
+ * Pure black canvas, pure white ink and saturated status colours for low-vision
+ * use, bright sunlight and screen readers that rely on hard edges.
+ */
 const highContrast: Theme = {
   bg: '#000000',
   surface: '#000000',
-  surfaceAlt: '#000000',
+  surfaceAlt: '#0a0a0a',
   border: '#ffffff',
   borderFocus: '#ffff00',
   text: '#ffffff',
-  userText: '#ffff00',
+  userText: '#00ffff',
   userBorder: '#ffff00',
-  placeholder: '#ffff00',
+  placeholder: '#c8c8c8',
   muted: '#ffffff',
-  dim: '#ffffff',
+  dim: '#d0d0d0',
   error: '#ff5555',
   accent: '#00ffff',
   success: '#00ff00',
-  info: '#00ffff',
+  info: '#ffd400',
 };
 
 export default highContrast;

@@ -213,6 +213,8 @@ interface StaticContext {
   addStatic: AddStaticFn;
   /** Active palette, forwarded to pure helpers that paint palette colours. */
   palette: Theme;
+  /** Terminal width, so archived markdown (tables!) is scaled to fit. */
+  columns?: number;
 }
 
 interface ThinkingContext extends StaticContext {
@@ -257,6 +259,16 @@ interface StreamingContext extends StaticContext {
   streamingBufferRef: React.MutableRefObject<StreamingBuffer>;
 }
 
+/**
+ * Width available to an archived reply: terminal minus the transcript gutter
+ * and the scrollbar rail. `0` means "unconstrained", which the renderer treats
+ * as the old behaviour, so callers without a measured width keep working.
+ */
+function transcriptWidth(columns?: number): number {
+  if (!columns || !Number.isFinite(columns)) return 0;
+  return Math.max(20, Math.floor(columns) - 5);
+}
+
 // Helper to flush streaming buffer to static and reset state
 function flushStreamingBuffer(ctx: StreamingContext) {
   const { addStatic, setIsStreaming, setStreamingText, streamingBufferRef } = ctx;
@@ -264,8 +276,8 @@ function flushStreamingBuffer(ctx: StreamingContext) {
 
   if (buffer.unflushedContent) {
     addStatic(
-      <Box paddingX={2}>
-        <Text>{renderFormattedText(buffer.unflushedContent, 0, ctx.palette)}</Text>
+      <Box paddingX={2} paddingBottom={1}>
+        <Text>{renderFormattedText(buffer.unflushedContent, transcriptWidth(ctx.columns), ctx.palette)}</Text>
       </Box>
     );
   }
@@ -284,7 +296,7 @@ function handleTextDelta(
   ctx: TextDeltaContext
 ) {
   const deltaText = event.content || '';
-  const { assistantMessageRef, streamingBufferRef, addStatic, setCompletionMessages, setIsStreaming, setStreamingText } = ctx;
+  const { assistantMessageRef, streamingBufferRef, setCompletionMessages, setIsStreaming, setStreamingText } = ctx;
 
   // Reasoning comes before response text: archive it before the first chunk
   // so the scrollback order stays thought → answer.
@@ -311,68 +323,21 @@ function handleTextDelta(
     
     setIsStreaming(true);
 
-    // Initialize the streaming buffer and process the first chunk
-    const buffer = { unflushedContent: trimmedDelta, hasFlushedAnyLine: false, lastUiUpdate: Date.now() };
-    streamingBufferRef.current = buffer;
-
-    // Process the first chunk: split on newlines and flush complete lines
-    const lines = buffer.unflushedContent.split('\n');
-    if (lines.length > 1) {
-      const completeLines = lines.slice(0, -1);
-      const textToFlush = completeLines.join('\n');
-      if (textToFlush) {
-        addStatic(
-          <Box paddingX={2}>
-            <Text>{renderFormattedText(textToFlush, 0, ctx.palette)}</Text>
-          </Box>
-        );
-        buffer.hasFlushedAnyLine = true;
-      }
-      buffer.unflushedContent = lines[lines.length - 1];
-    }
-
-    setStreamingText(buffer.unflushedContent);
+    // The whole reply stays in the live area while it arrives and is rendered
+    // as one formatted markdown block every frame, so headings, lists, tables
+    // and code look right in real time instead of being split by flushes.
+    streamingBufferRef.current = { unflushedContent: trimmedDelta, hasFlushedAnyLine: false, lastUiUpdate: Date.now() };
+    setStreamingText(trimmedDelta);
   } else {
-    // Subsequent deltas — append to ref and buffer, then flush complete lines
     assistantMessageRef.current.message.content += deltaText;
 
-    // Accumulate in buffer and flush complete lines to static
     const buffer = streamingBufferRef.current;
     buffer.unflushedContent += deltaText;
 
-    // Split on newlines to find complete lines
-    const lines = buffer.unflushedContent.split('\n');
-    let flushedLine = false;
-
-    // If we have more than 1 element, there were newlines
-    if (lines.length > 1) {
-      // All lines except the last one are complete (ended with \n)
-      const completeLines = lines.slice(0, -1);
-
-      // Build the text to flush - each complete line gets a newline added back
-      const textToFlush = completeLines.join('\n');
-
-      if (textToFlush) {
-        addStatic(
-          <Box paddingX={2}>
-            <Text>{renderFormattedText(textToFlush, 0, ctx.palette)}</Text>
-          </Box>
-        );
-        buffer.hasFlushedAnyLine = true;
-        flushedLine = true;
-      }
-
-      // Keep only the last (incomplete) line in the buffer
-      buffer.unflushedContent = lines[lines.length - 1];
-    }
-
-    // Show the incomplete line (if any) in the dynamic frame, but throttle
-    // fast streams so low-power devices are not re-rendered per token. A flush
-    // must update immediately: those lines just left the live area for static
-    // scrollback, and leaving the stale text up until the throttle elapses
-    // renders them twice, then makes them pop.
+    // Throttle frame updates on a fast stream. The text itself is never split,
+    // so what is on screen is always the current, fully formatted reply.
     const now = Date.now();
-    if (flushedLine || now - buffer.lastUiUpdate >= STREAM_UI_INTERVAL_MS) {
+    if (now - buffer.lastUiUpdate >= STREAM_UI_INTERVAL_MS) {
       buffer.lastUiUpdate = now;
       setStreamingText(buffer.unflushedContent);
     }
@@ -628,30 +593,17 @@ function handleDone(
   
   if (assistantMessageRef.current?.kind === 'streaming_text') {
     const finalRef = assistantMessageRef.current;
-    const buffer = streamingBufferRef.current;
 
-    // Flush any remaining unflushed content from the buffer
-    // This is the final incomplete line that was being displayed live
-    if (buffer.unflushedContent) {
-      // If we've already flushed some lines, just append the remainder
-      // Otherwise, normalize and flush the full content
-      if (buffer.hasFlushedAnyLine) {
-        ctx.addStatic(
-          <Box paddingX={2}>
-            <Text>{renderFormattedText(buffer.unflushedContent, 0, ctx.palette)}</Text>
-          </Box>
-        );
-      } else {
-        // Nothing was flushed yet, normalize the full content
-        const normalized = normalizeTranscriptText(finalRef.message.content || '');
-        if (normalized) {
-          ctx.addStatic(
-            <Box paddingX={2}>
-              <Text>{renderFormattedText(normalized, 0, ctx.palette)}</Text>
-            </Box>
-          );
-        }
-      }
+    // Archive the finished reply once, exactly as it was rendered live. Nothing
+    // was written to scrollback during streaming, so there is no duplication and
+    // no half-formatted block left above the live tail.
+    const normalized = normalizeTranscriptText(finalRef.message.content || '');
+    if (normalized) {
+      ctx.addStatic(
+        <Box paddingX={2} paddingBottom={1}>
+          <Text>{renderFormattedText(normalized, transcriptWidth(ctx.columns), ctx.palette)}</Text>
+        </Box>
+      );
     }
 
     // Add final spacing after the streamed text so the reply does not sit

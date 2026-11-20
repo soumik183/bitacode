@@ -43,7 +43,7 @@ test('createCheckpoint snapshots content and metadata, and listCheckpoints reads
       const list = await listCheckpoints('sess-core');
       assert.equal(list.length, 1);
       assert.equal(list[0].id, ids[0]);
-      assert.equal(list[0].path, rel);
+      assert.equal(list[0].path, file, 'checkpoints store an absolute path');
       assert.equal(list[0].content, 'original');
       assert.equal(list[0].tool, 'edit_file');
       assert.ok(!Number.isNaN(Date.parse(list[0].createdAt)));
@@ -65,7 +65,7 @@ test('restoreCheckpoint writes content back and deletes the checkpoint', async (
       await fsp.writeFile(file, 'changed', 'utf8');
       const restored = await restoreCheckpoint(id, 'sess-restore');
 
-      assert.deepEqual(restored, [rel]);
+      assert.deepEqual(restored, [file], 'restore reports absolute paths');
       assert.equal(await fsp.readFile(file, 'utf8'), 'original');
       assert.deepEqual(await listCheckpoints('sess-restore'), []);
     } finally {
@@ -86,7 +86,7 @@ test('a checkpoint of a missing file restores by deleting the created file', asy
       await fsp.writeFile(file, 'created');
       const restored = await restoreCheckpoint(id, 'sess-missing');
 
-      assert.deepEqual(restored, [rel]);
+      assert.deepEqual(restored, [file]);
       assert.equal(fs.existsSync(file), false);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
@@ -149,6 +149,41 @@ test('at most 100 checkpoints are kept per session', async () => {
       assert.equal(list.some((c) => c.id === ids[0]), false);
     } finally {
       await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Regression: a planted checkpoint under the store could write anywhere, and
+// relative paths were restored against today's cwd instead of the session's.
+test('restoreCheckpoint refuses a checkpoint that points outside the sandbox', async () => {
+  await withTempHome(async () => {
+    const victim = path.join(path.dirname(process.cwd()), `planted-${process.pid}.txt`);
+    try {
+      await createCheckpoint(['reports/x.txt'], 'sess-planted', 'write_file');
+      const [entry] = await listCheckpoints('sess-planted');
+      const dir = path.join(
+        process.env.HOME!,
+        '.local',
+        'share',
+        'bitacode',
+        'checkpoints',
+        'sess-planted'
+      );
+      // Files are named <timestamp>-<id>.json; find the real one.
+      const fileName = fs.readdirSync(dir).find((name) => name.includes(entry.id));
+      assert.ok(fileName, 'checkpoint file exists');
+      const file = path.join(dir, fileName!);
+      await fsp.writeFile(
+        file,
+        JSON.stringify({ path: victim, content: 'pwned', createdAt: entry.createdAt, tool: 'write_file' }),
+        'utf8'
+      );
+
+      const restored = await restoreCheckpoint(entry.id, 'sess-planted');
+      assert.deepEqual(restored, [], 'nothing may be restored outside the allowed roots');
+      assert.equal(fs.existsSync(victim), false, 'the planted path was not written');
+    } finally {
+      await fsp.rm(victim, { force: true });
     }
   });
 });

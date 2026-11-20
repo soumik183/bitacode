@@ -16,7 +16,7 @@ Layout:
   after Ink unmounts.
 */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text, useApp, useInput, useStdout, measureElement } from 'ink';
 import { basename } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -28,6 +28,7 @@ import { AskPrompt } from './components/AskPrompt.js';
 import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
 import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
+import { LiveStatus, type LiveActivity } from './components/LiveStatus.js';
 import { DiffView } from './components/DiffView.js';
 import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.js';
 import { ThinkingArchive } from './components/ThinkingArchive.js';
@@ -49,6 +50,28 @@ import {
 } from './settings.js';
 import { VARIANTS } from './variants.js';
 import { PromptInput } from './components/PromptInput.js';
+import { createProviderClient } from './providers/client.js';
+import { answerLocally } from './utils/local-answers.js';
+import { detectTerminalProfile } from './utils/terminal.js';
+import { createDecodeSpeedTracker } from './utils/decode-speed.js';
+import { loadHooks, runHooks, type HookCommand } from './utils/hooks.js';
+import { isProjectTrusted, trustProject } from './utils/project-trust.js';
+import { loadEffectiveRules } from './commands/permissions.js';
+import { mergeRuleSets, type PermissionRuleSet } from './utils/permission-rules.js';
+import { loadCustomCommands, expandCommand, type CustomCommand } from './utils/custom-commands.js';
+import { loadPlugins } from './utils/plugins.js';
+import { loadHistory, appendHistory, HistoryNavigator } from './utils/input-history.js';
+import { summarizePaste } from './utils/paste.js';
+import { findMentionToken, applyMention, listMentionCandidates } from './utils/mentions.js';
+import { commonPrefix } from './utils/completion.js';
+import { detectChecks, runChecks, renderCheckReport } from './utils/autoverify.js';
+import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
+import { appendJournal } from './utils/session-journal.js';
+import { beginTurn, endTurn, resolveRewind, checkpointsForRewind, truncateTurns } from './utils/turn-snapshots.js';
+import { getWorkingCheckpoint, clearWorkingCheckpoint } from './utils/working-checkpoint.js';
+import { formatMemoryList, listMemory, addMemory, forgetMemory } from './utils/memory.js';
+import { handleToolCall as runToolCall } from './tools/index.js';
+
 import { OpenAI } from 'openai';
 import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, writeProviderApiKey, ensureUserConfigDirectory, detectConfigFromEnvironment, writeConfig, type Config } from './config.js';
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
@@ -81,14 +104,16 @@ import {
   loadSession,
   listSessions,
   generateTitle,
+  formatSessionAge,
   type Session,
   type SubAgentActivity as SubAgentActivityData,
 } from './sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession, type TodoItem } from './tools/todo.js';
+import { stopAllProcesses } from './tools/process.js';
 import { initializeMcp, closeMcp } from './mcp.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { renderFormattedText, normalizeTranscriptText } from './utils/format-message.js';
-import { formatContextWindow, listProviderModels } from './utils/provider-models.js';
+import { formatContextWindow, listProviderModels, prefetchProviderModels } from './utils/provider-models.js';
 import { addToolResultView } from './utils/tool-result-view.js';
 import { itemAtViewportRow, type AddStaticFn } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
@@ -102,7 +127,16 @@ import {
   sliceItemsToWindow,
   visibleRowWindow,
 } from './utils/scroll.js';
-import { clampIndex, composerTextWidth, finiteDim, frameRows, resolveLayout, splitLiveArea } from './utils/layout.js';
+import {
+  clampIndex,
+  composerTextWidth,
+  finiteDim,
+  frameRows,
+  resolveLayout,
+  splitLiveArea,
+  transcriptFillerRows,
+} from './utils/layout.js';
+import { resolveItemRows } from './utils/transcript-rows.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from './utils/scrollbar.js';
 import { useAgentEventHandler, type AssistantMessageRef, type StreamingBuffer, type InlineThreadError } from './hooks/useAgentEventHandler.js';
 
@@ -133,8 +167,6 @@ const MAX_STATIC_ITEMS = 120;
 // Resumed sessions keep their full model context, but replay only the tail to
 // scrollback so a huge transcript does not flood the terminal at once.
 const MAX_REPLAY_MESSAGES = 100;
-// Avoid refetching a provider's model list on every /model open.
-const MODEL_CACHE_TTL_MS = 5 * 60_000;
 
 function fallbackItemRows(node: React.ReactNode): number {
   if (!node) return 0;
@@ -151,7 +183,8 @@ function fallbackItemRows(node: React.ReactNode): number {
 interface StaticEntryProps {
   item: StaticItem;
   columns: number;
-  onMeasure: (id: string, rows: number) => void;
+  /** Height reporter; the node is passed so the height can be keyed by node. */
+  onMeasure: (id: string, rows: number, node: React.ReactNode) => void;
   /** Registers the rendered box so click hit-testing can use real layout. */
   onRef?: (id: string, node: any) => void;
 }
@@ -169,7 +202,7 @@ const StaticEntry = React.memo(({ item, columns, onMeasure, onRef }: StaticEntry
   React.useEffect(() => {
     if (!ref.current) return;
     const height = measureElement(ref.current).height;
-    if (height > 0) onMeasure(item.id, height);
+    if (height > 0) onMeasure(item.id, height, item.node);
   }, [item.id, item.node, columns, onMeasure]);
 
   return (
@@ -202,7 +235,24 @@ const Splash: React.FC = () => {
 const SETUP_HINT = 'No provider configured — type /provider to choose one';
 const API_MISSING_HINT = 'API key missing — type /provider to select a provider and add a key.';
 
-function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assistant', text: string, palette: Theme): void {
+/**
+ * Content width for an archived message: the terminal minus the transcript
+ * gutter (2 each side) and the scrollbar rail (1 column). Tables and long
+ * inline spans are scaled to this, so a wide table can never wrap and smear
+ * when the user scrolls back to it.
+ */
+function transcriptTextWidth(columns?: number): number {
+  if (!columns || !Number.isFinite(columns)) return 0;
+  return Math.max(20, Math.floor(columns) - 5);
+}
+
+function printMessageToScrollback(
+  addStatic: AddStaticFn,
+  role: 'user' | 'assistant',
+  text: string,
+  palette: Theme,
+  columns?: number
+): void {
   const normalized = normalizeTranscriptText(text);
   if (!normalized) {
     addStatic(<Box height={1} />);
@@ -228,7 +278,7 @@ function printMessageToScrollback(addStatic: AddStaticFn, role: 'user' | 'assist
   // Fallback is assistant, render with Markdown formatting (bold, italic)
   addStatic(
     <Box paddingX={2} paddingBottom={1}>
-      <Text>{renderFormattedText(normalized, 0, palette)}</Text>
+      <Text>{renderFormattedText(normalized, transcriptTextWidth(columns), palette)}</Text>
     </Box>
   );
 }
@@ -250,7 +300,7 @@ function replayOneMessage(
     addStatic(collapsed, { collapsed, expanded });
   }
   if (message.role === 'user' && typeof message.content === 'string') {
-    printMessageToScrollback(addStatic, 'user', message.content, palette);
+    printMessageToScrollback(addStatic, 'user', message.content, palette, columns);
     return;
   }
   if (
@@ -258,7 +308,7 @@ function replayOneMessage(
     typeof message.content === 'string' &&
     message.content.trim().length > 0
   ) {
-    printMessageToScrollback(addStatic, 'assistant', message.content, palette);
+    printMessageToScrollback(addStatic, 'assistant', message.content, palette, columns);
     return;
   }
   if (message.role === 'tool') {
@@ -347,12 +397,23 @@ function clipToRows(text: string, maxRows: number, columns: number): string {
   const kept: string[] = [];
   let rows = 0;
   for (let index = lines.length - 1; index >= 0; index--) {
-    const lineRows = Math.max(1, Math.ceil(Array.from(lines[index]).length / width));
-    if (rows + lineRows > budget) break;
+    const line = lines[index];
+    const lineRows = Math.max(1, Math.ceil(Array.from(line).length / width));
+    if (rows + lineRows > budget) {
+      // A single line longer than the whole viewport (a reply with no breaks,
+      // or a minified blob) must be clipped too, or the live area renders the
+      // entire string every frame and pushes the composer off screen.
+      if (kept.length === 0) {
+        const chars = Array.from(line);
+        const maxChars = budget * width;
+        kept.unshift(chars.slice(Math.max(0, chars.length - maxChars)).join(''));
+      }
+      break;
+    }
     rows += lineRows;
-    kept.unshift(lines[index]);
+    kept.unshift(line);
   }
-  return (kept.length > 0 ? kept : [lines[lines.length - 1] ?? '']).join('\n');
+  return (kept.length > 0 ? kept : ['']).join('\n');
 }
 
 /** Wrapped display rows for a block of text at a fixed column width. */
@@ -514,57 +575,18 @@ const SETTING_KEYS = ['animations', 'mouseClicks', 'approvalMode', 'theme', 'sta
 // Short intents shown beside each palette in the theme picker. Keep them brief
 // so names and swatches stay readable on narrow terminals.
 const THEME_INTENTS: Record<ThemeName, string> = {
-  black: 'warm gold on near-black',
-  sand: 'paper-light notebook',
-  dark: 'classic flat dark',
-  light: 'bright-room friendly',
-  'high-contrast': 'maximum contrast',
+  black: 'graphite canvas · warm gold',
+  midnight: 'deep navy · violet, for night work',
+  dark: 'neutral slate · confident blue',
+  light: 'paper white · ink, for daylight',
+  sand: 'warm notebook · terracotta',
+  moss: 'forest calm · olive, low glare',
+  'high-contrast': 'pure black/white · maximum contrast',
 };
 
 function buildClient(config: Config, apiKeyOverride?: string): OpenAI {
-  const provider = getProvider(config.provider);
-  const apiKey = apiKeyOverride?.trim() || resolveApiKey(config);
-
-  if (!apiKey) {
-    const providerName = provider?.name || config.provider;
-    const envVar = provider?.apiKeyEnvVar;
-    throw new Error(
-      envVar
-        ? `Missing API key for ${providerName}. Set it in config or export ${envVar}.`
-        : `Missing API key for ${providerName}.`
-    );
-  }
-
-  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {
-    apiKey,
-  };
-
-  // baseURL: env var override takes precedence over provider default
-  const baseURLOverride = process.env.BITACODE_BASE_URL?.trim();
-  const baseURL = baseURLOverride || provider?.baseURL;
-  if (baseURL) {
-    clientOptions.baseURL = baseURL;
-  }
-
-  // Custom headers: env override takes precedence over provider defaults
-  const rawHeaders = process.env.BITACODE_CUSTOM_HEADERS?.trim();
-  if (rawHeaders) {
-    const defaultHeaders: Record<string, string> = {};
-    for (const line of rawHeaders.split('\n')) {
-      const sep = line.indexOf(': ');
-      if (sep === -1) continue;
-      const key = line.slice(0, sep).trim();
-      const value = line.slice(sep + 2).trim();
-      if (key && value) defaultHeaders[key] = value;
-    }
-    if (Object.keys(defaultHeaders).length > 0) {
-      clientOptions.defaultHeaders = defaultHeaders;
-    }
-  } else if (provider?.headers && Object.keys(provider.headers).length > 0) {
-    clientOptions.defaultHeaders = provider.headers;
-  }
-
-  return new OpenAI(clientOptions);
+  // Delegates to the shared factory so headless mode and the TUI cannot drift.
+  return createProviderClient(config, apiKeyOverride ? { apiKey: apiKeyOverride } : {});
 }
 
 interface ApiKeyRequest {
@@ -643,7 +665,18 @@ const AppContent: React.FC<AppContentProps> = ({
       })
     );
   }, []);
-  const handleMeasureItem = useCallback((id: string, rows: number) => {
+  // Heights are cached per rendered node, not only per transcript id. A card
+  // keeps two prebuilt nodes (collapsed and expanded); keying by node means a
+  // collapse can reuse the height that node had before it was expanded instead
+  // of waiting for a re-measure. Without this the transcript kept reserving the
+  // expanded height after a click, leaving a tall blank block behind.
+  const nodeHeightsRef = useRef<WeakMap<object, number>>(new WeakMap());
+  const nodeHeight = useCallback((node: React.ReactNode): number | undefined => {
+    if (!node || typeof node !== 'object') return undefined;
+    return nodeHeightsRef.current.get(node as object);
+  }, []);
+  const handleMeasureItem = useCallback((id: string, rows: number, node?: React.ReactNode) => {
+    if (node && typeof node === 'object') nodeHeightsRef.current.set(node as object, rows);
     setMeasuredHeights((prev) => (prev[id] === rows ? prev : { ...prev, [id]: rows }));
   }, []);
 
@@ -683,8 +716,19 @@ const AppContent: React.FC<AppContentProps> = ({
   const [config, setConfig] = useState<Config | null>(null);
   const [completionMessages, setCompletionMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
+  // Wrapped rows the composer currently renders. The layout reserves them so a
+  // multi-line prompt never covers the transcript or the footer.
+  const [composerRows, setComposerRows] = useState(1);
+  // Wall-clock start of the current busy spell, plus a shared 1 s ticker so the
+  // activity strip can count seconds without re-rendering on every token.
+  const [busyStartedAt, setBusyStartedAt] = useState<number | null>(null);
+  const [busyClock, setBusyClock] = useState(() => Date.now());
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState('');
+  // Decode rate is measured from delta length vs. wall clock, so it stays
+  // honest when the provider bursts tokens in uneven chunks.
+  const [decodeTps, setDecodeTps] = useState<string | null>(null);
+  const decodeRef = useRef({ tracker: createDecodeSpeedTracker(), length: 0, shown: null as string | null });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [helpMessage, setHelpMessage] = useState<string | null>(null);
@@ -759,6 +803,11 @@ const AppContent: React.FC<AppContentProps> = ({
   // Child-agent activity. Kept as the full record for session persistence;
   // a separate flag drives the compact live panel and its auto-hide timer.
   const [subAgentActivities, setSubAgentActivities] = useState<SubAgentActivityData[]>([]);
+  // Mirror for callbacks that run later: reading the state variable there
+  // captured the array as it was when the turn started, so a finished sub-agent
+  // was saved to disk in its "running" state.
+  const subAgentActivitiesRef = useRef<SubAgentActivityData[]>([]);
+  subAgentActivitiesRef.current = subAgentActivities;
   const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
 
   // Input reset key — incremented on submit to force TextInput remount and clear
@@ -804,6 +853,9 @@ const AppContent: React.FC<AppContentProps> = ({
 
   // Session state
   const [session, setSession] = useState<Session | null>(null);
+  // Mirror of the message array for code that must save outside a render
+  // (turn end, quit, autosave). React state lags behind by one commit.
+  const completionMessagesRef = useRef<Message[]>([]);
 
   // OpenAI client ref (stable across renders)
   const clientRef = useRef<OpenAI | null>(null);
@@ -815,6 +867,41 @@ const AppContent: React.FC<AppContentProps> = ({
   const modelCacheTimeRef = useRef<Record<string, number>>({});
   // Whether the transcript on disk matches what the user has seen
   const sessionSavedRef = useRef(false);
+
+  /**
+   * Autosave.
+   *
+   * Sessions used to be written only after a turn reached its final message, so
+   * a failed request, an abort or a killed process lost the whole conversation,
+   * and a brand-new session never appeared in the picker at all. Mirroring the
+   * transcript on a short idle debounce closes both holes: every committed
+   * state (including a local `/help`-style answer or a mid-turn error) reaches
+   * disk within a second, without writing on every streamed token.
+   */
+  useEffect(() => {
+    completionMessagesRef.current = completionMessages;
+    if (!session || !initialized) return;
+    if (!hasConversationMessages(completionMessages)) return;
+    const targetId = session.id;
+    const timer = setTimeout(() => {
+      const messages = completionMessagesRef.current;
+      if (!hasConversationMessages(messages)) return;
+      const snapshot: Session = {
+        ...session,
+        completionMessages: messages,
+        todos: getTodosForSession(targetId),
+        title: generateTitle(messages, session.title),
+        variant: variantId,
+        subAgentActivities: subAgentActivitiesRef.current,
+      };
+      void saveSession(snapshot)
+        .then(() => { sessionSavedRef.current = true; })
+        .catch((err) => logger.warn('Autosave failed', { error: String(err) }));
+    }, 700);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  }, [completionMessages, session, initialized, variantId]);
+
   // Session to advertise on exit, and a guard against saving twice on a fast
   // ctrl+c / /quit burst.
   const exitSessionIdRef = useRef<string | null>(null);
@@ -925,6 +1012,68 @@ const AppContent: React.FC<AppContentProps> = ({
   }, [showSubAgentPanel, hasActiveSubAgent, subAgentActivities]);
 
   const didPrintIntroRef = useRef(false);
+  // ── Runtime policy: hooks, permission rules, custom commands ──
+  // Held in refs because the loop reads them at call time, while the UI only
+  // needs to re-render when the command palette changes.
+  const hooksRef = useRef<HookCommand[]>([]);
+  const rulesRef = useRef<PermissionRuleSet>({ allow: [], ask: [], deny: [], errors: [] });
+  const [customCommands, setCustomCommands] = useState<CustomCommand[]>([]);
+  const historyNavigatorRef = useRef<HistoryNavigator | null>(null);
+  const terminalProfile = useMemo(() => detectTerminalProfile({ animationsEnabled: settings.animations }), [settings.animations]);
+  // A terminal that repaints badly (Apple_Terminal) or not at all (TERM=dumb)
+  // gets a static footer instead of an animation loop.
+  const animationsEnabled = settings.animations && terminalProfile.animations;
+
+  const toolPolicy = useMemo(() => ({
+    permissionRules: rulesRef.current,
+    hooks: hooksRef.current,
+    guardUnreadEdits: settings.guardUnreadEdits !== false,
+    spillToolResults: settings.spillToolResults !== false,
+    verifyPostconditions: true,
+    journal: true,
+    cwd: process.cwd(),
+  }), [settings.guardUnreadEdits, settings.spillToolResults]);
+
+  /**
+   * Re-read project policy from disk. Runs at startup and after `/trust`, so a
+   * freshly trusted repository starts using its own rules without a restart.
+   */
+  const reloadRuntimePolicy = useCallback(async (activeSessionId?: string) => {
+    const cwd = process.cwd();
+    const trusted = isProjectTrusted(cwd);
+    // Plugin-provided hooks/commands are additive; project and user sources
+    // keep their existing precedence. loadPlugins never throws.
+    const plugins = await loadPlugins({ cwd, trusted });
+    const loadedHooks = loadHooks({ cwd, trusted }, plugins.hooks);
+    hooksRef.current = loadedHooks.hooks;
+
+    const effective = loadEffectiveRules(cwd);
+    rulesRef.current = mergeRuleSets(effective.rules);
+
+    const commands = loadCustomCommands({ cwd, trusted }, plugins.commands);
+    setCustomCommands(commands.commands);
+
+    for (const warning of [...loadedHooks.errors, ...commands.errors, ...plugins.errors]) {
+      logger.warn('Runtime policy warning', { warning });
+    }
+    if (effective.projectError) logger.debug('Project permission rules not loaded', { reason: effective.projectError });
+
+    if (historyNavigatorRef.current === null) {
+      historyNavigatorRef.current = new HistoryNavigator(loadHistory());
+    }
+
+    if (loadedHooks.hooks.length > 0) {
+      const outcome = await runHooks({
+        event: 'SessionStart',
+        hooks: loadedHooks.hooks,
+        cwd,
+        payload: { event: 'SessionStart', cwd, sessionId: activeSessionId },
+      });
+      if (outcome.context) setHelpMessage(`[hook] ${outcome.context}`);
+      for (const error of outcome.errors) logger.warn('SessionStart hook warning', { error });
+    }
+  }, []);
+
   const printedThreadErrorIdsRef = useRef<Set<string>>(new Set());
 
   const initializeWithConfig = useCallback(async (loadedConfig: Config) => {
@@ -935,8 +1084,43 @@ const AppContent: React.FC<AppContentProps> = ({
 
     clientRef.current = buildClient(loadedConfig);
 
+    // Warm the model list in the background so the first /model open is instant
+    // even on a slow provider.
+    try {
+      prefetchProviderModels(clientRef.current, loadedConfig.provider, {
+        baseURL: getProvider(loadedConfig.provider)?.baseURL,
+      });
+    } catch {
+      // A missing key is reported by the client itself; warmup is optional.
+    }
+
+    // Other providers warm up a moment later, so switching providers is just
+    // as fast without delaying startup or spending data during the first turn.
+    const warmup = setTimeout(() => {
+      for (const provider of getAllProviders()) {
+        if (provider.id === loadedConfig.provider) continue;
+        if (resolveApiKey({ provider: provider.id }) === null) continue;
+        try {
+          prefetchProviderModels(
+            buildClient({ provider: provider.id, model: provider.models[0]?.id ?? '' }),
+            provider.id,
+            { baseURL: provider.baseURL },
+          );
+        } catch {
+          // Unusable provider (bad config); skip it.
+        }
+      }
+    }, 2_000);
+    warmup.unref?.();
+
     // Initialize MCP servers
     await initializeMcp();
+
+    // Load project policy (hooks, permission rules, custom commands) and fire
+    // the SessionStart hook. A warning here must never block startup.
+    await reloadRuntimePolicy(sessionId).catch((err) => {
+      logger.warn('Could not load runtime policy', { error: String(err) });
+    });
 
     // Load or create session
     let loadedSession: Session | null = null;
@@ -1013,6 +1197,11 @@ const AppContent: React.FC<AppContentProps> = ({
       const newSession = createSession(loadedConfig.model, loadedConfig.provider);
       clearTodos(newSession.id);
       newSession.completionMessages = initialCompletionMessages;
+      // Register the session immediately so it is listed by /session and can be
+      // resumed even if this process dies before the first turn finishes.
+      await saveSession(newSession).catch((err) => {
+        logger.warn('Could not register new session', { error: String(err) });
+      });
       setSession(newSession);
       didPrintIntroRef.current = true;
     }
@@ -1021,7 +1210,7 @@ const AppContent: React.FC<AppContentProps> = ({
   }, [dangerouslySkipPermissions, sessionId, addStatic, columns, theme]);
 
   useEffect(() => {
-    if (!loading || !settings.animations) {
+    if (!loading || !animationsEnabled) {
       setSpinnerFrame(0);
       return;
     }
@@ -1033,7 +1222,32 @@ const AppContent: React.FC<AppContentProps> = ({
     }, spinnerIntervalMs);
 
     return () => clearInterval(interval);
-  }, [loading, settings.animations]);
+  }, [loading, animationsEnabled]);
+
+  // Decode rate: fed by growth of the streaming buffer. The tracker ignores
+  // the first fraction of a second so the UI does not flash a bogus rate.
+  useEffect(() => {
+    const state = decodeRef.current;
+    if (!isStreaming) {
+      state.tracker.reset();
+      state.length = 0;
+      if (state.shown !== null) {
+        state.shown = null;
+        setDecodeTps(null);
+      }
+      return;
+    }
+
+    const length = streamingText.length;
+    if (length <= state.length) return;
+    const delta = streamingText.slice(state.length);
+    state.length = length;
+    const sample = state.tracker.add(delta);
+    if (sample.display && sample.display !== state.shown) {
+      state.shown = sample.display;
+      setDecodeTps(sample.display);
+    }
+  }, [streamingText, isStreaming]);
 
   // Live thinking clock. One tick per second is enough and stays cheap on
   // Android; the archived record gets the exact elapsed value.
@@ -1206,6 +1420,7 @@ const AppContent: React.FC<AppContentProps> = ({
     mode,
     toast?.length ?? 0,
     searchQuery?.length ?? 0,
+    composerRows,
   ].join(':');
 
   useEffect(() => {
@@ -1292,13 +1507,43 @@ const AppContent: React.FC<AppContentProps> = ({
     return () => {
       clearApprovalHandler();
       closeMcp();
+      // Detached children would otherwise keep running after quit.
+      stopAllProcesses();
     };
   }, []);
 
   // Palette contents. Kept ahead of handleSubmit because Enter runs the highlighted row.
-  const commandItems = SLASH_COMMANDS.filter((cmd) =>
-    cmd.name.toLowerCase().startsWith(inputText.trim().toLowerCase())
-  ).map((cmd) => ({ id: cmd.name, label: cmd.name, description: cmd.description }));
+  // Command palette: prefix match on the name wins, keywords and the
+  // description keep a search like "/key" finding "/provider".
+  const commandQuery = inputText.trim().toLowerCase();
+  const commandNeedle = commandQuery.replace(/^\//, '');
+  const commandMatches = SLASH_COMMANDS.filter((cmd) => {
+    const name = cmd.name.toLowerCase();
+    if (name.startsWith(commandQuery)) return true;
+    if (!commandNeedle) return false;
+    return (
+      name.slice(1).startsWith(commandNeedle)
+      || (cmd.keywords ?? '').toLowerCase().includes(commandNeedle)
+      || cmd.description.toLowerCase().includes(commandNeedle)
+    );
+  });
+  const commandMeta = (name: string): string | undefined => {
+    switch (name) {
+      case '/model': return config?.model;
+      case '/theme': return settings.theme;
+      case '/provider': return config?.provider;
+      case '/variant': return variantId;
+      case '/verify': return 'checks';
+      default: return undefined;
+    }
+  };
+  const commandItems: PaletteItem[] = commandMatches.map((cmd) => ({
+    id: cmd.name,
+    label: cmd.name,
+    description: cmd.description,
+    section: cmd.category,
+    meta: commandMeta(cmd.name),
+  }));
 
   const providerItems = getAllProviders().map((provider) => {
     const keyReady = resolveApiKey({ provider: provider.id }) !== null;
@@ -1465,12 +1710,7 @@ const AppContent: React.FC<AppContentProps> = ({
   const loadModels = useCallback(
     async (providerId: string, client: OpenAI, preferredModelId?: string) => {
       const cached = remoteModelsRef.current[providerId];
-      const cachedAt = modelCacheTimeRef.current[providerId] ?? 0;
-      if (
-        cached?.length &&
-        cachedAt > 0 &&
-        Date.now() - cachedAt < MODEL_CACHE_TTL_MS
-      ) {
+      if (cached?.length) {
         if (!modelSearchRef.current && preferredModelId) {
           const index = cached.findIndex((item) => item.id === preferredModelId);
           if (index >= 0) setPickerIndex(index);
@@ -1482,7 +1722,10 @@ const AppContent: React.FC<AppContentProps> = ({
       setModelsLoading(true);
       setModelNotice(null);
 
-      const result = await listProviderModels(client, providerId);
+      // Cache-first inside: a warm list resolves without a network round trip.
+      const result = await listProviderModels(client, providerId, {
+        baseURL: getProvider(providerId)?.baseURL,
+      });
       if (seq !== modelFetchSeqRef.current) return;
 
       setModelsLoading(false);
@@ -1600,37 +1843,47 @@ const AppContent: React.FC<AppContentProps> = ({
         return;
       }
 
-      // First run straight from /provider: a saved key is already a usable
-      // config, so boot into chat with the provider's default model.
-      if (!config) {
-        const firstModel = getProvider(prompt.providerId)?.models[0]?.id ?? result.items[0]?.id;
-        setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
-        setKeyPrompt(null);
-        if (firstModel) {
-          finalizeFirstConfig(prompt.providerId, firstModel, {
-            name: result.items[0]?.label,
-            contextWindow: result.items[0]?.contextWindow,
-          });
-        }
-        return;
-      }
-
       if (result.items.length > 0) {
         setRemoteModels((prev) => ({ ...prev, [prompt.providerId]: result.items }));
       }
+
+      // A saved key is a usable config on its own, so the provider and its
+      // default model are selected right here. Writing only the key is what
+      // used to leave the old provider selected and force a manual re-pick.
+      const providerModels = getProvider(prompt.providerId)?.models ?? [];
+      const firstModel =
+        providerModels[0]?.id
+        ?? result.items[0]?.id
+        ?? (prompt.providerId === config?.provider ? config.model : undefined);
+      const modelInfo = {
+        name: result.items[0]?.label ?? providerModels[0]?.name,
+        contextWindow: result.items[0]?.contextWindow ?? providerModels[0]?.contextWindow,
+      };
+
       setKeyPrompt(null);
-      setPendingProviderId(prompt.providerId);
-      setPicker('model');
-      setPickerIndex(0);
-      setModelSearch('');
-      setModelsLoading(false);
-      setModelNotice(
-        result.error
-          ? `Could not fetch models (${result.error}); using built-in list.`
-          : null
-      );
+      if (!firstModel) {
+        // Key saved, but the provider exposes no model: keep the provider
+        // selected so the picker can fill the model in.
+        persistActiveSelection(prompt.providerId, config?.model ?? '');
+        setError('API key saved, but this provider returned no models to select.');
+        return;
+      }
+
+      if (!config) {
+        finalizeFirstConfig(prompt.providerId, firstModel, modelInfo);
+        return;
+      }
+
+      if (prompt.providerId === config.provider && firstModel === config.model) {
+        return;
+      }
+
+      // Persist before opening the picker: cancelling the picker must not undo
+      // the selection the key just enabled.
+      persistActiveSelection(prompt.providerId, firstModel, modelInfo);
+      finalizeFirstConfig(prompt.providerId, firstModel, modelInfo);
     },
-    [config, keyPrompt, finalizeFirstConfig]
+    [config, keyPrompt, finalizeFirstConfig, persistActiveSelection]
   );
 
   // Clear per-turn UI state without touching the saved session or transcript.
@@ -1717,6 +1970,9 @@ const AppContent: React.FC<AppContentProps> = ({
       nextSession.variant = variantId;
       clearTodos(nextSession.id);
       nextSession.completionMessages = initialMessages;
+      await saveSession(nextSession).catch((err) => {
+        logger.warn('Could not register new session', { error: String(err) });
+      });
 
       setCompletionMessages(initialMessages);
       setSession(nextSession);
@@ -1758,10 +2014,13 @@ const AppContent: React.FC<AppContentProps> = ({
         const model = summary.model ? summary.model.split('/').pop()! : '';
         const modelLabel = [summary.provider, model].filter(Boolean).join(' / ');
         const current = summary.id === session?.id ? ' · current' : '';
+        const age = formatSessionAge(summary.updatedAt || summary.createdAt);
+        const count = summary.messageCount;
         return {
           id: summary.id,
           label: title || 'Untitled session',
-          description: `${modelLabel || 'unknown model'} · ${summary.messageCount} msg${summary.messageCount === 1 ? '' : 's'}${current}`,
+          // Order: when · which model · how much · whether it is open now.
+          description: `${age} · ${modelLabel || 'unknown model'} · ${count} msg${count === 1 ? '' : 's'}${current}`,
         };
       });
       setSessionItems(items);
@@ -2089,6 +2348,92 @@ const AppContent: React.FC<AppContentProps> = ({
         }
         return true;
       }
+      case '/mem':
+      case '/memory': {
+        setError(null);
+        const sub = (parts[1] ?? 'list').toLowerCase();
+        if (sub === 'add') {
+          const text = parts.slice(2).join(' ').trim();
+          if (!text) {
+            setError('Usage: /memory add <text>');
+            return true;
+          }
+          const saved = addMemory({ text, kind: 'note', source: 'user' });
+          setHelpMessage('error' in saved ? `Could not save: ${saved.error}` : `Saved memory ${saved.id}`);
+          return true;
+        }
+        if (sub === 'forget' || sub === 'delete') {
+          const target = parts.slice(2).join(' ').trim();
+          if (!target) {
+            setError('Usage: /memory forget <id or text>');
+            return true;
+          }
+          const removed = forgetMemory(target);
+          setHelpMessage(removed > 0 ? `Removed ${removed} entr${removed === 1 ? 'y' : 'ies'}.` : 'No matching memory entry.');
+          return true;
+        }
+        setHelpMessage(formatMemoryList(listMemory({ limit: 30 })).join('\n'));
+        return true;
+      }
+      case '/verify': {
+        setError(null);
+        const cwd = process.cwd();
+        const checks = await detectChecks({ cwd });
+        if (checks.length === 0) {
+          setHelpMessage('No project checks detected (package.json scripts, Cargo.toml, Makefile, pyproject.toml).');
+          return true;
+        }
+        setHelpMessage(`Running ${checks.map((check) => check.name).join(', ')}…`);
+        const results = await runChecks(checks, { cwd, stopOnFirstFailure: false });
+        const report = renderCheckReport(results, checks);
+        if (results.every((result) => result.status === 'pass')) setHelpMessage(report);
+        else setError(report);
+        return true;
+      }
+      case '/doctor': {
+        setError(null);
+        const report = await collectDoctorReport({ version: version ?? 'unknown' });
+        setHelpMessage(renderDoctorReport(report));
+        return true;
+      }
+      case '/trust': {
+        setError(null);
+        const canonical = trustProject(process.cwd());
+        await reloadRuntimePolicy(session?.id);
+        setHelpMessage(`Trusted ${canonical}. Project permission rules, hooks and commands are now active.`);
+        return true;
+      }
+      case '/checkpoint': {
+        const notes = getWorkingCheckpoint(session?.id);
+        setHelpMessage(notes
+          ? notes
+          : 'No working checkpoint. The model writes one with update_working_checkpoint; it survives compaction.');
+        return true;
+      }
+      case '/rewind': {
+        setError(null);
+        const steps = Number.parseInt(parts[1] ?? '0', 10);
+        const target = resolveRewind(session?.id ?? 'default', Number.isFinite(steps) ? steps : 0);
+        if (!target) {
+          setError('Nothing to rewind yet.');
+          return true;
+        }
+        let restored = 0;
+        for (const id of checkpointsForRewind(target)) {
+          const result = await runToolCall('undo', { id }, { sessionId: session?.id });
+          if (!result.toLowerCase().startsWith('error')) restored++;
+        }
+        const kept = completionMessages.slice(0, target.messageIndex);
+        setCompletionMessages(kept);
+        if (session) {
+          session.completionMessages = kept;
+          await saveSession(session);
+        }
+        if (session?.id) truncateTurns(session.id, target.turn - 1);
+        clearWorkingCheckpoint(session?.id);
+        setHelpMessage(`Rewound to turn #${target.turn}: restored ${restored} checkpoint(s) and dropped later messages.`);
+        return true;
+      }
       case '/undo': {
         setError(null);
         try {
@@ -2123,6 +2468,8 @@ const AppContent: React.FC<AppContentProps> = ({
     addStatic,
     showToast,
     theme,
+    version,
+    reloadRuntimePolicy,
   ]);
 
   // Shared save path for both entry points (settings row and /theme).
@@ -2298,6 +2645,56 @@ const AppContent: React.FC<AppContentProps> = ({
       }
     }
 
+    // Questions about this runtime never need a model round trip, and they stay
+    // answerable offline.
+    const localAnswer = answerLocally(trimmed, {
+      version: version ?? 'unknown',
+      cwd: process.cwd(),
+      ...(config?.model ? { model: config.model } : {}),
+      ...(config?.provider ? { provider: config.provider } : {}),
+      approvalMode: effectiveApprovalMode,
+      planMode: mode === 'plan',
+    });
+    if (localAnswer !== null) {
+      if (!keepInput) {
+        setInputText('');
+        setInputResetKey((prev) => prev + 1);
+      }
+      printMessageToScrollback(addStatic, 'user', trimmed, theme, columns);
+      printMessageToScrollback(addStatic, 'assistant', localAnswer, theme, columns);
+      setCompletionMessages((prev) => [
+        ...prev,
+        { role: 'user', content: trimmed } as Message,
+        { role: 'assistant', content: localAnswer } as Message,
+      ]);
+      return;
+    }
+
+    // A custom command (`/review src/app.ts`) expands into the prompt that follows.
+    let effectiveInput = trimmed;
+    if (trimmed.startsWith('/')) {
+      const [commandName, ...rest] = trimmed.slice(1).split(/\s+/);
+      const custom = customCommands.find((command) => command.name.toLowerCase() === (commandName ?? '').toLowerCase());
+      if (custom) {
+        if (custom.handler) {
+          // Plugin commands may perform an action and optionally return a
+          // prompt for the agent to process instead.
+          const handled = await custom.handler(rest);
+          if (typeof handled === 'string' && handled.trim()) {
+            effectiveInput = handled.trim();
+          } else {
+            if (!keepInput) {
+              setInputText('');
+              setInputResetKey((key) => key + 1);
+            }
+            return;
+          }
+        } else {
+          effectiveInput = expandCommand(custom, rest.join(' '));
+        }
+      }
+    }
+
     if (!clientRef.current || !config) {
       setError(API_MISSING_HINT);
       return;
@@ -2332,7 +2729,7 @@ const AppContent: React.FC<AppContentProps> = ({
     // Print the user message directly to scrollback so it is selectable/copyable.
     // We still push it into completionMessages for session saving. In plan mode
     // the model gets an explicit instruction it does not see in the transcript.
-    const userText = mode === 'plan' ? `${PLAN_MODE_NOTE}\n\n${trimmed}` : trimmed;
+    const userText = mode === 'plan' ? `${PLAN_MODE_NOTE}\n\n${effectiveInput}` : effectiveInput;
     const userMessage: Message = { role: 'user', content: userText };
     // A /image attachment rides along as a separate user message note.
     const image = pendingImageRef.current;
@@ -2343,11 +2740,20 @@ const AppContent: React.FC<AppContentProps> = ({
     const nextMessages = imageMessage
       ? [...completionMessages, userMessage, imageMessage]
       : [...completionMessages, userMessage];
-    printMessageToScrollback(addStatic, 'user', trimmed, theme);
+    printMessageToScrollback(addStatic, 'user', trimmed, theme, columns);
+
+    // Append-only journal + per-turn manifest: replay and /rewind both need them.
+    const turnSessionId = session?.id ?? 'default';
+    appendJournal(turnSessionId, { type: 'user', content: trimmed.slice(0, 2_000) });
+    beginTurn(turnSessionId, completionMessages.length, trimmed);
+
     setCompletionMessages((prev) =>
       imageMessage ? [...prev, userMessage, imageMessage] : [...prev, userMessage]
     );
     lastSubmitRef.current = trimmed;
+    // Prompt history survives restarts; consecutive duplicates are collapsed.
+    appendHistory(trimmed);
+    historyNavigatorRef.current?.replace(loadHistory());
 
     // Reset assistant message tracker (streamed indices were reset above)
     assistantMessageRef.current = null;
@@ -2370,7 +2776,7 @@ const AppContent: React.FC<AppContentProps> = ({
         clientRef.current,
         config.model,
         nextMessages,
-        trimmed,
+        effectiveInput,
         handleAgentEventWithSubAgents,
         {
           pricing: pricing || undefined,
@@ -2378,6 +2784,8 @@ const AppContent: React.FC<AppContentProps> = ({
           sessionId: session?.id,
           requestDefaults,
           compactThreshold: settings.compactThreshold,
+          hooks: hooksRef.current,
+          toolPolicy,
         }
       );
 
@@ -2387,6 +2795,30 @@ const AppContent: React.FC<AppContentProps> = ({
 
       // Final update to ensure we have the complete message history
       setCompletionMessages(updatedMessages);
+      const finishedTurn = endTurn(turnSessionId);
+      appendJournal(turnSessionId, {
+        type: 'assistant',
+        data: { messages: updatedMessages.length, model: config.model },
+      });
+
+      // Optional finish gate: only after a turn that actually touched files, and
+      // only when enabled, so a normal session never spawns a test suite.
+      const autoverifyEnabled = settings.autoverify === true || process.env.BITACODE_AUTOVERIFY === '1';
+      if (autoverifyEnabled && finishedTurn && finishedTurn.paths.length > 0) {
+        try {
+          const cwd = process.cwd();
+          const checks = await detectChecks({ cwd });
+          if (checks.length > 0) {
+            addToolResultView(addStatic, 'Autoverify', { checks: checks.map((c) => c.name) }, 'running…', theme);
+            const results = await runChecks(checks, { cwd, stopOnFirstFailure: false });
+            const report = renderCheckReport(results, checks);
+            if (results.every((result) => result.status === 'pass')) setHelpMessage(report);
+            else setError(report);
+          }
+        } catch (err: any) {
+          logger.warn('Autoverify failed to run', { error: String(err?.message ?? err) });
+        }
+      }
 
       // Update session
       if (session) {
@@ -2396,7 +2828,7 @@ const AppContent: React.FC<AppContentProps> = ({
         session.provider = config.provider;
         session.model = config.model;
         session.variant = variantId;
-        session.subAgentActivities = subAgentActivities;
+        session.subAgentActivities = subAgentActivitiesRef.current;
         await saveSession(session);
         sessionSavedRef.current = true;
       }
@@ -2424,6 +2856,20 @@ const AppContent: React.FC<AppContentProps> = ({
     [handleSubmit]
   );
 
+  // One tick per second while busy: drives the activity strip's elapsed time
+  // without touching the transcript or the token stream.
+  useEffect(() => {
+    const active = loading || isStreaming || Boolean(activeTool);
+    if (!active) {
+      setBusyStartedAt(null);
+      return;
+    }
+    setBusyStartedAt((prev) => prev ?? Date.now());
+    const timer = setInterval(() => setBusyClock(Date.now()), 1000);
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }, [loading, isStreaming, activeTool]);
+
   // ── Layout and the live conversation tail ────────────────────────────
   // Thinking and the streaming tail are conversation content, not a footer
   // panel. They are appended to the measured transcript flow so they render
@@ -2432,6 +2878,9 @@ const AppContent: React.FC<AppContentProps> = ({
   const layout = resolveLayout(columns, rows);
   const { paletteWindow, visibleTodos, gutter, dense } = layout;
   const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
+  // Grow with the text, but never take more than about a third of the screen:
+  // a long paste scrolls inside the composer instead of eating the transcript.
+  const composerMaxRows = Math.max(1, Math.min(10, Math.floor((rows - 4) / 2)));
 
   // Provider-driven only: the block appears when the model actually streams
   // reasoning, never just because a request is in flight.
@@ -2443,6 +2892,18 @@ const AppContent: React.FC<AppContentProps> = ({
   const todoRows = todoPanelRows(todos, visibleTodos);
   const helpRows = helpMessage ? helpMessage.split('\n').length + 3 : 0;
   const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
+  // Activity indicator: exactly one reserved row above the composer while the
+  // agent is working. Nothing is ever drawn on top of the input.
+  const busy = loading || isStreaming || Boolean(activeTool);
+  const liveActivity: LiveActivity = activeTool
+    ? 'tool'
+    : isStreaming
+      ? 'streaming'
+      : loading
+        ? 'thinking'
+        : 'waiting';
+  const statusRows = busy ? 1 : 0;
+  const busyElapsedMs = busyStartedAt !== null ? Math.max(0, busyClock - busyStartedAt) : 0;
   // Panels that stay under the transcript (todos, help, child agents) reserve
   // their own rows; thinking and streaming live inside the transcript now.
   const area = splitLiveArea(frameHeight, {
@@ -2450,6 +2911,10 @@ const AppContent: React.FC<AppContentProps> = ({
     thinking: 0,
     help: helpRows,
     streaming: subAgentRows,
+    status: statusRows,
+    dense,
+    // Rows added by a grown composer beyond its single-line default.
+    composer: Math.max(0, composerRows - 1),
   });
   const maxStreamRows = Math.max(2, Math.min(MAX_LIVE_STREAM_ROWS, area.transcriptRows));
   const streamingIsDiff = isStreaming && looksLikeDiff(streamingText);
@@ -2522,7 +2987,12 @@ const AppContent: React.FC<AppContentProps> = ({
   // items use the height Ink measured for them.
   const sizedItems = searchMatches.map((item) => ({
     item,
-    rows: liveRowMap.get(item.id) ?? measuredHeights[item.id] ?? fallbackItemRows(item.node),
+    rows: resolveItemRows({
+      live: liveRowMap.get(item.id),
+      node: nodeHeight(item.node),
+      measured: measuredHeights[item.id],
+      fallback: fallbackItemRows(item.node),
+    }),
   }));
   // The transcript is one flow: archived messages followed by the live tail.
   const liveSized = liveItems.map((item) => ({
@@ -2563,6 +3033,13 @@ const AppContent: React.FC<AppContentProps> = ({
     rows: entry.rows,
   }));
   const trimTop = windowSlice.trimTop;
+  // The window is sliced by measured rows, but measurement can lag a frame (a
+  // freshly archived card, a resize). Padding the region to exactly the
+  // viewport height makes the transcript a solid block: nothing from a previous
+  // frame can survive underneath it, and text can never be painted below the
+  // composer.
+  const usedRows = visibleRowItems.reduce((total, entry) => total + entry.rows, 0) - trimTop;
+  const fillerRows = transcriptFillerRows(viewportRows, usedRows);
 
   // Input handlers can fire faster than React re-renders (wheel bursts), so
   // keep the scroll position in a ref and clamp against the latest layout.
@@ -2685,7 +3162,7 @@ const AppContent: React.FC<AppContentProps> = ({
       }
 
       // The theme picker also accepts 1-5 as a direct pick.
-      if (picker === 'theme' && /^[1-5]$/.test(input)) {
+      if (picker === 'theme' && /^[1-9]$/.test(input) && Number(input) <= THEME_NAMES.length) {
         const name = THEME_NAMES[Number(input) - 1];
         if (name) applyTheme(name);
         return;
@@ -2795,6 +3272,8 @@ const AppContent: React.FC<AppContentProps> = ({
     const dismissible =
       !picker && settingsIndex === null && !keyPrompt && !pendingApproval && !pendingAsk;
     if (dismissible) {
+      // Tab inside an @mention belongs to completion, not to the mode toggle.
+      if (key.tab && findMentionToken(inputText, inputText.length)) return;
       // Tab switches build <-> plan mode. PromptInput ignores Tab, so focus and
       // composition are unaffected.
       if (key.tab) {
@@ -2924,10 +3403,13 @@ const AppContent: React.FC<AppContentProps> = ({
         return;
       }
       if (key.upArrow) {
+        // A grown composer owns the arrows: they move the caret between rows.
+        if (composerRows > 1 && !key.shift) return;
         scrollBy(key.shift ? 3 : 1);
         return;
       }
       if (key.downArrow) {
+        if (composerRows > 1 && !key.shift) return;
         scrollBy(-(key.shift ? 3 : 1));
         return;
       }
@@ -3112,7 +3594,7 @@ const AppContent: React.FC<AppContentProps> = ({
       accentGlyph="◈"
       borderStyle="square"
       badge={`${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`}
-      hint="↑↓ move · enter use · 1-5 pick · esc close"
+      hint={`↑↓ move · enter use · 1-${THEME_NAMES.length} pick · esc close`}
       columns={columns}
       compact={compactDialog}
     >
@@ -3234,6 +3716,7 @@ const AppContent: React.FC<AppContentProps> = ({
       flexDirection="column"
       height={dialogActive ? rows : frameHeight}
       backgroundColor={theme.bg}
+      overflow="hidden"
     >
       {/* Scrollable transcript viewport; the input and footer below stay fixed.
           A dialog removes it entirely so the card floats on a clean canvas. */}
@@ -3247,6 +3730,7 @@ const AppContent: React.FC<AppContentProps> = ({
           minHeight={1}
           overflow="hidden"
           flexDirection="column"
+          backgroundColor={theme.bg}
         >
           {restoringTranscript ? (
             <Box flexGrow={1} flexDirection="column" alignItems="center" justifyContent="center">
@@ -3289,6 +3773,10 @@ const AppContent: React.FC<AppContentProps> = ({
                   />
                 )
               )}
+              {/* Solid bottom: blank rows keep the viewport exactly its
+                  measured height, so a shorter frame can never leave rows of
+                  the previous one visible under the composer. */}
+              {fillerRows > 0 && <Box height={fillerRows} flexShrink={0} />}
             </>
           )}
           {/* Off-screen measurement pass. Absolute positioning plus a clipped
@@ -3402,7 +3890,14 @@ const AppContent: React.FC<AppContentProps> = ({
           </>
         )}
         {!picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (
-          <Palette items={commandItems} selected={commandIndex} maxVisible={paletteWindow} />
+          <Palette
+            items={commandItems}
+            selected={commandIndex}
+            maxVisible={paletteWindow}
+            query={inputText.trim()}
+            columns={columns}
+            hint="↑↓ move · tab complete · enter run · esc close"
+          />
         )}
       </Box>
 
@@ -3412,6 +3907,20 @@ const AppContent: React.FC<AppContentProps> = ({
           The gaps above and inside give the input room to breathe. */}
       {initialized && !dialogActive && (
         <Box flexDirection="column" alignItems="center" flexShrink={0}>
+          {busy && !hasCriticalPrompt ? (
+            <Box width={layout.inputWidth} flexShrink={0}>
+              <LiveStatus
+                columns={layout.inputWidth}
+                activity={liveActivity}
+                tool={activeTool}
+                elapsedMs={busyElapsedMs}
+                tps={decodeTps}
+                frame={spinnerFrame}
+                animate={animationsEnabled}
+                gutter={1}
+              />
+            </Box>
+          ) : null}
           <Box
             flexDirection="row"
             width={layout.inputWidth}
@@ -3427,22 +3936,44 @@ const AppContent: React.FC<AppContentProps> = ({
               borderBottom={false}
               borderLeftColor={inputFocused ? theme.accent : theme.border}
               paddingRight={1}
-              height={1}
+              height={composerRows}
               flexShrink={0}
             />
-            <Box flexGrow={1} minWidth={1} paddingRight={2} height={1} overflow="hidden">
+            <Box flexGrow={1} minWidth={1} paddingRight={2} height={composerRows} overflow="hidden">
               <PromptInput
                 key={inputResetKey}
                 value={inputText}
                 onChange={setInputText}
                 onSubmit={submitSafely}
                 isDisabled={picker !== null || settingsIndex !== null || keyPrompt !== null}
-                placeholder="Build anything…"
+                placeholder="Build anything…  (shift+enter newline · @file · /commands)"
                 width={composerWidth}
+                maxRows={composerMaxRows}
+                onRowsChange={setComposerRows}
+                onHistoryPrev={() => {
+                  const nav = historyNavigatorRef.current;
+                  if (!nav) return null;
+                  if (nav.position === -1) nav.rememberDraft(inputText);
+                  return nav.up();
+                }}
+                onHistoryNext={() => historyNavigatorRef.current?.down() ?? null}
+                onPaste={async (text) => {
+                  const summary = await summarizePaste(text, { label: session?.id ?? 'paste' });
+                  return summary.text;
+                }}
+                onCompleteMention={async (value, cursor) => {
+                  const mention = findMentionToken(value, cursor);
+                  if (!mention) return null;
+                  const matches = await listMentionCandidates(process.cwd(), mention.token, 20);
+                  if (matches.length === 0) return null;
+                  const replacement = matches.length === 1 ? matches[0] : commonPrefix(matches);
+                  const applied = applyMention(value, mention, replacement);
+                  return { value: applied.text, cursor: applied.cursor };
+                }}
               />
             </Box>
             {layout.showSubmitHint && (
-              <Box paddingRight={1} height={1} flexShrink={0}>
+              <Box paddingRight={1} height={composerRows} flexShrink={0} alignItems="flex-end">
                 <Text color={theme.dim}>{'↵'}</Text>
               </Box>
             )}
@@ -3459,9 +3990,10 @@ const AppContent: React.FC<AppContentProps> = ({
           modelLabel={modelLabel}
           variantLabel={chosenVariant.label}
           variantColor={chosenVariant.color}
+          tps={decodeTps}
           folder={folderName}
-          busy={loading}
-          tool={activeTool}
+          busy={false}
+          tool={null}
           frame={spinnerFrame}
           compact={!layout.showFullFooter}
           gutter={gutter}

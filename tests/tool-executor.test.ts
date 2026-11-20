@@ -178,7 +178,7 @@ test('mutating tool calls are checkpointed before they run', async () => {
     assert.deepEqual(result, { completed: true, shouldAbort: false });
     const checkpoints = await listCheckpoints(sessionId);
     assert.equal(checkpoints.length, 1);
-    assert.equal(checkpoints[0].path, rel);
+    assert.equal(checkpoints[0].path, file, 'checkpoints are absolute');
     assert.equal(checkpoints[0].content, null);
     assert.equal(checkpoints[0].tool, 'write_file');
     assert.equal(await fsp.readFile(file, 'utf8'), 'hello');
