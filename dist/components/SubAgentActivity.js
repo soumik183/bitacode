@@ -31,6 +31,7 @@ export function upsertSubAgentActivity(list, event, now = Date.now()) {
             toolCalls: tool?.status === 'running' ? (existing.toolCalls ?? 0) + 1 : existing.toolCalls,
             summary: finished && tool ? tool.tool : existing.summary,
             endedAt: finished ? now : existing.endedAt,
+            agentType: event.subAgentType?.trim() ? event.subAgentType : existing.agentType,
         }
         : {
             id,
@@ -40,6 +41,7 @@ export function upsertSubAgentActivity(list, event, now = Date.now()) {
             summary: finished && tool ? tool.tool : undefined,
             startedAt: now,
             endedAt: finished ? now : undefined,
+            agentType: event.subAgentType?.trim() ? event.subAgentType : undefined,
         };
     if (!existing)
         return [...list, next];
@@ -92,5 +94,9 @@ export const SubAgentActivity = ({ activities, columns, now }) => {
     const labelWidth = 10;
     const tailWidth = 18; // "  N tools · 1.2s"
     const taskWidth = Math.max(1, columns - 6 - labelWidth - tailWidth);
-    return (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.muted, bold: true, children: "Sub-agents" }), visible.map((item) => (_jsxs(Box, { flexDirection: "row", children: [_jsx(Text, { color: theme[STATUS_COLOR_KEY[item.status]], children: `${STATUS_ICON[item.status]} ` }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${shortId(item.id)} ` }), _jsx(Text, { color: theme.text, wrap: "truncate-end", children: truncate(item.task, taskWidth) }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}` })] }, item.id)))] }) }) }));
+    return (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexDirection: "row", flexShrink: 1, minWidth: 1, children: [_jsx(Text, { color: theme.muted, bold: true, children: "Sub-agents" }), _jsx(Text, { color: theme.accent, backgroundColor: theme.surface, children: ` ${activities.length} ` })] }), _jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "^g all" }) })] }), visible.map((item) => {
+                        const badge = item.agentType ? `[${item.agentType}]` : '';
+                        const rowTaskWidth = Math.max(1, taskWidth - (badge ? badge.length + 1 : 0));
+                        return (_jsxs(Box, { flexDirection: "row", children: [_jsx(Text, { color: theme[STATUS_COLOR_KEY[item.status]], children: `${STATUS_ICON[item.status]} ` }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${shortId(item.id)} ` }), badge ? _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${badge} ` }) : null, _jsx(Text, { color: theme.text, wrap: "truncate-end", children: truncate(item.task, rowTaskWidth) }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}` })] }, item.id));
+                    })] }) }) }));
 };

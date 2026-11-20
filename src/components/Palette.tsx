@@ -27,6 +27,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/new', description: 'Start a fresh session', category: 'Session', keywords: 'reset clear' },
   { name: '/session', description: 'Open a saved session', category: 'Session', keywords: 'resume history' },
   { name: '/find', description: 'Search the transcript', category: 'Session', keywords: 'grep lookup' },
+  { name: '/subagents', description: 'Browse and inspect child agents', category: 'Session', keywords: 'agents children transcripts' },
+  { name: '/review', description: 'Delegate a code review to a sub-agent', category: 'Tools', keywords: 'audit findings review' },
 
   { name: '/model', description: 'Switch model', category: 'Model', keywords: 'llm ai model' },
   { name: '/variant', description: 'Reasoning effort', category: 'Model', keywords: 'thinking effort' },
@@ -137,7 +139,8 @@ export const Palette: React.FC<PaletteProps> = ({
   const theme = useTheme();
   if (items.length === 0) return null;
   // A name like /session is not worth abbreviating: drop the prose instead.
-  const showDescriptions = (Number.isFinite(columns) ? Number(columns) : 80) >= 44;
+  // The card loses 4 columns to borders/padding, so require that much more room.
+  const showDescriptions = (Number.isFinite(columns) ? Number(columns) : 80) >= 48;
 
   const window = Math.max(3, Math.min(MAX_VISIBLE, maxVisible ?? MAX_VISIBLE));
   const start = Math.max(0, Math.min(selected - Math.floor(window / 2), items.length - window));
@@ -146,7 +149,17 @@ export const Palette: React.FC<PaletteProps> = ({
   const hiddenBelow = Math.max(0, items.length - start - visible.length);
 
   return (
-    <Box flexDirection="column" paddingX={2} marginBottom={1}>
+    <Box
+      flexDirection="column"
+      width="100%"
+      flexShrink={0}
+      borderStyle="round"
+      borderColor={theme.border}
+      backgroundColor={theme.surface}
+      paddingX={1}
+      marginBottom={1}
+      overflow="hidden"
+    >
       {(title || items.length > window) && (
         <Box flexDirection="row" justifyContent="space-between">
           <Text color={theme.dim} wrap="truncate-end">{title ?? 'Matches'}</Text>

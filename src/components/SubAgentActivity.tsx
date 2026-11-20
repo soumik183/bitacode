@@ -16,6 +16,7 @@ export interface SubAgentActivityItem {
   summary?: string;
   startedAt: number;
   endedAt?: number;
+  agentType?: string;
 }
 
 /** Optional fields the sub-agent engine adds to `sub_agent_iteration`. */
@@ -24,6 +25,7 @@ export interface SubAgentEventFields {
   subAgentLabel?: string;
   subAgentStatus?: 'start' | 'done' | 'error';
   subAgentTask?: string;
+  subAgentType?: string;
   subAgentTool?: {
     tool: string;
     status: 'running' | 'done' | 'error';
@@ -69,6 +71,7 @@ export function upsertSubAgentActivity(
         toolCalls: tool?.status === 'running' ? (existing.toolCalls ?? 0) + 1 : existing.toolCalls,
         summary: finished && tool ? tool.tool : existing.summary,
         endedAt: finished ? now : existing.endedAt,
+        agentType: event.subAgentType?.trim() ? event.subAgentType : existing.agentType,
       }
     : {
         id,
@@ -78,6 +81,7 @@ export function upsertSubAgentActivity(
         summary: finished && tool ? tool.tool : undefined,
         startedAt: now,
         endedAt: finished ? now : undefined,
+        agentType: event.subAgentType?.trim() ? event.subAgentType : undefined,
       };
 
   if (!existing) return [...list, next];
@@ -141,15 +145,28 @@ export const SubAgentActivity: React.FC<SubAgentActivityProps> = ({ activities, 
     <Box paddingX={2}>
       <LeftBar color={theme.info}>
         <Box flexDirection="column">
-          <Text color={theme.muted} bold>Sub-agents</Text>
-          {visible.map((item) => (
-            <Box key={item.id} flexDirection="row">
-              <Text color={theme[STATUS_COLOR_KEY[item.status]]}>{`${STATUS_ICON[item.status]} `}</Text>
-              <Text color={theme.dim} wrap="truncate-end">{`${shortId(item.id)} `}</Text>
-              <Text color={theme.text} wrap="truncate-end">{truncate(item.task, taskWidth)}</Text>
-              <Text color={theme.dim} wrap="truncate-end">{`  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}`}</Text>
+          <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+            <Box flexDirection="row" flexShrink={1} minWidth={1}>
+              <Text color={theme.muted} bold>Sub-agents</Text>
+              <Text color={theme.accent} backgroundColor={theme.surface}>{` ${activities.length} `}</Text>
             </Box>
-          ))}
+            <Box flexShrink={0} marginLeft={1}>
+              <Text color={theme.dim} wrap="truncate-end">^g all</Text>
+            </Box>
+          </Box>
+          {visible.map((item) => {
+            const badge = item.agentType ? `[${item.agentType}]` : '';
+            const rowTaskWidth = Math.max(1, taskWidth - (badge ? badge.length + 1 : 0));
+            return (
+              <Box key={item.id} flexDirection="row">
+                <Text color={theme[STATUS_COLOR_KEY[item.status]]}>{`${STATUS_ICON[item.status]} `}</Text>
+                <Text color={theme.dim} wrap="truncate-end">{`${shortId(item.id)} `}</Text>
+                {badge ? <Text color={theme.accent} wrap="truncate-end">{`${badge} `}</Text> : null}
+                <Text color={theme.text} wrap="truncate-end">{truncate(item.task, rowTaskWidth)}</Text>
+                <Text color={theme.dim} wrap="truncate-end">{`  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}`}</Text>
+              </Box>
+            );
+          })}
         </Box>
       </LeftBar>
     </Box>

@@ -57,7 +57,7 @@ export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, varia
     if (!compact && show('cost') && totalCost > 0) {
         rightParts.push(_jsx(Text, { color: theme.dim, children: ` · $${totalCost.toFixed(2)}` }, "cost"));
     }
-    return (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: show('tool') && busy ? (_jsxs(_Fragment, { children: [wave(frame)
+    return (_jsxs(Box, { flexDirection: "row", width: "100%", backgroundColor: theme.bg, justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: show('tool') && busy ? (_jsxs(_Fragment, { children: [wave(frame)
                             .split('')
                             .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] })), !tool && tps && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Text, { color: theme.muted, children: tps })] }))] })) : show('folder') ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) : null }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsx(Text, { wrap: "truncate-end", children: rightParts }) })] }));
 };

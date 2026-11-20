@@ -20,12 +20,14 @@ export interface MentionToken {
   end: number;
 }
 
-const SKIP_DIRECTORIES = new Set([
+export const SKIP_DIRECTORIES = new Set([
   'node_modules', '.git', 'dist', 'build', 'out', '.next', '.cache',
   'coverage', 'target', 'vendor', '.venv', 'venv', '__pycache__',
 ]);
 
 const MAX_ENTRIES = 400;
+const MAX_SEARCH_DEPTH = 3;
+const MAX_SEARCH_ENTRIES = 600;
 
 /** Locate the `@…` token that the cursor is inside, if any. */
 export function findMentionToken(text: string, cursor: number): MentionToken | null {
@@ -82,6 +84,105 @@ export async function listMentionCandidates(
   }
   matches.sort((a, b) => Number(b.endsWith('/')) - Number(a.endsWith('/')) || a.localeCompare(b));
   return matches.slice(0, limit);
+}
+
+export interface MentionFileMatch {
+  relativePath: string;
+  isDirectory: boolean;
+  name: string;
+  score: number;
+}
+
+function isSubsequence(needle: string, haystack: string): boolean {
+  let index = 0;
+  for (const char of haystack) {
+    if (char === needle[index]) index++;
+    if (index === needle.length) return true;
+  }
+  return needle.length === 0;
+}
+
+function scoreMentionMatch(name: string, relativePath: string, query: string): number {
+  const lowerName = name.toLowerCase();
+  const lowerPath = relativePath.toLowerCase();
+  if (lowerName.startsWith(query)) return 4;
+  if (lowerName.includes(query)) return 3;
+  if (lowerPath.includes(query)) return 2;
+  if (isSubsequence(query, lowerPath)) return 1;
+  return 0;
+}
+
+/**
+ * Bounded, fuzzy file search for the `@` picker. Empty queries list only the
+ * immediate children of `cwd`; non-empty queries rank deeper matches by how
+ * well the query fits the base name and relative path.
+ */
+export async function searchMentionFiles(
+  cwd: string,
+  query: string,
+  limit = 30,
+): Promise<MentionFileMatch[]> {
+  const root = path.resolve(cwd);
+  const normalized = query.trim().replace(/^\.\//, '');
+  const lowerQuery = normalized.toLowerCase();
+  const allowDot = lowerQuery.startsWith('.');
+  const matches: MentionFileMatch[] = [];
+  const cap = Math.max(0, limit);
+
+  const record = (entry: Dirent, relativeDir: string, score: number): void => {
+    matches.push({
+      relativePath: path.join(relativeDir, entry.name).split(path.sep).join('/'),
+      isDirectory: entry.isDirectory(),
+      name: entry.name,
+      score,
+    });
+  };
+
+  if (!lowerQuery) {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') && !allowDot) continue;
+      if (entry.isDirectory() && SKIP_DIRECTORIES.has(entry.name)) continue;
+      record(entry, '', 0);
+    }
+    matches.sort((a, b) =>
+      Number(b.isDirectory) - Number(a.isDirectory) ||
+      a.relativePath.localeCompare(b.relativePath));
+    return matches.slice(0, cap);
+  }
+
+  let visited = 0;
+  const walk = async (directory: string, relativeDir: string, depth: number): Promise<void> => {
+    if (depth > MAX_SEARCH_DEPTH || visited >= MAX_SEARCH_ENTRIES) return;
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (visited >= MAX_SEARCH_ENTRIES) return;
+      visited++;
+      if (entry.name.startsWith('.') && !allowDot) continue;
+      const isDirectory = entry.isDirectory();
+      if (isDirectory && SKIP_DIRECTORIES.has(entry.name)) continue;
+      const nextRelative = path.join(relativeDir, entry.name);
+      const score = scoreMentionMatch(entry.name, nextRelative.split(path.sep).join('/'), lowerQuery);
+      if (score > 0) record(entry, relativeDir, score);
+      if (isDirectory && depth < MAX_SEARCH_DEPTH) {
+        await walk(path.join(directory, entry.name), nextRelative, depth + 1);
+      }
+    }
+  };
+
+  await walk(root, '', 1);
+  matches.sort((a, b) => b.score - a.score || a.relativePath.localeCompare(b.relativePath));
+  return matches.slice(0, cap);
 }
 
 /** Replace the mention token with a completed value, returning the new cursor. */

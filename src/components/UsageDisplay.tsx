@@ -105,7 +105,15 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   }
 
   return (
-    <Box flexDirection="row" justifyContent="space-between" paddingX={gutter} marginBottom={dense ? 0 : 1} flexShrink={0}>
+    <Box
+      flexDirection="row"
+      width="100%"
+      backgroundColor={theme.bg}
+      justifyContent="space-between"
+      paddingX={gutter}
+      marginBottom={dense ? 0 : 1}
+      flexShrink={0}
+    >
       <Box flexShrink={1} minWidth={0} overflow="hidden" flexDirection="row">
         {show('tool') && busy ? (
           <>

@@ -2,15 +2,17 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { CodeBlock } from '../components/CodeBlock.js';
 import { DiffView, DIFF_PREVIEW_LINES } from '../components/DiffView.js';
-import { ReadFileView, READ_PREVIEW_LINES } from '../components/ReadFileView.js';
+import { ReadSummaryView } from '../components/ReadSummaryView.js';
 import { ShellView } from '../components/ShellView.js';
 import { getTheme } from '../theme.js';
 import { detectLanguage } from './code-highlight.js';
-import { annotateDiff, displayFilePath, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
+import { annotateDiff, displayFilePath, describeRead, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
 import { parseShellResult } from './shell-result.js';
 import { formatToolActivity } from './tool-display.js';
 import { isNotification } from '../tools/notify.js';
 import { parseProgress } from '../tools/progress.js';
+import { WebSearchView, WebSearchErrorView } from '../components/WebSearchView.js';
+import { parseWebSearchResult } from './web-search-result.js';
 function parseArgs(args) {
     if (!args)
         return null;
@@ -72,6 +74,13 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
         addStatic(_jsxs(Box, { paddingX: 2, marginBottom: 1, children: [_jsx(Text, { color: palette.accent, bold: true, children: `⏵ ${bar} ${progressInfo.percent}%` }), progressInfo.label ? _jsxs(Text, { color: palette.muted, children: [" ", progressInfo.label] }) : null] }));
         return;
     }
+    // Web search has its own compact card: only URLs, snippet text and related
+    // queries are shown to the human. The model still receives the full payload.
+    if (toolName === 'web_search') {
+        const payload = parseWebSearchResult(rawResult);
+        addStatic(payload ? _jsx(WebSearchView, { payload: payload }) : _jsx(WebSearchErrorView, { message: rawResult }));
+        return;
+    }
     const fileDiff = parseFileMutationDiff(toolName, toolArgs, rawResult);
     if (fileDiff) {
         const collapsed = _jsx(DiffView, { ...fileDiff });
@@ -82,12 +91,17 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
         addStatic(collapsed, truncated ? { collapsed, expanded } : undefined);
         return;
     }
-    const fileRead = parseFileReadResult(toolName, toolArgs, rawResult);
-    if (fileRead) {
-        const totalLines = fileRead.sections.reduce((total, section) => total + section.lines.length, 0);
-        const collapsed = _jsx(ReadFileView, { ...fileRead });
-        const expanded = _jsx(ReadFileView, { ...fileRead, expanded: true });
-        addStatic(collapsed, totalLines > READ_PREVIEW_LINES ? { collapsed, expanded } : undefined);
+    // Reads render as a clean one-line summary: relative path + range read (or
+    // the total when the whole file was read). No boxed code preview.
+    if (toolName === 'read_file') {
+        const fileRead = parseFileReadResult(toolName, toolArgs, rawResult);
+        if (fileRead) {
+            addStatic(_jsx(ReadSummaryView, { summary: describeRead(fileRead) }));
+            return;
+        }
+        const hint = codeHint(toolArgs);
+        const message = rawResult.replace(/^(?:Error|File not found|Operation cancelled)\b:?\s*/i, '').trim();
+        addStatic(_jsx(ReadSummaryView, { summary: { filePath: hint ? displayFilePath(hint) : 'file' }, error: message || 'Could not read file' }));
         return;
     }
     const shell = parseShellResult(toolName, toolArgs, rawResult);

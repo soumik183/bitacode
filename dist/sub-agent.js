@@ -48,7 +48,7 @@ export const subAgentTool = {
                 },
                 agent_type: {
                     type: 'string',
-                    enum: ['Explore', 'Plan', 'Bash', 'general-purpose'],
+                    enum: ['Explore', 'Plan', 'Bash', 'Review', 'general-purpose'],
                     description: 'Specialization for the sub-agent. Defaults to general-purpose.',
                 },
                 thoroughness: {
@@ -61,6 +61,29 @@ export const subAgentTool = {
         },
     },
 };
+/** Extra instructions appended to the system prompt for `Review` sub-agents. */
+export const SUB_AGENT_REVIEW_MODE = `## Review Mode
+
+You are a code reviewer. Review the code and report what you find.
+Return findings as a concise list with severity (critical/high/medium/low) and file:line references.
+Prefer read-only tools: read_file, glob, grep, list_directory, and bash for git diff.
+Do NOT edit files unless the task explicitly asks you to.
+Do NOT ask the user questions — work autonomously with the tools available.
+End with a short verdict summarizing the overall assessment.`;
+/**
+ * Build a sub-agent system prompt: the base prompt plus Sub-Agent Mode,
+ * with an extra review block when the child is a `Review` agent. Pure.
+ */
+export function buildSubAgentSystemPrompt(baseSystemPrompt, agentType) {
+    const prompt = `${baseSystemPrompt}
+
+## Sub-Agent Mode
+
+You are running as a sub-agent. You were given a specific task by the parent agent.
+Complete the task thoroughly and return a clear, concise summary of what you did and found.
+Do NOT ask the user questions — work autonomously with the tools available.`;
+    return agentType === 'Review' ? `${prompt}\n\n${SUB_AGENT_REVIEW_MODE}` : prompt;
+}
 /**
  * Run `tasks` with bounded concurrency using `Promise.allSettled`.
  *
@@ -132,7 +155,7 @@ async function runSubAgentOnce(client, model, task, maxIterations, requestDefaul
         ? Math.min(Math.max(Math.floor(requestedIterations), 1), 500)
         : 500;
     // These are advisory only: validate, log unknowns, and apply just the quick budget.
-    const validTypes = ['Explore', 'Plan', 'Bash', 'general-purpose'];
+    const validTypes = ['Explore', 'Plan', 'Bash', 'Review', 'general-purpose'];
     if (agentType != null && !validTypes.includes(agentType)) {
         logger.warn('Sub-agent ignoring unknown agent_type', { agentType });
     }
@@ -148,13 +171,7 @@ async function runSubAgentOnce(client, model, task, maxIterations, requestDefaul
     const startedAt = Date.now();
     const subAgentSessionId = `sub-agent-${crypto.randomUUID()}`;
     const systemPrompt = await generateSystemPrompt();
-    const subSystemPrompt = `${systemPrompt}
-
-## Sub-Agent Mode
-
-You are running as a sub-agent. You were given a specific task by the parent agent.
-Complete the task thoroughly and return a clear, concise summary of what you did and found.
-Do NOT ask the user questions — work autonomously with the tools available.`;
+    const subSystemPrompt = buildSubAgentSystemPrompt(systemPrompt, agentType);
     const messages = [
         { role: 'system', content: subSystemPrompt },
         { role: 'user', content: task },
@@ -305,6 +322,7 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
                         const result = await handleToolCall(name, args, { sessionId: subAgentSessionId, abortSignal });
                         messages.push({
                             role: 'tool',
+                            name,
                             tool_call_id: toolCall.id,
                             content: result,
                         });
@@ -314,6 +332,7 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
                         const msg = err instanceof Error ? err.message : String(err);
                         messages.push({
                             role: 'tool',
+                            name,
                             tool_call_id: toolCall.id,
                             content: `Error: ${msg}`,
                         });
@@ -357,6 +376,7 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
                     id: subAgentSessionId,
                     task,
                     label,
+                    agentType,
                     status,
                     startedAt,
                     endedAt: Date.now(),
@@ -403,12 +423,13 @@ export async function runSubAgent(client, model, task, maxIterations = 500, requ
         onProgress?.({
             tool: 'sub_agent', status: 'running', iteration: 0,
             subAgentId: id, subAgentLabel: label, subAgentStatus: 'start', subAgentTask: childTask,
+            subAgentType: agentType,
         });
         return runSubAgentOnce(client, model, childTask, perChildIterations, requestDefaults, childProgress, abortSignal, pricing, agentType, thoroughness, sessionId, label).then((result) => {
             onProgress?.({
                 tool: 'sub_agent', status: 'done', iteration: 0,
                 subAgentId: id, subAgentLabel: label, subAgentStatus: 'done',
-                subAgentTask: childTask, args: { ...result.usage },
+                subAgentTask: childTask, args: { ...result.usage }, subAgentType: agentType,
             });
             return result;
         }, (err) => {
@@ -416,7 +437,7 @@ export async function runSubAgent(client, model, task, maxIterations = 500, requ
                 tool: 'sub_agent', status: 'error', iteration: 0,
                 subAgentId: id, subAgentLabel: label, subAgentStatus: 'error',
                 subAgentTask: childTask,
-                args: { error: err instanceof Error ? err.message : String(err) },
+                args: { error: err instanceof Error ? err.message : String(err) }, subAgentType: agentType,
             });
             throw err;
         });

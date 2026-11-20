@@ -14,6 +14,8 @@ export const SLASH_COMMANDS = [
     { name: '/new', description: 'Start a fresh session', category: 'Session', keywords: 'reset clear' },
     { name: '/session', description: 'Open a saved session', category: 'Session', keywords: 'resume history' },
     { name: '/find', description: 'Search the transcript', category: 'Session', keywords: 'grep lookup' },
+    { name: '/subagents', description: 'Browse and inspect child agents', category: 'Session', keywords: 'agents children transcripts' },
+    { name: '/review', description: 'Delegate a code review to a sub-agent', category: 'Tools', keywords: 'audit findings review' },
     { name: '/model', description: 'Switch model', category: 'Model', keywords: 'llm ai model' },
     { name: '/variant', description: 'Reasoning effort', category: 'Model', keywords: 'thinking effort' },
     { name: '/provider', description: 'Switch provider or add a key', category: 'Model', keywords: 'api key openai anthropic' },
@@ -78,13 +80,14 @@ export const Palette = ({ title, items, selected, hint, maxVisible, query, colum
     if (items.length === 0)
         return null;
     // A name like /session is not worth abbreviating: drop the prose instead.
-    const showDescriptions = (Number.isFinite(columns) ? Number(columns) : 80) >= 44;
+    // The card loses 4 columns to borders/padding, so require that much more room.
+    const showDescriptions = (Number.isFinite(columns) ? Number(columns) : 80) >= 48;
     const window = Math.max(3, Math.min(MAX_VISIBLE, maxVisible ?? MAX_VISIBLE));
     const start = Math.max(0, Math.min(selected - Math.floor(window / 2), items.length - window));
     const visible = items.slice(start, start + window);
     const hiddenAbove = start;
     const hiddenBelow = Math.max(0, items.length - start - visible.length);
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [(title || items.length > window) && (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", children: [_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: title ?? 'Matches' }), _jsx(Text, { color: theme.dim, children: `${selected + 1}/${items.length}` })] })), hiddenAbove > 0 && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ↑ ${hiddenAbove} more` })), visible.map((item, i) => {
+    return (_jsxs(Box, { flexDirection: "column", width: "100%", flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, overflow: "hidden", children: [(title || items.length > window) && (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", children: [_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: title ?? 'Matches' }), _jsx(Text, { color: theme.dim, children: `${selected + 1}/${items.length}` })] })), hiddenAbove > 0 && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ↑ ${hiddenAbove} more` })), visible.map((item, i) => {
                 const index = start + i;
                 const active = index === selected;
                 const previous = index > 0 ? items[index - 1] : undefined;

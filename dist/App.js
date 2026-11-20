@@ -34,6 +34,8 @@ import { ThinkingBlock, thinkingBlockHeight } from './components/ThinkingBlock.j
 import { ThinkingArchive } from './components/ThinkingArchive.js';
 import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
 import { SubAgentActivity, subAgentActivityRows, subAgentActivitySummary, upsertSubAgentActivity, } from './components/SubAgentActivity.js';
+import { SubAgentDetail } from './components/SubAgentDetail.js';
+import { listSubAgentRuns, loadSubAgentRun, } from './utils/subagent-store.js';
 import { ThemeProvider, useTheme, THEME_NAMES, themes } from './theme/index.js';
 import { loadSettings, saveSettings, STATUS_LINE_ITEMS, } from './settings.js';
 import { VARIANTS } from './variants.js';
@@ -51,6 +53,7 @@ import { loadPlugins } from './utils/plugins.js';
 import { loadHistory, appendHistory, HistoryNavigator } from './utils/input-history.js';
 import { summarizePaste } from './utils/paste.js';
 import { findMentionToken, applyMention, listMentionCandidates } from './utils/mentions.js';
+import { collectMentionCandidates } from './utils/mention-candidates.js';
 import { commonPrefix } from './utils/completion.js';
 import { detectChecks, runChecks, renderCheckReport } from './utils/autoverify.js';
 import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
@@ -569,6 +572,13 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const [searchQuery, setSearchQuery] = useState(null);
     // Last submitted user text, used by Ctrl+R (retry) and Alt+Up (edit).
     const lastSubmitRef = useRef(null);
+    // Ink can keep an older prop closure in PromptInput's input handler. Read the
+    // live draft through a ref so palette/history routing always sees '/' when it
+    // is actually on screen.
+    const inputTextRef = useRef(inputText);
+    inputTextRef.current = inputText;
+    const composerRowsRef = useRef(composerRows);
+    composerRowsRef.current = composerRows;
     // Pending image data URL from /image, attached to the next user message.
     const pendingImageRef = useRef(null);
     // Most recent tool call, used to enrich approval details with a file path.
@@ -624,6 +634,10 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const subAgentActivitiesRef = useRef([]);
     subAgentActivitiesRef.current = subAgentActivities;
     const [showSubAgentPanel, setShowSubAgentPanel] = useState(false);
+    // Saved child transcripts: list picker + the one currently being inspected.
+    const [subagentRuns, setSubagentRuns] = useState([]);
+    const [subagentLoading, setSubagentLoading] = useState(false);
+    const [subagentDetail, setSubagentDetail] = useState(null);
     // Input reset key — incremented on submit to force TextInput remount and clear
     const [inputResetKey, setInputResetKey] = useState(0);
     // Palette state: slash-command list, provider/model/variant pickers
@@ -1273,6 +1287,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         section: cmd.category,
         meta: commandMeta(cmd.name),
     }));
+    const commandItemsRef = useRef(commandItems);
+    commandItemsRef.current = commandItems;
     const providerItems = getAllProviders().map((provider) => {
         const keyReady = resolveApiKey({ provider: provider.id }) !== null;
         const modelCount = remoteModels[provider.id]?.length || provider.models.length;
@@ -1704,6 +1720,38 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setSessionsLoading(false);
         }
     }, [session?.id]);
+    /** Open the list of saved child transcripts for the active session. */
+    const openSubagents = useCallback(async () => {
+        setHelpMessage(null);
+        setSettingsIndex(null);
+        setSubagentDetail(null);
+        setSubagentLoading(true);
+        setSubagentRuns([]);
+        setPickerIndex(0);
+        setPicker('subagents');
+        try {
+            const runs = await listSubAgentRuns(session?.id ?? '');
+            setSubagentRuns(runs);
+            setPickerIndex(0);
+        }
+        catch (err) {
+            setError(`Could not list sub-agents: ${err?.message ?? String(err)}`);
+        }
+        finally {
+            setSubagentLoading(false);
+        }
+    }, [session?.id]);
+    /** Files in the current folder + fuzzy matches + installed skills for `@`. */
+    const provideMentionCandidates = useCallback(async (token) => collectMentionCandidates(process.cwd(), token, { limit: 30 }), []);
+    const openSubagentDetail = useCallback(async (id) => {
+        if (!session?.id)
+            return;
+        const record = await loadSubAgentRun(session.id, id);
+        if (record)
+            setSubagentDetail(record);
+        else
+            setError('That sub-agent transcript is no longer available.');
+    }, [session?.id]);
     const deleteSavedSession = useCallback(async (id, refreshPicker = false) => {
         if (!id)
             return;
@@ -1891,6 +1939,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             case '/exit':
                 exitWithSave();
                 return true;
+            case '/subagents':
+                void openSubagents();
+                return true;
+            case '/review': {
+                const target = parts.slice(1).join(' ').trim();
+                const prompt = target
+                    ? `Use the sub_agent tool with agent_type="Review" to review: ${target}. Report findings with severity and file:line references.`
+                    : 'Use the sub_agent tool with agent_type="Review" to review the current uncommitted changes (git diff) and recent work in this repository. Report findings with severity and file:line references.';
+                setHelpMessage(null);
+                setInputText(prompt);
+                setInputResetKey((prev) => prev + 1);
+                showToast('Review delegation ready · press enter to run');
+                return true;
+            }
             case '/help':
                 setHelpMessage(buildHelpText(effectiveApprovalMode));
                 return true;
@@ -2110,6 +2172,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         startNewSession,
         switchSession,
         openSessionPicker,
+        openSubagents,
         deleteSavedSession,
         session?.id,
         addStatic,
@@ -2128,6 +2191,12 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         setSettingsIndex(null);
     }, [settings, setSettings, showToast]);
     const applyPicker = useCallback(() => {
+        if (picker === 'subagents') {
+            const run = subagentRuns[clampIndex(pickerIndex, subagentRuns.length)];
+            if (run)
+                void openSubagentDetail(run.id);
+            return;
+        }
         if (picker === 'theme') {
             const name = THEME_NAMES[clampIndex(pickerIndex, THEME_NAMES.length)];
             if (name)
@@ -2240,6 +2309,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     }, [
         picker,
         pickerIndex,
+        subagentRuns,
+        openSubagentDetail,
         modelItems,
         selectedModelIndex,
         providerItems,
@@ -2511,6 +2582,21 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const todoRows = todoPanelRows(todos, visibleTodos);
     const helpRows = helpMessage ? helpMessage.split('\n').length + 3 : 0;
     const subAgentRows = showSubAgentPanel ? subAgentActivityRows(subAgentActivities) : 0;
+    // Dialogue rows for the saved-transcript picker. Status colours come from the
+    // active palette so the list matches every other themed surface.
+    const subagentItems = subagentRuns.map((run) => {
+        const icon = run.status === 'done' ? '✓' : run.status === 'error' ? '✗' : '■';
+        const color = run.status === 'done' ? theme.success : run.status === 'error' ? theme.error : theme.info;
+        const elapsed = Math.max(0, (run.endedAt ?? Date.now()) - run.startedAt);
+        const duration = elapsed < 1000 ? `${elapsed}ms` : `${(elapsed / 1000).toFixed(1)}s`;
+        const type = run.agentType ? `[${run.agentType}] ` : '';
+        return {
+            id: run.id,
+            label: `${icon} ${type}${run.task}`,
+            description: `${run.messageCount} msgs · ${duration} · ${new Date(run.startedAt).toLocaleTimeString()}`,
+            color,
+        };
+    });
     // Activity indicator: exactly one reserved row above the composer while the
     // agent is working. Nothing is ever drawn on top of the input.
     const busy = loading || isStreaming || Boolean(activeTool);
@@ -2662,6 +2748,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             exitWithSave();
             return;
         }
+        // The transcript inspector owns its own keys (arrows/page/s/esc) while open.
+        if (subagentDetail)
+            return;
         // An approval owns the keyboard: Select handles arrows/enter and the prompt
         // handles 1/2/3/Esc. Nothing below may scroll, submit or abort underneath it.
         if (pendingApproval)
@@ -2693,8 +2782,30 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
         // Model/variant pickers: arrows move, enter applies, esc cancels.
         if (picker) {
-            if (isMouseReport(input))
+            if (isMouseReport(input)) {
+                // Click a row in the sub-agent list to inspect it. The card is centred
+                // in the live area, so map the terminal row back to the dialog's list.
+                if (picker === 'subagents' && subagentRuns.length > 0 && rows > 10) {
+                    const press = getLeftMousePress(input);
+                    if (press) {
+                        const windowSize = Math.max(3, Math.min(8, paletteWindow));
+                        const start = Math.max(0, Math.min(pickerIndex - Math.floor(windowSize / 2), subagentRuns.length - windowSize));
+                        const visibleCount = Math.min(windowSize, subagentRuns.length - start);
+                        const hiddenAbove = start > 0 ? 1 : 0;
+                        const hiddenBelow = subagentRuns.length - start - visibleCount > 0 ? 1 : 0;
+                        const counter = subagentRuns.length > windowSize ? 1 : 0;
+                        const cardHeight = 6 + visibleCount + hiddenAbove + hiddenBelow + counter;
+                        const cardTop = rows >= 14 ? Math.max(0, Math.floor((rows - cardHeight) / 2)) : 0;
+                        const firstRowY = cardTop + 3 + hiddenAbove;
+                        const clicked = start + (press.y - 1 - firstRowY);
+                        if (clicked >= start && clicked < start + visibleCount) {
+                            setPickerIndex(clicked);
+                            void openSubagentDetail(subagentRuns[clicked].id);
+                        }
+                    }
+                }
                 return;
+            }
             if (picker === 'session') {
                 if (pendingSessionDelete) {
                     const answer = input.toLowerCase();
@@ -2748,11 +2859,13 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     ? modelItems.length
                     : picker === 'session'
                         ? sessionItems.length
-                        : picker === 'theme'
-                            ? THEME_NAMES.length
-                            : picker === 'statusLine'
-                                ? STATUS_LINE_ITEMS.length
-                                : variantItems.length;
+                        : picker === 'subagents'
+                            ? subagentRuns.length
+                            : picker === 'theme'
+                                ? THEME_NAMES.length
+                                : picker === 'statusLine'
+                                    ? STATUS_LINE_ITEMS.length
+                                    : variantItems.length;
             if (count > 0) {
                 if (key.upArrow) {
                     setPickerIndex((index) => (index - 1 + count) % count);
@@ -2780,6 +2893,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 setModelsLoading(false);
                 setSessionItems([]);
                 setSessionsLoading(false);
+                setSubagentRuns([]);
+                setSubagentDetail(null);
                 setPendingSessionDelete(null);
             }
             return;
@@ -2907,6 +3022,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     case 's':
                         void openSessionPicker();
                         return;
+                    case 'g':
+                        void handleSlashCommand('/subagents');
+                        return;
                     case 'm':
                         void handleSlashCommand('/model');
                         return;
@@ -2967,7 +3085,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
         // Scroll the transcript without moving the input/footer. Arrows also work
         // when Termux sends them for touch swipes.
-        if (!picker && settingsIndex === null && !pendingApproval && !pendingAsk && !(inputText.startsWith('/') && commandItems.length > 0)) {
+        if (!picker && settingsIndex === null && !pendingApproval && !pendingAsk && !(inputTextRef.current.startsWith('/') && commandItems.length > 0)) {
             const pageRows = Math.max(1, Math.floor(viewportRows / 2));
             if (key.pageUp || (key.ctrl && input === 'b')) {
                 scrollBy(pageRows);
@@ -2983,19 +3101,6 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             }
             if (key.end) {
                 scrollTo(0);
-                return;
-            }
-            if (key.upArrow) {
-                // A grown composer owns the arrows: they move the caret between rows.
-                if (composerRows > 1 && !key.shift)
-                    return;
-                scrollBy(key.shift ? 3 : 1);
-                return;
-            }
-            if (key.downArrow) {
-                if (composerRows > 1 && !key.shift)
-                    return;
-                scrollBy(-(key.shift ? 3 : 1));
                 return;
             }
         }
@@ -3016,25 +3121,58 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setInputResetKey((prev) => prev + 1);
             return;
         }
-        if (inputText.startsWith('/') && commandItems.length > 0) {
-            if (key.upArrow) {
-                setCommandIndex((index) => (index - 1 + commandItems.length) % commandItems.length);
-                return;
-            }
-            if (key.downArrow) {
-                setCommandIndex((index) => (index + 1) % commandItems.length);
-                return;
-            }
-        }
         if (key.escape && loading && abortControllerRef.current) {
             // Abort the current completion
             abortControllerRef.current.abort();
         }
     });
+    // Slash-palette navigation lives in its own ref-based handler. A single
+    // dedicated listener avoids the prompt-history path consuming Up/Down, and
+    // the refs keep it correct even when Ink delivers an older prop closure.
+    useInput((_input, key) => {
+        const count = commandItemsRef.current.length;
+        if (inputTextRef.current.startsWith('/') && count > 0) {
+            if (key.upArrow)
+                setCommandIndex((index) => (index - 1 + count) % count);
+            else if (key.downArrow)
+                setCommandIndex((index) => (index + 1) % count);
+            return;
+        }
+        if (!key.upArrow && !key.downArrow)
+            return;
+        // A grown composer owns the arrows for caret movement; history only walks
+        // on a single-row draft, exactly like the previous PromptInput behaviour.
+        if (composerRowsRef.current > 1 && !key.shift)
+            return;
+        const nav = historyNavigatorRef.current;
+        if (!nav)
+            return;
+        if (key.upArrow) {
+            if (nav.position === -1)
+                nav.rememberDraft(inputTextRef.current);
+            const previous = nav.up();
+            if (previous !== null) {
+                setInputText(previous);
+                setInputResetKey((value) => value + 1);
+            }
+            else {
+                scrollBy(key.shift ? 3 : 1);
+            }
+        }
+        else {
+            const next = nav.down();
+            if (next !== null) {
+                setInputText(next);
+                setInputResetKey((value) => value + 1);
+            }
+            else {
+                scrollBy(-(key.shift ? 3 : 1));
+            }
+        }
+    });
     // Fresh filter results start at the first row.
-    useEffect(() => {
-        setCommandIndex(0);
-    }, [inputText]);
+    // Reset the palette cursor synchronously with typing. An effect would run
+    // after a following arrow key and silently undo the selection change.
     const chosenVariant = VARIANTS.find((item) => item.id === variantId) ?? VARIANTS[0];
     const remoteModelLabel = config
         ? remoteModels[config.provider]?.find((item) => item.id === config.model)?.label
@@ -3067,7 +3205,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // One dialog owns the screen for any picker or prompt. The card is centred
     // horizontally and anchored to the upper part of the page, so it reads as a
     // floating window instead of a footer that happens to be above the composer.
-    const dialogActive = picker !== null ||
+    const dialogActive = subagentDetail !== null ||
+        picker !== null ||
         settingsIndex !== null ||
         keyPrompt !== null ||
         pendingApproval !== null ||
@@ -3091,7 +3230,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         : modelSearch.trim()
             ? `No models match "${modelSearch}".`
             : modelNotice ?? 'No models available.';
-    const dialog = pendingApproval && approvalRequest ? (_jsx(Dialog, { title: "Approval required", badge: pendingApproval.request.type.replace(/_/g, ' '), hint: "\u2191\u2193 move \u00B7 enter confirm \u00B7 1/2/3 pick \u00B7 esc reject", columns: columns, compact: compactDialog, children: _jsx(ApprovalPrompt, { request: approvalRequest, columns: compactDialog ? columns : dialogInner + 2, compact: dense || compactDialog, rows: rows, embedded: true, onRespond: (response) => {
+    const dialog = subagentDetail ? (_jsx(SubAgentDetail, { record: subagentDetail, columns: columns, height: Math.max(8, rows - 2), onBack: () => setSubagentDetail(null) })) : pendingApproval && approvalRequest ? (_jsx(Dialog, { title: "Approval required", badge: pendingApproval.request.type.replace(/_/g, ' '), hint: "\u2191\u2193 move \u00B7 enter confirm \u00B7 1/2/3 pick \u00B7 esc reject", columns: columns, compact: compactDialog, children: _jsx(ApprovalPrompt, { request: approvalRequest, columns: compactDialog ? columns : dialogInner + 2, compact: dense || compactDialog, rows: rows, embedded: true, onRespond: (response) => {
                 pendingApproval.resolve(response);
                 setPendingApproval(null);
             } }) })) : pendingAsk ? (_jsx(Dialog, { title: "Agent question", badge: pendingAsk.request.questions.length > 1
@@ -3103,7 +3242,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
                     : modelNotice })), _jsx(DialogList, { items: modelItems, selected: selectedModelIndex, maxVisible: paletteWindow, empty: modelEmptyMessage, compact: compactDialog })] })) : picker === 'provider' ? (_jsx(Dialog, { title: "Select provider", badge: `${providerItems.length} available`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: providerItems, selected: clampIndex(pickerIndex, providerItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'session' ? (_jsx(Dialog, { title: pendingSessionDelete ? 'Delete session?' : 'Select session', badge: pendingSessionDelete?.label, hint: pendingSessionDelete
             ? 'y delete permanently · n cancel'
-            : '↑↓ move · enter resume · d delete · esc close', columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: sessionItems, selected: clampIndex(pickerIndex, sessionItems.length), maxVisible: paletteWindow, empty: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.', compact: compactDialog }) })) : picker === 'variant' ? (_jsx(Dialog, { title: "Reasoning variant", badge: `${variantItems.length} options`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'statusLine' ? (_jsx(Dialog, { title: "Status line", badge: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length} shown`, hint: "\u2191\u2193 move \u00B7 enter toggle \u00B7 esc back", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: statusLineItems, selected: clampIndex(pickerIndex, statusLineItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : null;
+            : '↑↓ move · enter resume · d delete · esc close', columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: sessionItems, selected: clampIndex(pickerIndex, sessionItems.length), maxVisible: paletteWindow, empty: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.', compact: compactDialog }) })) : picker === 'subagents' ? (_jsx(Dialog, { title: "Sub-agents", badge: `${subagentItems.length} run${subagentItems.length === 1 ? '' : 's'}`, hint: "\u2191\u2193 move \u00B7 enter inspect \u00B7 click a row \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: subagentItems, selected: clampIndex(pickerIndex, subagentItems.length), maxVisible: paletteWindow, empty: subagentLoading ? 'Loading sub-agent runs…' : 'No sub-agent runs yet. Delegate a task with sub_agent first.', compact: compactDialog }) })) : picker === 'variant' ? (_jsx(Dialog, { title: "Reasoning variant", badge: `${variantItems.length} options`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'statusLine' ? (_jsx(Dialog, { title: "Status line", badge: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length} shown`, hint: "\u2191\u2193 move \u00B7 enter toggle \u00B7 esc back", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: statusLineItems, selected: clampIndex(pickerIndex, statusLineItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : null;
     // Rail geometry. `viewportRows` is measured from the real layout, so the
     // thumb lines up with what is actually on screen.
     const scrollbar = scrollbarGeometry(transcriptRows, viewportRows, effectiveUserScroll);
@@ -3117,17 +3256,13 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                                     // blank spacer here shows empty rows and shoves the item's
                                     // bottom off-screen. The wrapper is registered for clicks so
                                     // the yoga lookup still sees the clipped geometry.
-                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id))), fillerRows > 0 && _jsx(Box, { height: fillerRows, flexShrink: 0 })] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow, query: inputText.trim(), columns: columns, hint: "\u2191\u2193 move \u00B7 tab complete \u00B7 enter run \u00B7 esc close" }))] }), initialized && !dialogActive && (_jsxs(Box, { flexDirection: "column", alignItems: "center", flexShrink: 0, children: [busy && !hasCriticalPrompt ? (_jsx(Box, { width: layout.inputWidth, flexShrink: 0, children: _jsx(LiveStatus, { columns: layout.inputWidth, activity: liveActivity, tool: activeTool, elapsedMs: busyElapsedMs, tps: decodeTps, frame: spinnerFrame, animate: animationsEnabled, gutter: 1 }) })) : null, _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: composerRows, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: composerRows, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: setInputText, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026  (shift+enter newline \u00B7 @file \u00B7 /commands)", width: composerWidth, maxRows: composerMaxRows, onRowsChange: setComposerRows, onHistoryPrev: () => {
-                                        const nav = historyNavigatorRef.current;
-                                        if (!nav)
-                                            return null;
-                                        if (nav.position === -1)
-                                            nav.rememberDraft(inputText);
-                                        return nav.up();
-                                    }, onHistoryNext: () => historyNavigatorRef.current?.down() ?? null, onPaste: async (text) => {
+                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id))), fillerRows > 0 && _jsx(Box, { height: fillerRows, flexShrink: 0 })] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow, query: inputText.trim(), columns: columns, hint: "\u2191\u2193 move \u00B7 tab complete \u00B7 enter run \u00B7 esc close" }))] }), initialized && !dialogActive && (_jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, alignItems: "center", flexShrink: 0, overflow: "hidden", children: [busy && !hasCriticalPrompt ? (_jsx(Box, { width: layout.inputWidth, backgroundColor: theme.bg, flexShrink: 0, children: _jsx(LiveStatus, { columns: layout.inputWidth, activity: liveActivity, tool: activeTool, elapsedMs: busyElapsedMs, tps: decodeTps, frame: spinnerFrame, animate: animationsEnabled, gutter: 1 }) })) : null, _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: composerRows, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: composerRows, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: (value) => {
+                                        setInputText(value);
+                                        setCommandIndex(0);
+                                    }, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026  (shift+enter newline \u00B7 @file \u00B7 /commands)", width: composerWidth, maxRows: composerMaxRows, onRowsChange: setComposerRows, onPaste: async (text) => {
                                         const summary = await summarizePaste(text, { label: session?.id ?? 'paste' });
                                         return summary.text;
-                                    }, onCompleteMention: async (value, cursor) => {
+                                    }, onMentionCandidates: provideMentionCandidates, onCompleteMention: async (value, cursor) => {
                                         const mention = findMentionToken(value, cursor);
                                         if (!mention)
                                             return null;

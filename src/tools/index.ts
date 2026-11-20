@@ -545,7 +545,10 @@ async function dispatchToolCall(toolName: string, rawArgs: any, context: ToolCal
     case 'git_stash':
       return await gitStash(args.action, args.message, context.sessionId);
     case 'web_search':
-      return await webSearch(args.query, args.timeout);
+      return await webSearch(args.queries ?? args.query, {
+        timeout: args.timeout,
+        signal: context.abortSignal,
+      });
     case 'read_subagent':
       return await readSubagent(args, context);
 
@@ -661,7 +664,10 @@ async function dispatchToolCall(toolName: string, rawArgs: any, context: ToolCal
       return JSON.stringify(result);
     }
     case 'websearch':
-      return await webSearch(args.query, args.timeout);
+      return await webSearch(args.queries ?? args.query, {
+        timeout: args.timeout,
+        signal: context.abortSignal,
+      });
     case 'task':
     case 'subagent':
       return 'Error: sub_agent is executed by the agentic loop, not by handleToolCall. It is handled directly by the loop.';

@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Text, useInput } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { stripMouseReports } from '../utils/mouse.js';
 import { useTheme } from '../theme.js';
+import type { MentionCandidate, MentionCollectionResult } from '../utils/mention-candidates.js';
 
 export interface PromptInputProps {
   value: string;
@@ -17,12 +18,6 @@ export interface PromptInputProps {
   /** Reports the rendered row count so the layout can reserve the right space. */
   onRowsChange?: (rows: number) => void;
   /**
-   * Called for Up/Down when the draft is a single visual row. Returns the text
-   * to show, or null when there is no history entry in that direction.
-   */
-  onHistoryPrev?: () => string | null;
-  onHistoryNext?: () => string | null;
-  /**
    * Called for a multi-line or very large paste. Returns the text to insert:
    * the caller may store the body on disk and return a one-line marker.
    */
@@ -32,6 +27,12 @@ export interface PromptInputProps {
    * value and caret, or null to let the keystroke fall through.
    */
   onCompleteMention?: (value: string, cursor: number) => Promise<{ value: string; cursor: number } | null>;
+  /**
+   * Supplies candidates for the `@token` under the cursor. When provided, a
+   * popup opens on `@`, filters as the token grows, and Enter inserts the
+   * selected label (a relative path for files, a name for skills).
+   */
+  onMentionCandidates?: (token: string) => Promise<MentionCollectionResult>;
 }
 
 // Display columns without a dependency: CJK/emoji take two, combining/zero-width take none.
@@ -178,10 +179,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   width,
   maxRows = DEFAULT_MAX_ROWS,
   onRowsChange,
-  onHistoryPrev,
-  onHistoryNext,
   onPaste,
   onCompleteMention,
+  onMentionCandidates,
 }) => {
   const theme = useTheme();
   // Cursor is a code-point index, not a UTF-16 offset: arrows and backspace
@@ -191,6 +191,60 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const offset = Math.min(cursor, points.length);
   // Columns the text may occupy before soft-wrapping.
   const displayWidth = Math.max(1, Math.floor(width && width > 0 ? width : 10_000));
+
+  // `@` suggestion popup. The token is derived from the live value/caret; the
+  // candidate list is loaded asynchronously by the caller and can fail without
+  // ever blocking typing.
+  const mention = useMemo(() => findMentionInValue(value, offset), [value, offset]);
+  const mentionToken = mention?.token;
+  const [suggestion, setSuggestion] = useState<{
+    token: string;
+    candidates: MentionCandidate[];
+    error?: string;
+    index: number;
+  } | null>(null);
+  const [dismissedToken, setDismissedToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!onMentionCandidates || mentionToken === undefined) {
+      setSuggestion(null);
+      setDismissedToken(null);
+      return;
+    }
+    if (dismissedToken === mentionToken) return;
+    let cancelled = false;
+    void Promise.resolve(onMentionCandidates(mentionToken))
+      .then((result) => {
+        if (cancelled) return;
+        setSuggestion({ token: mentionToken, candidates: result.candidates, error: result.error, index: 0 });
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        setSuggestion({ token: mentionToken, candidates: [], error: `Could not load suggestions: ${message}`, index: 0 });
+      });
+    return () => { cancelled = true; };
+  }, [mentionToken, onMentionCandidates, dismissedToken]);
+
+  const suggestionOpen = Boolean(suggestion && (suggestion.candidates.length > 0 || suggestion.error));
+  // Ink keeps one input listener per render; async candidate updates can leave
+  // the handler holding an older closure, so read the popup state through refs.
+  const suggestionRef = useRef(suggestion);
+  suggestionRef.current = suggestion;
+  const mentionRef = useRef(mention);
+  mentionRef.current = mention;
+
+  const acceptMention = (candidate: MentionCandidate): void => {
+    const activeMention = mentionRef.current;
+    if (!activeMention) return;
+    const before = points.slice(0, activeMention.start).join('');
+    const after = points.slice(offset).join('');
+    const next = `${before}${candidate.label}${after}`;
+    onChange(next);
+    setCursor(Array.from(before + candidate.label).length);
+    setSuggestion(null);
+    setDismissedToken(null);
+  };
 
   // Start index of the whitespace-delimited word before `at` (code points).
   // Like readline's word-rubout, trailing whitespace is eaten with the word.
@@ -203,6 +257,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
   useInput(
     (input, key) => {
+      const currentSuggestion = suggestionRef.current;
+      const popupIsOpen = Boolean(currentSuggestion && (currentSuggestion.candidates.length > 0 || currentSuggestion.error));
       // enter submits; the modifier variants insert a line break instead.
       if (key.return) {
         if (key.shift || key.meta || key.ctrl) {
@@ -210,7 +266,22 @@ export const PromptInput: React.FC<PromptInputProps> = ({
           setCursor(offset + 1);
           return;
         }
+        // Enter accepts the highlighted @ candidate instead of submitting.
+        if (popupIsOpen && currentSuggestion) {
+          const candidate = currentSuggestion.candidates[
+            Math.min(currentSuggestion.index, currentSuggestion.candidates.length - 1)
+          ];
+          if (candidate) {
+            acceptMention(candidate);
+            return;
+          }
+        }
         onSubmit(value);
+        return;
+      }
+      if (key.escape && popupIsOpen) {
+        setSuggestion(null);
+        if (mentionRef.current) setDismissedToken(mentionRef.current.token);
         return;
       }
       if (key.leftArrow) {
@@ -282,26 +353,34 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       // Up/down: walk prompt history on a single-row draft, otherwise move the
       // caret between wrapped rows. App skips transcript scrolling for them.
       if (key.upArrow || key.downArrow) {
-        const rows = wrapPromptLines(points, displayWidth);
-        const singleRow = rows.length === 1 && !value.includes('\n');
-        if (singleRow && (onHistoryPrev || onHistoryNext)) {
-          const next = key.upArrow ? onHistoryPrev?.() : onHistoryNext?.();
-          if (next !== null && next !== undefined) {
-            onChange(next);
-            setCursor(Array.from(next).length);
-            return;
-          }
-          if (key.upArrow) return;
+        if (popupIsOpen && currentSuggestion && currentSuggestion.candidates.length > 0) {
+          const delta = key.upArrow ? -1 : 1;
+          setSuggestion((prev) => prev
+            ? { ...prev, index: (prev.index + delta + prev.candidates.length) % prev.candidates.length }
+            : prev);
+          return;
         }
+        // Prompt history and slash-palette navigation are owned by App, which
+        // can see both the draft and the palette. Keeping them out of this
+        // handler prevents Up from silently replacing an open `/` draft.
+        const rows = wrapPromptLines(points, displayWidth);
         const next = moveCursorVertically(points, rows, offset, key.upArrow ? -1 : 1);
         if (next !== offset) setCursor(next);
         return;
       }
       // Tab completes an @mention when the caret is inside one; otherwise it is
       // left to App (which toggles plan/build mode).
-      if (key.tab && onCompleteMention && !key.shift) {
-        const mention = findMentionInValue(value, offset);
-        if (mention) {
+      if (key.tab && !key.shift) {
+        if (popupIsOpen && currentSuggestion) {
+          const candidate = currentSuggestion.candidates[
+            Math.min(currentSuggestion.index, currentSuggestion.candidates.length - 1)
+          ];
+          if (candidate) {
+            acceptMention(candidate);
+            return;
+          }
+        }
+        if (onCompleteMention && mention) {
           void Promise.resolve(onCompleteMention(value, offset)).then((result) => {
             if (!result) return;
             onChange(result.value);
@@ -358,47 +437,142 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const windowLines = lines.slice(firstRow, firstRow + visibleRows);
 
   const rows = Math.max(1, windowLines.length);
+
+  // Suggestion popup geometry. Its rows are included in the reported height so
+  // the surrounding layout reserves space instead of clipping the card.
+  const MAX_POPUP_ITEMS = 4;
+  const popupVisible = suggestionOpen && Boolean(suggestion);
+  const selected = suggestion ? Math.min(suggestion.index, Math.max(0, suggestion.candidates.length - 1)) : 0;
+  const popupStart = suggestion && suggestion.candidates.length > MAX_POPUP_ITEMS
+    ? Math.max(0, Math.min(selected - 1, suggestion.candidates.length - MAX_POPUP_ITEMS))
+    : 0;
+  const visibleCandidates = suggestion?.candidates.slice(popupStart, popupStart + MAX_POPUP_ITEMS) ?? [];
+  // Skills are collected first, files/directories after. Insert one heading at
+  // each group boundary and count those rows so Ink reserves space for them.
+  const candidateGroup = (candidate: MentionCandidate): 'skill' | 'file' =>
+    candidate.kind === 'skill' ? 'skill' : 'file';
+  const startsGroup = (index: number): boolean =>
+    index === 0 ||
+    candidateGroup(visibleCandidates[index - 1]) !== candidateGroup(visibleCandidates[index]);
+  const headingRows = visibleCandidates.reduce(
+    (count, _candidate, index) => count + (startsGroup(index) ? 1 : 0),
+    0,
+  );
+  const skillCount = suggestion?.candidates.filter((candidate) => candidate.kind === 'skill').length ?? 0;
+  const fileCount = (suggestion?.candidates.length ?? 0) - skillCount;
+  const hiddenAbove = popupStart;
+  const hiddenBelow = suggestion ? Math.max(0, suggestion.candidates.length - popupStart - visibleCandidates.length) : 0;
+  const popupRows = popupVisible
+    ? 4 + visibleCandidates.length + headingRows +
+      (hiddenAbove > 0 ? 1 : 0) + (hiddenBelow > 0 ? 1 : 0) + (suggestion?.error ? 1 : 0)
+    : 0;
+  const totalRows = rows + popupRows;
   const reportedRows = useRef(0);
   useEffect(() => {
-    if (reportedRows.current === rows) return;
-    reportedRows.current = rows;
-    onRowsChange?.(rows);
-  }, [rows, onRowsChange]);
+    if (reportedRows.current === totalRows) return;
+    reportedRows.current = totalRows;
+    onRowsChange?.(totalRows);
+  }, [totalRows, onRowsChange]);
 
-  if (!value) {
-    return (
-      <Text color={theme.placeholder} wrap="truncate-end">
-        {placeholder}
-      </Text>
-    );
-  }
+  const popupWidth = Math.max(24, Math.min(displayWidth > 1000 ? 64 : displayWidth, 64));
+  const rule = '─'.repeat(Math.max(1, popupWidth - 4));
+  const kindIcon: Record<MentionCandidate['kind'], string> = {
+    file: '▤', directory: '▸', skill: '◈',
+  };
+  const kindColor: Record<MentionCandidate['kind'], keyof typeof theme> = {
+    file: 'muted', directory: 'info', skill: 'accent',
+  };
 
-  // Render each visible row; only the row holding the caret gets the inverse cell.
-  const renderedRows = windowLines.map((line, index) => {
-    const text = displayPoints.slice(line.start, line.end).join('');
-    if (firstRow + index !== cursorLine) return text || ' ';
-    const rel = Math.max(0, Math.min(offset - line.start, Array.from(text).length));
-    const shown = Array.from(text);
-    const before = shown.slice(0, rel).join('');
-    const at = shown[rel] ?? ' ';
-    const after = shown.slice(rel + 1).join('');
-    return (
-      <>
-        {before}
-        <Text inverse>{at}</Text>
-        {after}
-      </>
-    );
-  });
-
-  return (
+  const fieldNode = !value ? (
+    <Text color={theme.placeholder} wrap="truncate-end">{placeholder}</Text>
+  ) : (
     <Text color={theme.text} wrap="truncate-end">
-      {renderedRows.map((row, index) => (
-        <React.Fragment key={index}>
-          {index > 0 ? '\n' : null}
-          {row}
-        </React.Fragment>
-      ))}
+      {windowLines.map((line, index) => {
+        const text = displayPoints.slice(line.start, line.end).join('');
+        const newline = index > 0 ? '\n' : null;
+        if (firstRow + index !== cursorLine) {
+          return <React.Fragment key={index}>{newline}{text || ' '}</React.Fragment>;
+        }
+        const rel = Math.max(0, Math.min(offset - line.start, Array.from(text).length));
+        const shown = Array.from(text);
+        return (
+          <React.Fragment key={index}>
+            {newline}
+            {shown.slice(0, rel).join('')}
+            <Text inverse>{shown[rel] ?? ' '}</Text>
+            {shown.slice(rel + 1).join('')}
+          </React.Fragment>
+        );
+      })}
     </Text>
+  );
+
+  const popupNode = popupVisible && suggestion ? (
+    <Box
+      flexDirection="column"
+      width={popupWidth}
+      flexShrink={0}
+      borderStyle="round"
+      borderColor={theme.border}
+      backgroundColor={theme.surface}
+      paddingX={1}
+      marginBottom={1}
+    >
+      <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+        <Text color={theme.accent} bold wrap="truncate-end">{'◈ Reference'}</Text>
+        <Text color={theme.dim} wrap="truncate-end">
+          {`${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · enter insert · esc close`}
+        </Text>
+      </Box>
+      <Text color={theme.border} wrap="truncate-end">{rule}</Text>
+      {hiddenAbove > 0 ? <Text color={theme.dim}>{`  ↑ ${hiddenAbove} more`}</Text> : null}
+      {visibleCandidates.map((candidate, index) => {
+        const active = popupStart + index === selected;
+        const group = candidateGroup(candidate);
+        return (
+          <React.Fragment key={candidate.id}>
+            {startsGroup(index) ? (
+              <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+                <Text color={theme.dim} bold wrap="truncate-end">
+                  {group === 'skill' ? 'Skills' : 'Files'}
+                </Text>
+                <Text color={theme.dim} wrap="truncate-end">
+                  {` ${group === 'skill' ? skillCount : fileCount}`}
+                </Text>
+              </Box>
+            ) : null}
+            <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+              <Box flexShrink={1} minWidth={1} flexDirection="row">
+                <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
+                <Text color={theme[kindColor[candidate.kind]]}>{`${kindIcon[candidate.kind]} `}</Text>
+                <Text color={active ? theme.accent : theme.text} bold={active} wrap="truncate-end">
+                  {candidate.label}
+                </Text>
+              </Box>
+              {candidate.detail ? (
+                <Box flexShrink={0} marginLeft={1}>
+                  <Text color={theme.dim} wrap="truncate-end">
+                    {candidate.source ? `${candidate.source} · ${candidate.detail}` : candidate.detail}
+                  </Text>
+                </Box>
+              ) : null}
+            </Box>
+          </React.Fragment>
+        );
+      })}
+      {hiddenBelow > 0 ? <Text color={theme.dim}>{`  ↓ ${hiddenBelow} more`}</Text> : null}
+      {suggestion.error ? (
+        <Text color={theme.error} wrap="truncate-end">{`⚠ ${suggestion.error}`}</Text>
+      ) : null}
+    </Box>
+  ) : null;
+
+  // A fragment (not a Box) keeps the field's full-width layout: a wrapping Box
+  // would measure the Text at its content width and truncate multi-row drafts.
+  return (
+    <>
+      {popupNode}
+      {fieldNode}
+    </>
   );
 };

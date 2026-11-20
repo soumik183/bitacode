@@ -27,6 +27,15 @@ export interface FileReadSection {
 export interface FileReadDisplay {
   filePath?: string;
   sections: FileReadSection[];
+  totalLines?: number;
+}
+
+/** Compact, one-line description of a read_file result for the transcript. */
+export interface ReadSummary {
+  filePath: string;
+  range?: string;
+  total?: number;
+  empty?: boolean;
 }
 
 const FILE_TOOLS = new Set(['edit_file', 'write_file']);
@@ -194,7 +203,16 @@ export function parseFileReadResult(
   }
 
   if (sections.length > 0) {
-    return { filePath: argFilePath(args), sections };
+    let totalLines: number | undefined;
+    for (const section of sections) {
+      const note = section.note ?? '';
+      const ends = /file ends at line (\d+)/.exec(note);
+      const noLines = /no lines: file has (\d+) line\(s\)/.exec(note);
+      if (ends) totalLines = Number(ends[1]);
+      else if (noLines) totalLines = Number(noLines[1]);
+      else if (note === '(empty file)') totalLines = 0;
+    }
+    return { filePath: argFilePath(args), sections, totalLines };
   }
 
   const lines = [...raw];
@@ -205,6 +223,7 @@ export function parseFileReadResult(
 
   return {
     filePath: argFilePath(args),
+    totalLines: offset + lines.length + moreLines,
     sections: [
       {
         startLine: offset + 1,
@@ -214,4 +233,42 @@ export function parseFileReadResult(
       },
     ],
   };
+}
+
+/** Describes a parsed read as one of: whole file, line range, or empty. */
+export function describeRead(display: FileReadDisplay): ReadSummary {
+  const filePath = display?.filePath ? displayFilePath(display.filePath) : 'file';
+  const sections = Array.isArray(display?.sections) ? display.sections : [];
+  const readLines = sections.reduce((total, section) => total + (Array.isArray(section?.lines) ? section.lines.length : 0), 0);
+  if (readLines === 0) return { filePath, empty: true };
+
+  const total = display?.totalLines;
+  if (typeof total === 'number' && total > 0) {
+    const covered = sections
+      .filter((section) => section && Array.isArray(section.lines) && section.lines.length > 0 && typeof section.startLine === 'number')
+      .map((section) => ({ start: section.startLine, end: section.startLine + section.lines.length - 1 }))
+      .sort((a, b) => a.start - b.start);
+    let cursor = 1;
+    let whole = covered.length > 0;
+    for (const segment of covered) {
+      if (segment.start > cursor) {
+        whole = false;
+        break;
+      }
+      cursor = Math.max(cursor, segment.end + 1);
+    }
+    if (whole && cursor - 1 >= total) return { filePath, total };
+  }
+
+  const range = sections
+    .filter((section) => section && typeof section.startLine === 'number')
+    .map((section) => {
+      const count = Array.isArray(section.lines) ? section.lines.length : 0;
+      if (count > 0) return `${section.startLine}-${section.startLine + count - 1}`;
+      if (typeof section.endLine === 'number' && section.endLine > 0) return `${section.startLine}-${section.endLine}`;
+      return `${section.startLine}`;
+    })
+    .join(', ');
+
+  return range ? { filePath, range } : { filePath, empty: true };
 }

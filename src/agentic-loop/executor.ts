@@ -340,6 +340,7 @@ export async function executeToolCalls(
               ...(evt.subAgentLabel ? { subAgentLabel: evt.subAgentLabel } : {}),
               ...(evt.subAgentStatus ? { subAgentStatus: evt.subAgentStatus } : {}),
               ...(evt.subAgentTask ? { subAgentTask: evt.subAgentTask } : {}),
+              ...(evt.subAgentType ? { subAgentType: evt.subAgentType } : {}),
             });
           };
           const subResult = await runSubAgent(

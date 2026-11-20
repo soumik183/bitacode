@@ -1,6 +1,6 @@
-import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Text, useInput } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { stripMouseReports } from '../utils/mouse.js';
 import { useTheme } from '../theme.js';
 // Display columns without a dependency: CJK/emoji take two, combining/zero-width take none.
@@ -121,7 +121,7 @@ export function findMentionInValue(value, cursor) {
  * `maxRows`, then it scrolls), so multi-line prompts stay readable. `enter`
  * submits; `shift+enter`, `alt+enter` and `ctrl+j` insert a newline.
  */
-export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDisabled = false, mask = false, width, maxRows = DEFAULT_MAX_ROWS, onRowsChange, onHistoryPrev, onHistoryNext, onPaste, onCompleteMention, }) => {
+export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDisabled = false, mask = false, width, maxRows = DEFAULT_MAX_ROWS, onRowsChange, onPaste, onCompleteMention, onMentionCandidates, }) => {
     const theme = useTheme();
     // Cursor is a code-point index, not a UTF-16 offset: arrows and backspace
     // must land on whole glyphs (emoji are two UTF-16 units, CJK are two columns).
@@ -130,6 +130,55 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
     const offset = Math.min(cursor, points.length);
     // Columns the text may occupy before soft-wrapping.
     const displayWidth = Math.max(1, Math.floor(width && width > 0 ? width : 10_000));
+    // `@` suggestion popup. The token is derived from the live value/caret; the
+    // candidate list is loaded asynchronously by the caller and can fail without
+    // ever blocking typing.
+    const mention = useMemo(() => findMentionInValue(value, offset), [value, offset]);
+    const mentionToken = mention?.token;
+    const [suggestion, setSuggestion] = useState(null);
+    const [dismissedToken, setDismissedToken] = useState(null);
+    useEffect(() => {
+        if (!onMentionCandidates || mentionToken === undefined) {
+            setSuggestion(null);
+            setDismissedToken(null);
+            return;
+        }
+        if (dismissedToken === mentionToken)
+            return;
+        let cancelled = false;
+        void Promise.resolve(onMentionCandidates(mentionToken))
+            .then((result) => {
+            if (cancelled)
+                return;
+            setSuggestion({ token: mentionToken, candidates: result.candidates, error: result.error, index: 0 });
+        })
+            .catch((err) => {
+            if (cancelled)
+                return;
+            const message = err instanceof Error ? err.message : String(err);
+            setSuggestion({ token: mentionToken, candidates: [], error: `Could not load suggestions: ${message}`, index: 0 });
+        });
+        return () => { cancelled = true; };
+    }, [mentionToken, onMentionCandidates, dismissedToken]);
+    const suggestionOpen = Boolean(suggestion && (suggestion.candidates.length > 0 || suggestion.error));
+    // Ink keeps one input listener per render; async candidate updates can leave
+    // the handler holding an older closure, so read the popup state through refs.
+    const suggestionRef = useRef(suggestion);
+    suggestionRef.current = suggestion;
+    const mentionRef = useRef(mention);
+    mentionRef.current = mention;
+    const acceptMention = (candidate) => {
+        const activeMention = mentionRef.current;
+        if (!activeMention)
+            return;
+        const before = points.slice(0, activeMention.start).join('');
+        const after = points.slice(offset).join('');
+        const next = `${before}${candidate.label}${after}`;
+        onChange(next);
+        setCursor(Array.from(before + candidate.label).length);
+        setSuggestion(null);
+        setDismissedToken(null);
+    };
     // Start index of the whitespace-delimited word before `at` (code points).
     // Like readline's word-rubout, trailing whitespace is eaten with the word.
     const wordStartBefore = (at) => {
@@ -141,6 +190,8 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         return i;
     };
     useInput((input, key) => {
+        const currentSuggestion = suggestionRef.current;
+        const popupIsOpen = Boolean(currentSuggestion && (currentSuggestion.candidates.length > 0 || currentSuggestion.error));
         // enter submits; the modifier variants insert a line break instead.
         if (key.return) {
             if (key.shift || key.meta || key.ctrl) {
@@ -148,7 +199,21 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
                 setCursor(offset + 1);
                 return;
             }
+            // Enter accepts the highlighted @ candidate instead of submitting.
+            if (popupIsOpen && currentSuggestion) {
+                const candidate = currentSuggestion.candidates[Math.min(currentSuggestion.index, currentSuggestion.candidates.length - 1)];
+                if (candidate) {
+                    acceptMention(candidate);
+                    return;
+                }
+            }
             onSubmit(value);
+            return;
+        }
+        if (key.escape && popupIsOpen) {
+            setSuggestion(null);
+            if (mentionRef.current)
+                setDismissedToken(mentionRef.current.token);
             return;
         }
         if (key.leftArrow) {
@@ -221,18 +286,17 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         // Up/down: walk prompt history on a single-row draft, otherwise move the
         // caret between wrapped rows. App skips transcript scrolling for them.
         if (key.upArrow || key.downArrow) {
-            const rows = wrapPromptLines(points, displayWidth);
-            const singleRow = rows.length === 1 && !value.includes('\n');
-            if (singleRow && (onHistoryPrev || onHistoryNext)) {
-                const next = key.upArrow ? onHistoryPrev?.() : onHistoryNext?.();
-                if (next !== null && next !== undefined) {
-                    onChange(next);
-                    setCursor(Array.from(next).length);
-                    return;
-                }
-                if (key.upArrow)
-                    return;
+            if (popupIsOpen && currentSuggestion && currentSuggestion.candidates.length > 0) {
+                const delta = key.upArrow ? -1 : 1;
+                setSuggestion((prev) => prev
+                    ? { ...prev, index: (prev.index + delta + prev.candidates.length) % prev.candidates.length }
+                    : prev);
+                return;
             }
+            // Prompt history and slash-palette navigation are owned by App, which
+            // can see both the draft and the palette. Keeping them out of this
+            // handler prevents Up from silently replacing an open `/` draft.
+            const rows = wrapPromptLines(points, displayWidth);
             const next = moveCursorVertically(points, rows, offset, key.upArrow ? -1 : 1);
             if (next !== offset)
                 setCursor(next);
@@ -240,9 +304,15 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         }
         // Tab completes an @mention when the caret is inside one; otherwise it is
         // left to App (which toggles plan/build mode).
-        if (key.tab && onCompleteMention && !key.shift) {
-            const mention = findMentionInValue(value, offset);
-            if (mention) {
+        if (key.tab && !key.shift) {
+            if (popupIsOpen && currentSuggestion) {
+                const candidate = currentSuggestion.candidates[Math.min(currentSuggestion.index, currentSuggestion.candidates.length - 1)];
+                if (candidate) {
+                    acceptMention(candidate);
+                    return;
+                }
+            }
+            if (onCompleteMention && mention) {
                 void Promise.resolve(onCompleteMention(value, offset)).then((result) => {
                     if (!result)
                         return;
@@ -293,27 +363,61 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
     }
     const windowLines = lines.slice(firstRow, firstRow + visibleRows);
     const rows = Math.max(1, windowLines.length);
+    // Suggestion popup geometry. Its rows are included in the reported height so
+    // the surrounding layout reserves space instead of clipping the card.
+    const MAX_POPUP_ITEMS = 4;
+    const popupVisible = suggestionOpen && Boolean(suggestion);
+    const selected = suggestion ? Math.min(suggestion.index, Math.max(0, suggestion.candidates.length - 1)) : 0;
+    const popupStart = suggestion && suggestion.candidates.length > MAX_POPUP_ITEMS
+        ? Math.max(0, Math.min(selected - 1, suggestion.candidates.length - MAX_POPUP_ITEMS))
+        : 0;
+    const visibleCandidates = suggestion?.candidates.slice(popupStart, popupStart + MAX_POPUP_ITEMS) ?? [];
+    // Skills are collected first, files/directories after. Insert one heading at
+    // each group boundary and count those rows so Ink reserves space for them.
+    const candidateGroup = (candidate) => candidate.kind === 'skill' ? 'skill' : 'file';
+    const startsGroup = (index) => index === 0 ||
+        candidateGroup(visibleCandidates[index - 1]) !== candidateGroup(visibleCandidates[index]);
+    const headingRows = visibleCandidates.reduce((count, _candidate, index) => count + (startsGroup(index) ? 1 : 0), 0);
+    const skillCount = suggestion?.candidates.filter((candidate) => candidate.kind === 'skill').length ?? 0;
+    const fileCount = (suggestion?.candidates.length ?? 0) - skillCount;
+    const hiddenAbove = popupStart;
+    const hiddenBelow = suggestion ? Math.max(0, suggestion.candidates.length - popupStart - visibleCandidates.length) : 0;
+    const popupRows = popupVisible
+        ? 4 + visibleCandidates.length + headingRows +
+            (hiddenAbove > 0 ? 1 : 0) + (hiddenBelow > 0 ? 1 : 0) + (suggestion?.error ? 1 : 0)
+        : 0;
+    const totalRows = rows + popupRows;
     const reportedRows = useRef(0);
     useEffect(() => {
-        if (reportedRows.current === rows)
+        if (reportedRows.current === totalRows)
             return;
-        reportedRows.current = rows;
-        onRowsChange?.(rows);
-    }, [rows, onRowsChange]);
-    if (!value) {
-        return (_jsx(Text, { color: theme.placeholder, wrap: "truncate-end", children: placeholder }));
-    }
-    // Render each visible row; only the row holding the caret gets the inverse cell.
-    const renderedRows = windowLines.map((line, index) => {
-        const text = displayPoints.slice(line.start, line.end).join('');
-        if (firstRow + index !== cursorLine)
-            return text || ' ';
-        const rel = Math.max(0, Math.min(offset - line.start, Array.from(text).length));
-        const shown = Array.from(text);
-        const before = shown.slice(0, rel).join('');
-        const at = shown[rel] ?? ' ';
-        const after = shown.slice(rel + 1).join('');
-        return (_jsxs(_Fragment, { children: [before, _jsx(Text, { inverse: true, children: at }), after] }));
-    });
-    return (_jsx(Text, { color: theme.text, wrap: "truncate-end", children: renderedRows.map((row, index) => (_jsxs(React.Fragment, { children: [index > 0 ? '\n' : null, row] }, index))) }));
+        reportedRows.current = totalRows;
+        onRowsChange?.(totalRows);
+    }, [totalRows, onRowsChange]);
+    const popupWidth = Math.max(24, Math.min(displayWidth > 1000 ? 64 : displayWidth, 64));
+    const rule = '─'.repeat(Math.max(1, popupWidth - 4));
+    const kindIcon = {
+        file: '▤', directory: '▸', skill: '◈',
+    };
+    const kindColor = {
+        file: 'muted', directory: 'info', skill: 'accent',
+    };
+    const fieldNode = !value ? (_jsx(Text, { color: theme.placeholder, wrap: "truncate-end", children: placeholder })) : (_jsx(Text, { color: theme.text, wrap: "truncate-end", children: windowLines.map((line, index) => {
+            const text = displayPoints.slice(line.start, line.end).join('');
+            const newline = index > 0 ? '\n' : null;
+            if (firstRow + index !== cursorLine) {
+                return _jsxs(React.Fragment, { children: [newline, text || ' '] }, index);
+            }
+            const rel = Math.max(0, Math.min(offset - line.start, Array.from(text).length));
+            const shown = Array.from(text);
+            return (_jsxs(React.Fragment, { children: [newline, shown.slice(0, rel).join(''), _jsx(Text, { inverse: true, children: shown[rel] ?? ' ' }), shown.slice(rel + 1).join('')] }, index));
+        }) }));
+    const popupNode = popupVisible && suggestion ? (_jsxs(Box, { flexDirection: "column", width: popupWidth, flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: '◈ Reference' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · enter insert · esc close` })] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), hiddenAbove > 0 ? _jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` }) : null, visibleCandidates.map((candidate, index) => {
+                const active = popupStart + index === selected;
+                const group = candidateGroup(candidate);
+                return (_jsxs(React.Fragment, { children: [startsGroup(index) ? (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, bold: true, wrap: "truncate-end", children: group === 'skill' ? 'Skills' : 'Files' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: ` ${group === 'skill' ? skillCount : fileCount}` })] })) : null, _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexShrink: 1, minWidth: 1, flexDirection: "row", children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Text, { color: theme[kindColor[candidate.kind]], children: `${kindIcon[candidate.kind]} ` }), _jsx(Text, { color: active ? theme.accent : theme.text, bold: active, wrap: "truncate-end", children: candidate.label })] }), candidate.detail ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: candidate.source ? `${candidate.source} · ${candidate.detail}` : candidate.detail }) })) : null] })] }, candidate.id));
+            }), hiddenBelow > 0 ? _jsx(Text, { color: theme.dim, children: `  ↓ ${hiddenBelow} more` }) : null, suggestion.error ? (_jsx(Text, { color: theme.error, wrap: "truncate-end", children: `⚠ ${suggestion.error}` })) : null] })) : null;
+    // A fragment (not a Box) keeps the field's full-width layout: a wrapping Box
+    // would measure the Text at its content width and truncate multi-row drafts.
+    return (_jsxs(_Fragment, { children: [popupNode, fieldNode] }));
 };

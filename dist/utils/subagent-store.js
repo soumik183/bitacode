@@ -20,6 +20,9 @@ const ID_PATTERN = /^[A-Za-z0-9-]+$/;
 const MAX_MESSAGES = 100;
 const MAX_CONTENT_CHARS = 8_000;
 const MAX_TEXT_CHARS = 2_000;
+const MAX_TOOL_CALLS = 20;
+const MAX_TOOL_NAME_CHARS = 200;
+const MAX_TOOL_ARGS_CHARS = 4_000;
 const STATUSES = new Set(['done', 'aborted', 'error', 'iteration_limit']);
 /** Ids are alphanumeric or dashes only — no separators or dots, so no traversal. */
 export function isValidSubAgentId(id) {
@@ -62,10 +65,49 @@ function sanitizeMessages(value) {
         const message = raw;
         if (typeof message.role !== 'string' || message.role.length === 0)
             continue;
-        messages.push({
+        const sanitized = {
             role: message.role,
             content: cap(toText(message.content), MAX_CONTENT_CHARS),
-        });
+        };
+        // Preserve structured assistant tool calls so a UI inspector can render them.
+        if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+            const calls = [];
+            for (const rawCall of message.tool_calls.slice(0, MAX_TOOL_CALLS)) {
+                if (!rawCall || typeof rawCall !== 'object' || Array.isArray(rawCall))
+                    continue;
+                const call = rawCall;
+                const fn = call.function && typeof call.function === 'object' && !Array.isArray(call.function)
+                    ? call.function
+                    : undefined;
+                const out = {};
+                if (typeof call.id === 'string')
+                    out.id = cap(call.id, MAX_TOOL_NAME_CHARS);
+                if (typeof call.type === 'string')
+                    out.type = cap(call.type, MAX_TOOL_NAME_CHARS);
+                if (fn) {
+                    const fnOut = {};
+                    if (typeof fn.name === 'string')
+                        fnOut.name = cap(fn.name, MAX_TOOL_NAME_CHARS);
+                    if (typeof fn.arguments === 'string')
+                        fnOut.arguments = cap(fn.arguments, MAX_TOOL_ARGS_CHARS);
+                    if (Object.keys(fnOut).length > 0)
+                        out.function = fnOut;
+                }
+                if (Object.keys(out).length > 0)
+                    calls.push(out);
+            }
+            if (calls.length > 0)
+                sanitized.tool_calls = calls;
+        }
+        // Tool result messages carry the tool name and the id linking to their call.
+        if (message.role === 'tool') {
+            if (typeof message.name === 'string')
+                sanitized.name = cap(message.name, MAX_TOOL_NAME_CHARS);
+            if (typeof message.tool_call_id === 'string') {
+                sanitized.tool_call_id = cap(message.tool_call_id, MAX_TOOL_NAME_CHARS);
+            }
+        }
+        messages.push(sanitized);
     }
     return messages;
 }
@@ -106,6 +148,8 @@ function sanitizeRecord(value) {
     };
     if (typeof record.label === 'string')
         sanitized.label = cap(record.label, MAX_TEXT_CHARS);
+    if (typeof record.agentType === 'string')
+        sanitized.agentType = cap(record.agentType, 100);
     if (typeof record.endedAt === 'number' && Number.isFinite(record.endedAt)) {
         sanitized.endedAt = record.endedAt;
     }

@@ -1986,6 +1986,30 @@ test('/update is listed in the slash palette and help', async () => {
   }
 });
 
+test('Up while the slash palette is open moves the palette, not prompt history', async () => {
+  const app = renderApp({}, (home) => {
+    fs.mkdirSync(path.join(home, '.config', 'bitacode'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.config', 'bitacode', 'history.jsonl'),
+      `${JSON.stringify({ text: 'PREVIOUS REQUEST MARKER' })}\n`
+    );
+  });
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    await settle(300);
+    app.stdin.write('/');
+    const opened = await waitForFrameText(app, '/help', 2000);
+    assert.match(opened, /› \/help/, 'palette opens on the first command');
+
+    app.stdin.write('\x1b[A');
+    const moved = await waitForFrameText(app, '› /quit', 2000);
+    assert.match(moved, /› \/quit/, 'Up wraps the palette selection');
+    assert.doesNotMatch(moved, /PREVIOUS REQUEST MARKER/, 'the slash draft is not replaced by history');
+  } finally {
+    app.cleanupAll();
+  }
+});
+
 test('/find filters the transcript and shows a match count', async () => {
   const app = renderApp({ sessionId: 'find0001' }, (home) =>
     seedSession(home, 'find0001', [

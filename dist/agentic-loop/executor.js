@@ -267,6 +267,7 @@ export async function executeToolCalls(toolCalls, messages, onEvent, context) {
                             ...(evt.subAgentLabel ? { subAgentLabel: evt.subAgentLabel } : {}),
                             ...(evt.subAgentStatus ? { subAgentStatus: evt.subAgentStatus } : {}),
                             ...(evt.subAgentTask ? { subAgentTask: evt.subAgentTask } : {}),
+                            ...(evt.subAgentType ? { subAgentType: evt.subAgentType } : {}),
                         });
                     };
                     const subResult = await runSubAgent(client, model, taskArg, args.max_iterations, requestDefaults, subProgress, abortSignal, pricing, args.agent_type, args.thoroughness, sessionId);

@@ -23,15 +23,28 @@ const ID_PATTERN = /^[A-Za-z0-9-]+$/;
 const MAX_MESSAGES = 100;
 const MAX_CONTENT_CHARS = 8_000;
 const MAX_TEXT_CHARS = 2_000;
+const MAX_TOOL_CALLS = 20;
+const MAX_TOOL_NAME_CHARS = 200;
+const MAX_TOOL_ARGS_CHARS = 4_000;
 
 export type SubAgentRunStatus = 'done' | 'aborted' | 'error' | 'iteration_limit';
 
 const STATUSES = new Set<SubAgentRunStatus>(['done', 'aborted', 'error', 'iteration_limit']);
 
+/** A structured tool call preserved on an assistant message for UI inspection. */
+export interface SubAgentToolCall {
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
 /** Normalized, safe-to-render message stored in a transcript. */
 export interface SubAgentMessage {
-  role: string;
+  role: string; // 'system' | 'user' | 'assistant' | 'tool'
   content: string;
+  tool_calls?: SubAgentToolCall[]; // assistant tool-call messages
+  name?: string; // tool result messages (tool name)
+  tool_call_id?: string; // tool result messages (links to call id)
 }
 
 export interface SubAgentRunSummary {
@@ -39,6 +52,7 @@ export interface SubAgentRunSummary {
   sessionId: string;
   task: string;
   label?: string;
+  agentType?: string;
   status: SubAgentRunStatus;
   startedAt: number;
   endedAt?: number;
@@ -57,6 +71,7 @@ export type SubAgentRunInput = {
   id: string;
   task: string;
   label?: string;
+  agentType?: string;
   status: SubAgentRunStatus;
   startedAt: number;
   endedAt?: number;
@@ -103,12 +118,55 @@ function sanitizeMessages(value: unknown): SubAgentMessage[] {
   const messages: SubAgentMessage[] = [];
   for (const raw of value.slice(-MAX_MESSAGES)) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
-    const message = raw as { role?: unknown; content?: unknown };
+    const message = raw as {
+      role?: unknown;
+      content?: unknown;
+      tool_calls?: unknown;
+      name?: unknown;
+      tool_call_id?: unknown;
+    };
     if (typeof message.role !== 'string' || message.role.length === 0) continue;
-    messages.push({
+    const sanitized: SubAgentMessage = {
       role: message.role,
       content: cap(toText(message.content), MAX_CONTENT_CHARS),
-    });
+    };
+
+    // Preserve structured assistant tool calls so a UI inspector can render them.
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+      const calls: SubAgentToolCall[] = [];
+      for (const rawCall of message.tool_calls.slice(0, MAX_TOOL_CALLS)) {
+        if (!rawCall || typeof rawCall !== 'object' || Array.isArray(rawCall)) continue;
+        const call = rawCall as {
+          id?: unknown;
+          type?: unknown;
+          function?: { name?: unknown; arguments?: unknown } | unknown;
+        };
+        const fn = call.function && typeof call.function === 'object' && !Array.isArray(call.function)
+          ? call.function as { name?: unknown; arguments?: unknown }
+          : undefined;
+        const out: SubAgentToolCall = {};
+        if (typeof call.id === 'string') out.id = cap(call.id, MAX_TOOL_NAME_CHARS);
+        if (typeof call.type === 'string') out.type = cap(call.type, MAX_TOOL_NAME_CHARS);
+        if (fn) {
+          const fnOut: { name?: string; arguments?: string } = {};
+          if (typeof fn.name === 'string') fnOut.name = cap(fn.name, MAX_TOOL_NAME_CHARS);
+          if (typeof fn.arguments === 'string') fnOut.arguments = cap(fn.arguments, MAX_TOOL_ARGS_CHARS);
+          if (Object.keys(fnOut).length > 0) out.function = fnOut;
+        }
+        if (Object.keys(out).length > 0) calls.push(out);
+      }
+      if (calls.length > 0) sanitized.tool_calls = calls;
+    }
+
+    // Tool result messages carry the tool name and the id linking to their call.
+    if (message.role === 'tool') {
+      if (typeof message.name === 'string') sanitized.name = cap(message.name, MAX_TOOL_NAME_CHARS);
+      if (typeof message.tool_call_id === 'string') {
+        sanitized.tool_call_id = cap(message.tool_call_id, MAX_TOOL_NAME_CHARS);
+      }
+    }
+
+    messages.push(sanitized);
   }
   return messages;
 }
@@ -146,6 +204,7 @@ function sanitizeRecord(value: unknown): SubAgentRunRecord | null {
     messages,
   };
   if (typeof record.label === 'string') sanitized.label = cap(record.label, MAX_TEXT_CHARS);
+  if (typeof record.agentType === 'string') sanitized.agentType = cap(record.agentType, 100);
   if (typeof record.endedAt === 'number' && Number.isFinite(record.endedAt)) {
     sanitized.endedAt = record.endedAt;
   }

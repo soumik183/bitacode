@@ -64,6 +64,7 @@ export interface AgentEvent {
   subAgentLabel?: string;
   subAgentStatus?: 'start' | 'done' | 'error';
   subAgentTask?: string;
+  subAgentType?: string;
   usage?: { inputTokens: number; outputTokens: number; cost: number; contextPercent: number };
   /** Emitted when a sub-agent completes, carrying its accumulated usage. */
   subAgentUsage?: SubAgentUsage;
