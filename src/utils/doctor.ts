@@ -75,6 +75,7 @@ function configSection(cwd: string, warnings: string[]): DoctorSection {
   lines.push(`config file: ${getActiveRuntimeConfigPath() ?? '(none found)'}`);
   if (!config) {
     lines.push('provider/model: (not configured — run `bitacode configure`)');
+    lines.push('api key: missing');
     warnings.push('no provider/model configured');
     return { title: 'config', lines };
   }

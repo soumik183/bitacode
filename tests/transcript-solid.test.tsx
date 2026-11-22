@@ -330,9 +330,11 @@ test('screen buffer: a stale glyph on the last terminal row is erased on repaint
   });
 
   try {
-    const readyDeadline = Date.now() + 5000;
-    while (Date.now() < readyDeadline && !stdout.frame()) await settle(50);
-    assert.ok(stdout.frame(), 'app painted a frame');
+    // Under parallel CI load, startup can outlast a short composer-specific
+    // wait. Any painted frame is enough — the buffer below replays them all.
+    const readyDeadline = Date.now() + 10_000;
+    while (Date.now() < readyDeadline && stdout.frames.length === 0) await settle(50);
+    assert.ok(stdout.frames.length > 0, 'app painted a frame');
 
     // Exercise the real App flow: boot, scroll, then a shrink resize.
     stdin.write('\u001b[5~');
