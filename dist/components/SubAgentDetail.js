@@ -3,7 +3,7 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
  * SubAgentDetail — full transcript inspector for ONE sub-agent run.
  *
  * Owns its own keyboard input: the orchestrator disables App's global useInput
- * while this card is open, so arrow/page/s/esc all land here. The outer box is
+ * while this card is open, so arrow/page/s/r/esc all land here. The outer box is
  * pinned to the exact row budget handed in by the parent; only the body scrolls.
  */
 import React from 'react';
@@ -11,7 +11,6 @@ import { Box, Text, useInput } from 'ink';
 import { useTheme } from '../theme.js';
 import { renderFormattedText } from '../utils/format-message.js';
 import { dialogWidth, dialogInnerWidth, HintLine } from './Dialog.js';
-import { LeftBar } from './LeftBar.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from '../utils/scrollbar.js';
 const STATUS = {
     done: { icon: '✓', label: 'done', color: 'success' },
@@ -19,10 +18,11 @@ const STATUS = {
     aborted: { icon: '■', label: 'aborted', color: 'error' },
     iteration_limit: { icon: '⏱', label: 'iteration limit', color: 'info' },
 };
-const MAX_ARGS = 4;
 const MAX_RESULT_LINES = 8;
-const MAX_ARG_CHARS = 64;
+const MAX_ARG_CHARS = 120;
+const MAX_PATH_ARG_CHARS = 240;
 const GAP = 1;
+const HINT = '↑↓ scroll · pgup/pgdn page · s system · r results · esc back';
 /** Rough row count for plain text at a given width (used to budget the window). */
 function estimateRows(text, width) {
     const w = Math.max(1, Math.floor(width));
@@ -30,12 +30,12 @@ function estimateRows(text, width) {
         .split('\n')
         .reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / w)), 0);
 }
-function compactTokens(n) {
-    if (!n || !Number.isFinite(n) || n <= 0)
-        return '';
-    return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+/** Fenced code and tables paint a couple of extra chrome rows per block. */
+function estimateFormattedRows(text, width) {
+    const fences = (String(text ?? '').match(/^\s*(?:```|~~~)/gm) ?? []).length;
+    return estimateRows(text, width) + fences * 2;
 }
-/** First few key/value pairs of a tool call's JSON argument blob. */
+/** All key/value pairs of a tool call's JSON argument blob, each on one line. */
 function parseArguments(raw) {
     if (!raw)
         return [];
@@ -43,7 +43,7 @@ function parseArguments(raw) {
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
             return [];
-        return Object.entries(parsed).slice(0, MAX_ARGS).map(([key, value]) => {
+        return Object.entries(parsed).map(([key, value]) => {
             let text;
             if (typeof value === 'string')
                 text = value;
@@ -66,37 +66,66 @@ function parseArguments(raw) {
 function isPathKey(key) {
     return key === 'path' || key === 'file_path' || key === 'filePath' || key === 'filename';
 }
+function isErrorResult(content) {
+    return /^\s*(?:Error:|File not found|Operation cancelled|✗)/i.test(content ?? '');
+}
+/** Short local clock time, without a date or AM/PM suffix. */
+function localTime(ts) {
+    try {
+        return new Date(ts).toLocaleTimeString([], { hour12: false });
+    }
+    catch {
+        return '';
+    }
+}
 /**
  * Turn the transcript into row-budgeted blocks. Each block renders as a fixed
  * number of single-row <Text> lines (plus one gap row) so the estimate used for
  * scrolling matches what Ink actually paints.
  */
-function buildBlocks({ messages, theme, innerWidth, systemExpanded }) {
+function buildBlocks({ messages, theme, innerWidth, systemExpanded, resultsExpanded }) {
     const blocks = [];
     const matched = new Set();
+    // A result explicitly linked by tool_call_id belongs to that call; a call
+    // without an id must never claim it through the positional fallback.
+    const linkedIds = new Set();
+    for (const msg of messages) {
+        for (const call of msg.tool_calls ?? []) {
+            const id = call.id ?? msg.tool_call_id;
+            if (id)
+                linkedIds.add(id);
+        }
+    }
     const push = (key, nodeRows, node) => {
         blocks.push({ key, rows: nodeRows + GAP, node });
     };
     const findResultStart = (callId, after) => {
         if (callId) {
-            const direct = messages.findIndex((msg, index) => !matched.has(index) && msg.role === 'tool' && msg.tool_call_id === callId);
+            const direct = messages.findIndex((msg, index) => index > after && !matched.has(index) && msg.role === 'tool' && msg.tool_call_id === callId);
             if (direct >= 0)
                 return direct;
         }
-        // Fallback: the next tool message that no call has claimed yet.
-        return messages.findIndex((msg, index) => index > after && !matched.has(index) && msg.role === 'tool');
+        // Fallback: the NEXT unmatched tool message strictly after the assistant
+        // message, and never one already linked to a (possibly later) call.
+        return messages.findIndex((msg, index) => index > after &&
+            !matched.has(index) &&
+            msg.role === 'tool' &&
+            !(msg.tool_call_id && linkedIds.has(msg.tool_call_id)));
     };
-    const resultNode = (msg, standalone) => {
-        const lines = msg.content.replace(/\n+$/, '').split('\n');
-        const shown = lines.slice(0, MAX_RESULT_LINES);
-        const hidden = Math.max(0, lines.length - shown.length);
-        const isError = /^\s*Error:/i.test(msg.content);
+    const resultNode = (msg, standalone, fallbackName) => {
+        const allLines = msg.content.replace(/\n+$/, '').split('\n');
+        const lines = resultsExpanded ? allLines : allLines.slice(0, MAX_RESULT_LINES);
+        const hidden = Math.max(0, allLines.length - lines.length);
+        const isError = isErrorResult(msg.content);
         const prefix = standalone ? '▸ ' : isError ? '✗ ' : '✓ ';
-        const label = standalone ? `${msg.name ? `${msg.name} ` : ''}result` : 'result';
-        const nodeRows = 1 + shown.length + (hidden > 0 ? 1 : 0);
+        const link = [msg.name ?? fallbackName, msg.tool_call_id ? `#${msg.tool_call_id}` : '']
+            .filter(Boolean)
+            .join(' ');
+        const label = `result${link ? ` ← ${link}` : ''}${hidden > 0 ? ' · r full' : ''}`;
+        const nodeRows = 1 + lines.length + (hidden > 0 ? 1 : 0);
         return {
             rows: nodeRows,
-            node: (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: isError ? theme.error : theme.success, children: prefix }), _jsx(Text, { color: theme.dim, children: label })] }), shown.map((line, index) => (_jsx(Text, { color: isError ? theme.error : theme.muted, wrap: "truncate-end", children: line }, index))), hidden > 0 ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  … ${hidden} more lines` })) : null] })),
+            node: (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2502 " }), _jsx(Text, { color: isError ? theme.error : theme.success, children: prefix }), _jsx(Text, { color: theme.dim, children: label })] }), lines.map((line, index) => (_jsx(Text, { color: isError ? theme.error : theme.muted, wrap: "truncate-end", children: `│ ${line}` }, index))), hidden > 0 ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `│   … ${hidden} more lines` })) : null] })),
         };
     };
     messages.forEach((msg, index) => {
@@ -105,7 +134,7 @@ function buildBlocks({ messages, theme, innerWidth, systemExpanded }) {
                 push(`sys-${index}`, 1, (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `▸ System prompt · ${msg.content.length} chars — press s to expand` })));
             }
             else {
-                push(`sys-${index}`, 1 + estimateRows(msg.content, innerWidth), (_jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "\u25BE System prompt" }), _jsx(Text, { color: theme.dim, children: msg.content })] })));
+                push(`sys-${index}`, 1 + estimateRows(msg.content, innerWidth), (_jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "\u25BE System prompt" }), _jsx(Text, { color: theme.dim, wrap: "wrap", children: msg.content })] })));
             }
             return;
         }
@@ -123,16 +152,16 @@ function buildBlocks({ messages, theme, innerWidth, systemExpanded }) {
                 const resultMsg = resultIndex >= 0 ? messages[resultIndex] : undefined;
                 if (resultMsg)
                     matched.add(resultIndex);
-                const result = resultMsg ? resultNode(resultMsg, false) : null;
+                const result = resultMsg ? resultNode(resultMsg, false, name) : null;
                 const nodeRows = 1 + args.length + (result ? result.rows : 0);
-                push(`call-${index}-${callIndex}`, nodeRows, (_jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u25C6 " }), _jsx(Text, { color: theme.text, bold: true, children: name }), callId ? _jsx(Text, { color: theme.dim, children: `  ${callId.slice(0, 8)}` }) : null] }), args.map(([key, value], argIndex) => {
-                                const cap = isPathKey(key) ? MAX_ARG_CHARS * 2 : MAX_ARG_CHARS;
-                                const shown = value.length > cap ? `${value.slice(0, cap - 1)}…` : value;
-                                return (_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.dim, children: `  ${key}: ` }), _jsx(Text, { color: isPathKey(key) ? theme.accent : theme.muted, children: shown })] }, argIndex));
-                            }), result ? result.node : null] }) })));
+                push(`call-${index}-${callIndex}`, nodeRows, (_jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2502 \u25C6 " }), _jsx(Text, { color: theme.text, bold: true, children: name }), callId ? _jsx(Text, { color: theme.dim, children: `  ${callId.slice(0, 8)}` }) : null] }), args.map(([key, value], argIndex) => {
+                            const cap = isPathKey(key) ? MAX_PATH_ARG_CHARS : MAX_ARG_CHARS;
+                            const shown = value.length > cap ? `${value.slice(0, cap - 1)}…` : value;
+                            return (_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2502 " }), _jsx(Text, { color: theme.dim, children: `  ${key}: ` }), _jsx(Text, { color: isPathKey(key) ? theme.accent : theme.muted, children: shown })] }, argIndex));
+                        }), result ? result.node : null] })));
             });
             if (msg.content && msg.content.trim()) {
-                push(`assistant-${index}`, estimateRows(msg.content, innerWidth), (_jsx(Text, { children: renderFormattedText(msg.content, innerWidth, theme) })));
+                push(`assistant-${index}`, estimateFormattedRows(msg.content, innerWidth), (_jsx(Text, { children: renderFormattedText(msg.content, innerWidth, theme) })));
             }
             return;
         }
@@ -149,21 +178,33 @@ export const SubAgentDetail = ({ record, columns, height, onBack }) => {
     const theme = useTheme();
     const [scrollTop, setScrollTop] = React.useState(0);
     const [systemExpanded, setSystemExpanded] = React.useState(false);
-    const cardWidth = dialogWidth(columns);
-    const innerWidth = dialogInnerWidth(columns);
-    const bodyWidth = Math.max(1, innerWidth - 1); // 1 column for the scrollbar rail
+    const [resultsExpanded, setResultsExpanded] = React.useState(false);
     const totalHeight = Math.max(1, Math.floor(height));
-    // Borders (2) + header (2) + two rules + hint row.
-    const bodyRows = Math.max(1, totalHeight - 7);
-    const blocks = React.useMemo(() => buildBlocks({
-        messages: record.messages ?? [],
-        theme,
-        innerWidth: bodyWidth,
-        systemExpanded,
-    }), [record, theme, bodyWidth, systemExpanded]);
+    // Short terminals drop the border and rules: header + body + hint only.
+    const compact = totalHeight < 12;
+    const cardWidth = dialogWidth(columns);
+    const innerWidth = compact ? Math.max(1, cardWidth - 2) : dialogInnerWidth(columns);
+    const bodyWidth = Math.max(1, innerWidth - 1); // 1 column for the scrollbar rail
+    // Normal: border (2) + header (2) + two rules (2) + hint (1). Compact: header + hint.
+    const bodyRows = Math.max(1, totalHeight - (compact ? 2 : 7));
+    const messages = record.messages ?? [];
+    const rowsFor = (sys, res) => buildBlocks({ messages, theme, innerWidth: bodyWidth, systemExpanded: sys, resultsExpanded: res })
+        .reduce((sum, block) => sum + block.rows, 0);
+    const blocks = React.useMemo(() => buildBlocks({ messages, theme, innerWidth: bodyWidth, systemExpanded, resultsExpanded }), [record, theme, bodyWidth, systemExpanded, resultsExpanded]);
     const totalRows = blocks.reduce((sum, block) => sum + block.rows, 0);
     const maxScrollTop = Math.max(0, totalRows - bodyRows);
-    const top = Math.min(scrollTop, maxScrollTop);
+    // Snap to a block boundary: rendering a partially visible block inside a
+    // fixed-height scroll box makes Ink merge rows of nested <Text> nodes (the
+    // result was unreadable). Whole-block paging is predictable and never clips.
+    const top = (() => {
+        let offset = 0;
+        for (const block of blocks) {
+            if (offset + block.rows > Math.min(scrollTop, maxScrollTop))
+                return offset;
+            offset += block.rows;
+        }
+        return offset;
+    })();
     React.useEffect(() => {
         if (scrollTop > maxScrollTop)
             setScrollTop(maxScrollTop);
@@ -198,23 +239,28 @@ export const SubAgentDetail = ({ record, columns, height, onBack }) => {
             return;
         }
         if (input === 's' || input === 'S') {
-            setSystemExpanded((prev) => !prev);
+            const next = !systemExpanded;
+            // Clamp in this handler so collapsing a tall block cannot leave a jumpy gap.
+            setScrollTop((prev) => Math.min(prev, Math.max(0, rowsFor(next, resultsExpanded) - bodyRows)));
+            setSystemExpanded(next);
+            return;
+        }
+        if (input === 'r' || input === 'R') {
+            const next = !resultsExpanded;
+            setScrollTop((prev) => Math.min(prev, Math.max(0, rowsFor(systemExpanded, next) - bodyRows)));
+            setResultsExpanded(next);
         }
     });
-    // Row window: skip blocks fully above the viewport, pull the first partial
-    // block up with a negative margin, and let Ink clip the bottom to bodyRows.
+    // Only render whole blocks that start inside the viewport. The first visible
+    // block starts exactly at `top`, so no negative margin and no clipped child.
     let cursor = 0;
     const visible = [];
     for (const block of blocks) {
-        const end = cursor + block.rows;
-        if (end <= top) {
-            cursor = end;
-            continue;
-        }
         if (cursor >= top + bodyRows)
             break;
-        visible.push({ block, offset: cursor });
-        cursor = end;
+        if (cursor >= top)
+            visible.push(block);
+        cursor += block.rows;
     }
     const rail = scrollbarGeometry(totalRows, bodyRows, maxScrollTop - top);
     const railLines = scrollbarLines(rail);
@@ -222,11 +268,16 @@ export const SubAgentDetail = ({ record, columns, height, onBack }) => {
     const status = STATUS[record.status] ?? STATUS.error;
     const durationMs = Math.max(0, (record.endedAt ?? Date.now()) - record.startedAt);
     const duration = durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
-    const tokens = compactTokens(record.usage?.totalTokens);
-    const cost = record.usage?.estimatedCost ? `$${record.usage.estimatedCost.toFixed(2)}` : '';
-    const meta = [`${record.messageCount} msgs`, duration, tokens ? `${tokens} tok` : '', cost]
-        .filter(Boolean)
-        .join(' · ');
-    return (_jsxs(Box, { flexDirection: "column", width: cardWidth, height: totalHeight, flexShrink: 0, overflow: "hidden", borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, children: [_jsxs(Box, { flexDirection: "column", flexShrink: 0, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme[status.color], bold: true, wrap: "truncate-end", children: `${status.icon} ${status.label} ` }), record.agentType ? (_jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `[${record.agentType}] ` })) : null, _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.text, wrap: "truncate-end", children: record.task }) })] }), _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.error, wrap: "truncate-end", children: record.error ?? '' }) }), _jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.muted, wrap: "truncate-end", children: meta }) })] })] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), _jsxs(Box, { flexDirection: "row", height: bodyRows, flexShrink: 0, overflow: "hidden", children: [_jsx(Box, { flexDirection: "column", width: bodyWidth, flexShrink: 0, overflow: "hidden", children: visible.length === 0 ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "No transcript recorded." })) : (visible.map(({ block, offset }, index) => (_jsx(Box, { flexDirection: "column", flexShrink: 0, marginTop: index === 0 ? -(top - offset) : 0, marginBottom: GAP, children: block.node }, block.key)))) }), rail ? (_jsx(Box, { flexDirection: "column", width: 1, flexShrink: 0, overflow: "hidden", children: railLines.map((line, rowIndex) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.accent : theme.border, children: line }, rowIndex))) })) : null] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), _jsx(Box, { flexShrink: 0, children: _jsx(HintLine, { hint: "\u2191\u2193 scroll \u00B7 pgup/pgdn page \u00B7 s system \u00B7 esc back" }) })] }));
+    const timeText = `${localTime(record.startedAt)}→${record.endedAt ? localTime(record.endedAt) : 'now'} ${duration}`;
+    const idShort = `#${record.id.slice(-8)}`;
+    const label = record.label && record.label !== record.task ? record.label : '';
+    const usage = record.usage;
+    const usageText = usage
+        ? `in ${usage.inputTokens} / out ${usage.outputTokens} / total ${usage.totalTokens} / $${usage.estimatedCost.toFixed(2)}`
+        : '';
+    const borderProps = compact
+        ? {}
+        : { borderStyle: 'round', borderColor: theme.border, paddingX: 1 };
+    return (_jsxs(Box, { flexDirection: "column", width: cardWidth, height: totalHeight, flexShrink: 0, overflow: "hidden", ...borderProps, backgroundColor: theme.surface, children: [_jsxs(Box, { flexDirection: compact ? 'row' : 'column', flexShrink: 0, overflow: "hidden", children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: theme[status.color], bold: true, children: `${status.icon} ${status.label}` }) }), record.agentType ? (_jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: theme.accent, children: ` [${record.agentType}]` }) })) : null, label ? _jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: theme.dim, children: ` ${label} ·` }) }) : null, _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsx(Text, { color: theme.text, wrap: "truncate-end", children: ` ${record.task}` }) }), _jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, children: idShort }) }), _jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.muted, children: `${record.messageCount} msgs` }) })] }), !compact ? (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexDirection: "row", flexShrink: 1, minWidth: 1, overflow: "hidden", children: [record.error ? (_jsx(Text, { color: theme.error, bold: true, wrap: "truncate-end", children: `✗ ${record.error}` })) : null, _jsx(Text, { color: theme.muted, wrap: "truncate-end", children: timeText })] }), usageText ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.muted, wrap: "truncate-end", children: usageText }) })) : null] })) : null] }), !compact ? _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }) : null, _jsxs(Box, { flexDirection: "row", height: bodyRows, flexShrink: 0, overflow: "hidden", children: [_jsx(Box, { flexDirection: "column", width: bodyWidth, height: bodyRows, flexShrink: 0, overflow: "hidden", children: visible.length === 0 ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "No transcript recorded." })) : (visible.map((block) => (_jsxs(Box, { flexDirection: "column", flexShrink: 0, children: [block.node, _jsx(Box, { height: GAP, flexShrink: 0 })] }, block.key)))) }), rail ? (_jsx(Box, { flexDirection: "column", width: 1, flexShrink: 0, overflow: "hidden", children: railLines.map((line, rowIndex) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.accent : theme.border, children: line }, rowIndex))) })) : null] }), !compact ? _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }) : null, _jsx(Box, { flexShrink: 0, children: _jsx(HintLine, { hint: HINT, compact: compact }) })] }));
 };
 export default SubAgentDetail;

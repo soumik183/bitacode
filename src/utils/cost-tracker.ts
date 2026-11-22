@@ -73,6 +73,18 @@ export function calculateCost(
   return inputTokens * pricing.inputPerToken + outputTokens * pricing.outputPerToken;
 }
 
+/**
+ * Compact token count for the footer: `365.1K`, `1.2M`, or a plain integer.
+ * Uses an uppercase suffix so it reads as a unit, not a filename extension.
+ */
+export function formatTokenCount(value: number | undefined): string {
+  if (!Number.isFinite(value) || (value ?? 0) <= 0) return '0';
+  const n = value as number;
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(Math.round(n));
+}
+
 /** Get context window utilisation info. */
 export function getContextInfo(
   messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],

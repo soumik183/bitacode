@@ -1,6 +1,7 @@
 import { jsxs as _jsxs, jsx as _jsx } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
+import { formatToolLabel } from '../utils/tool-display.js';
 /** Braille spinner — quiet at 60 fps and legible at 1 cell. */
 const FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 export function spinnerGlyph(frame, animate) {
@@ -79,11 +80,15 @@ export function activityLabel(props) {
     switch (props.activity) {
         case 'tool': {
             const label = toolVerb(props.tool);
-            // "Reading file", "Searching files" and "Delegating sub-agents" already
-            // carry their object; "Working file" or "Building bash" would be noise,
-            // so those two phases stay bare.
-            if (label === 'Working' || label === 'Building')
+            if (label === 'Working' || label === 'Building') {
+                // A raw tool name with no known verb would read as a bare "Working";
+                // show the same friendly title as the transcript instead.
+                if (label === 'Working' && props.tool?.trim()) {
+                    return formatToolLabel(props.tool, undefined);
+                }
+                // "Working file" or "Building bash" would be noise, so bare phases stay.
                 return label;
+            }
             const object = toolObject(props.tool);
             if (!object || object === 'sub-agents')
                 return label;

@@ -111,11 +111,22 @@ test('transcript never collapses to zero on a tiny frame', () => {
 test('live rows sum every panel that is present', () => {
   const split = splitLiveArea(23, { todos: 3, thinking: 5, help: 0, streaming: 2 });
   assert.equal(split.liveRows, 10);
-  // Fixed chrome is the padded composer card (3), the footer (2) and the gap
-  // above the composer (1). Budgeting only 5 was the row the live area used to
-  // steal from the input.
-  assert.equal(fixedChromeRows(), 6);
-  assert.equal(split.transcriptRows, 23 - 6 - 10);
+  // Fixed chrome is only the padded composer card (3) and the footer (2).
+  assert.equal(fixedChromeRows(), 5);
+  assert.equal(split.transcriptRows, 23 - 5 - 10);
+});
+
+test('fixed chrome never reserves a row that is not drawn', () => {
+  // The old +1 "breathing gap above the composer" was never rendered: it only
+  // shrank the transcript, so chrome must be exactly the drawn rows.
+  for (const dense of [false, true]) {
+    assert.equal(
+      fixedChromeRows({ dense }),
+      composerBlockRows(1, dense) + footerBlockRows(dense)
+    );
+  }
+  assert.equal(fixedChromeRows(), 5);
+  assert.equal(fixedChromeRows({ composerRows: 3 }), composerBlockRows(3, false) + footerBlockRows(false));
 });
 
 test('the activity strip gets its own row so it cannot overlay the composer', () => {

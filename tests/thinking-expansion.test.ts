@@ -31,19 +31,17 @@ test('nothing changes while the phase state is stable', () => {
   assert.deepEqual(idleResult, { expanded: true, pinned: false });
 });
 
-test('expanded thinking height counts the clipped preview rows', () => {
-  // 40 short lines clip to the 8-row budget. The component renders header +
-  // marginTop + 8 content rows + overflow note + marginBottom = 12 rows. The
-  // old estimate ignored the content rows and returned 4, so the live area
-  // under-reserved and clicks missed the top of the expanded block.
+test('expanded thinking height counts every reasoning line', () => {
+  // Expanded shows all lines: header + marginTop + 40 content rows + marginBottom.
   const text = Array.from({ length: 40 }, (_, i) => `line ${i} with some content here`).join('\n');
-  assert.equal(thinkingBlockHeight(text, true, 80, 24), 12);
+  assert.equal(thinkingBlockHeight(text, true, 80, 24), 43);
 });
 
 test('thinking height tracks collapsed, short and empty blocks', () => {
-  assert.equal(thinkingBlockHeight('a short thought', false, 80, 24), 2);
-  // One short line: header + marginTop + 1 content row + marginBottom.
+  // Collapsed shows the first line: header + 1 content row + marginBottom.
+  assert.equal(thinkingBlockHeight('a short thought', false, 80, 24), 3);
+  // One short line expanded: header + marginTop + 1 content row + marginBottom.
   assert.equal(thinkingBlockHeight('a short thought', true, 80, 24), 4);
-  // The component returns null for whitespace-only text, so it takes no rows.
+  // Whitespace-only text takes no rows.
   assert.equal(thinkingBlockHeight('   ', true, 80, 24), 0);
 });

@@ -1,6 +1,7 @@
 import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
+import { formatTokenCount } from '../utils/cost-tracker.js';
 import { STATUS_LINE_ITEMS } from '../settings.js';
 // Bouncing equaliser: shifts one bar per frame so it reads as AI activity.
 const WAVE = '▁▂▃▄▅▆▇█▇▆▅▄▃▂▁';
@@ -36,9 +37,17 @@ const Shimmer = ({ text, frame }) => {
  * Footer under the prompt: folder on the left — swapped for a live activity
  * wave while the agent works — and model · variant · context on the right.
  */
-export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, busy, tool, frame, compact = false, gutter = 2, dense = false, segments = STATUS_LINE_ITEMS, tps = null, }) => {
+export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, variantColor, folder, branch, contextTokens, contextWindow, busy, tool, frame, compact = false, gutter = 2, dense = false, segments = STATUS_LINE_ITEMS, tps = null, }) => {
     const theme = useTheme();
-    const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
+    // Prefer the real window + token count so the number and percentage always
+    // agree; older events only carry a precomputed percentage, so fall back to it.
+    const windowSize = contextWindow ?? 0;
+    const usedTokens = contextTokens ?? 0;
+    const context = windowSize > 0 && usage
+        ? `${formatTokenCount(usedTokens)} (${Math.min(100, (usedTokens / windowSize) * 100).toFixed(0)}%)`
+        : usage
+            ? `${usage.contextPercent.toFixed(0)}%`
+            : '0%';
     const show = (segment) => segments.includes(segment);
     // One combined row per side keeps the footer a single line; a segment is
     // joined only when it is enabled so hidden items leave no stray separators.
@@ -52,12 +61,12 @@ export const UsageDisplay = ({ usage, totalCost, modelLabel, variantLabel, varia
     if (show('context')) {
         if (rightParts.length > 0)
             rightParts.push(_jsx(Text, { color: theme.dim, children: " \u00B7 " }, "ctx-sep"));
-        rightParts.push(_jsx(Text, { color: theme.dim, children: `ctx ${context}` }, "ctx"));
+        rightParts.push(_jsx(Text, { color: theme.dim, children: context }, "ctx"));
     }
     if (!compact && show('cost') && totalCost > 0) {
         rightParts.push(_jsx(Text, { color: theme.dim, children: ` · $${totalCost.toFixed(2)}` }, "cost"));
     }
     return (_jsxs(Box, { flexDirection: "row", width: "100%", backgroundColor: theme.bg, justifyContent: "space-between", paddingX: gutter, marginBottom: dense ? 0 : 1, flexShrink: 0, children: [_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", children: show('tool') && busy ? (_jsxs(_Fragment, { children: [wave(frame)
                             .split('')
-                            .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] })), !tool && tps && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Text, { color: theme.muted, children: tps })] }))] })) : show('folder') ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `📁 ${folder}` })) : null }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsx(Text, { wrap: "truncate-end", children: rightParts }) })] }));
+                            .map((bar, index) => (_jsx(Text, { color: LEVEL_COLORS[LEVELS.indexOf(bar)], bold: true, children: bar }, index))), tool && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Shimmer, { text: `running ${tool}`, frame: frame })] })), !tool && tps && (_jsxs(_Fragment, { children: [_jsx(Text, { children: '  ' }), _jsx(Text, { color: theme.muted, children: tps })] }))] })) : show('folder') ? (_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: '~/' }), _jsx(Text, { color: theme.muted, children: folder }), branch ? _jsx(Text, { color: theme.accent, children: `:${branch}` }) : null] })) : null }), _jsx(Box, { flexShrink: 1, minWidth: 0, children: _jsx(Text, { wrap: "truncate-end", children: rightParts }) })] }));
 };

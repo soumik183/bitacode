@@ -72,6 +72,21 @@ test('normal single replacement applies by index and returns a unified diff', as
   });
 });
 
+test('a whole-file edit returns the full diff without truncation', async () => {
+  const before = Array.from({ length: 120 }, (_, i) => `old ${i + 1}`).join('\n') + '\n';
+  const after = Array.from({ length: 120 }, (_, i) => `new ${i + 1}`).join('\n') + '\n';
+
+  await withFixture(before, async (rel, abs) => {
+    const result = await editFile(rel, before.trimEnd(), after.trimEnd());
+
+    assert.match(result, /Successfully edited/);
+    assert.doesNotMatch(result, /diff truncated/);
+    assert.match(result, /-old 120/);
+    assert.match(result, /\+new 120/);
+    assert.equal(await fs.readFile(abs, 'utf8'), after);
+  });
+});
+
 test('multiple expected replacements are applied by exact index', async () => {
   await withFixture('repeat\nkeep\nrepeat\n', async (rel, abs) => {
     const result = await editFile(rel, 'repeat', 'done', 2);

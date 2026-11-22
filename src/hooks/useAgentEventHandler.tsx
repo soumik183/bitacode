@@ -277,7 +277,7 @@ function flushStreamingBuffer(ctx: StreamingContext) {
   if (buffer.unflushedContent) {
     addStatic(
       <Box paddingX={2} paddingBottom={1}>
-        <Text>{renderFormattedText(buffer.unflushedContent, transcriptWidth(ctx.columns), ctx.palette)}</Text>
+        <Text wrap="wrap">{renderFormattedText(buffer.unflushedContent, transcriptWidth(ctx.columns), ctx.palette)}</Text>
       </Box>
     );
   }
@@ -457,7 +457,7 @@ function handleToolResult(
   event: AgentEvent & { type: 'tool_result' },
   ctx: ToolResultContext
 ) {
-  const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef, palette } = ctx;
+  const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef, palette, columns } = ctx;
 
   if (!event.toolCall) return;
 
@@ -470,7 +470,7 @@ function handleToolResult(
   // frame height so write() restores the correct frame.
   const rawResult = toolCall.result || '';
   try {
-    addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult, palette);
+    addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult, palette, columns);
   } catch (err: any) {
     logger.warn('Could not render tool result', { error: err?.message ?? String(err) });
     addStatic(
@@ -601,7 +601,7 @@ function handleDone(
     if (normalized) {
       ctx.addStatic(
         <Box paddingX={2} paddingBottom={1}>
-          <Text>{renderFormattedText(normalized, transcriptWidth(ctx.columns), ctx.palette)}</Text>
+          <Text wrap="wrap">{renderFormattedText(normalized, transcriptWidth(ctx.columns), ctx.palette)}</Text>
         </Box>
       );
     }

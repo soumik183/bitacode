@@ -12,6 +12,15 @@ function erasePrefixLength(text) {
     return index + ERASE_LINE.length + ERASE_END.length;
 }
 const instrumented = new WeakSet();
+/**
+ * Last positive, finite row count seen on any installed stdout. `stdout.rows`
+ * briefly reads 0/NaN during zoom bursts; jumping to the 24-row fallback then
+ * would paint past the live screen, so keep the last real value instead.
+ */
+let lastValidRows = 24;
+/** ED2/ED3: a full display clear passes through and physically blanks the screen. */
+// eslint-disable-next-line no-control-regex -- matching the terminal ESC is the point here
+const FULL_CLEAR = /\x1b\[[23]J/;
 export function installStableRenderer(stdout) {
     // Installing twice would wrap the wrapper, so every frame would be rewritten
     // twice (double newlines, drifting cursor). Guard per stream.
@@ -22,29 +31,44 @@ export function installStableRenderer(stdout) {
     let paintedRows = 0;
     stdout.write = function stableWrite(chunk, encodingOrCallback, callback) {
         const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+        const passthrough = () => {
+            // A dialog/resize full clear blanks the physical screen, so the padding
+            // count no longer describes what is on it.
+            if (FULL_CLEAR.test(text))
+                paintedRows = 0;
+            return originalWrite(chunk, encodingOrCallback, callback);
+        };
         const prefixLength = erasePrefixLength(text);
         // Not an Ink frame repaint (e.g. a bare clear) — pass through unchanged.
-        if (prefixLength < 0 || text.length === prefixLength) {
-            return originalWrite(chunk, encodingOrCallback, callback);
-        }
+        if (prefixLength < 0 || text.length === prefixLength)
+            return passthrough();
         const body = text.slice(prefixLength);
         const lastBreak = body.lastIndexOf('\n');
         // A repaint always ends its frame with a newline; anything after it is
         // Ink's cursor suffix. Be conservative if that invariant does not hold.
         if (lastBreak < 0)
-            return originalWrite(chunk, encodingOrCallback, callback);
+            return passthrough();
         const lines = body.slice(0, lastBreak).split('\n');
         const suffix = body.slice(lastBreak + 1);
+        const rowsNow = stdout.rows;
+        if (typeof rowsNow === 'number' && Number.isFinite(rowsNow) && rowsNow > 0) {
+            lastValidRows = Math.floor(rowsNow);
+        }
         // A zoom-out can leave `paintedRows` far larger than the new terminal.
         // Never write past the live screen height, or we scroll stale rows into
         // view and leave a blank/black screen. App already renders at rows - 1.
-        const maxRows = Math.max(1, (stdout.rows || 24) - 1);
+        const maxRows = Math.max(1, lastValidRows - 1);
         while (paintedRows > lines.length && lines.length < maxRows)
             lines.push('');
         if (lines.length > maxRows)
             lines.length = maxRows;
         paintedRows = lines.length;
-        const rewritten = `\x1b[H${lines.map((line) => `${line}\x1b[K`).join('\n')}\n${suffix}`;
+        const bodyRows = lines.map((line) => `${line}\x1b[K`).join('\n');
+        // App renders at rows - 1, so the terminal's last row is never written by
+        // a repaint. ED0 from the end of the final written row clears that row's
+        // tail AND the whole unmanaged last row; the newline then lands on the
+        // blank last row without scrolling.
+        const rewritten = `\x1b[H${bodyRows}${lines.length ? '\x1b[J' : ''}\n${suffix}`;
         return originalWrite(rewritten, encodingOrCallback, callback);
     };
 }

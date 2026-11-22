@@ -19,12 +19,16 @@ export interface WebSearchViewProps {
   payload: WebSearchPayload;
   /** Maximum number of URLs rendered (the tool itself caps at 8 per query). */
   maxResources?: number;
+  /** Terminal columns, supplied by the caller so narrow/zoomed frames fit. */
+  columns?: number;
 }
 
 const MAX_RESOURCE_CHARS = 170;
 
-function contentWidth(): number {
-  return Math.max(40, (process.stdout.columns ?? 80) - 8);
+// The bar, its margin and the card padding take 4 columns; reserve a little
+// more slack so a zoomed-in frame never wraps a URL onto the next row.
+function contentWidth(columns?: number): number {
+  return Math.max(1, (columns ?? 80) - 8);
 }
 
 function shorten(url: string, width: number): string {
@@ -49,9 +53,9 @@ const ResourceRow: React.FC<{ resource: WebSearchResource; width: number; color:
   </Box>
 );
 
-export const WebSearchView: React.FC<WebSearchViewProps> = ({ payload, maxResources = 24 }) => {
+export const WebSearchView: React.FC<WebSearchViewProps> = ({ payload, maxResources = 24, columns }) => {
   const theme = useTheme();
-  const width = contentWidth();
+  const width = contentWidth(columns);
   const resources = payload.blocks.flatMap((block) => block.resources).slice(0, maxResources);
   const queryLabel = payload.queries.length === 1 ? payload.queries[0] : `${payload.queries.length} queries`;
 
@@ -99,7 +103,7 @@ export const WebSearchView: React.FC<WebSearchViewProps> = ({ payload, maxResour
 };
 
 /** A short, tidy card for cases where the search never produced a payload. */
-export const WebSearchErrorView: React.FC<{ message: string }> = ({ message }) => {
+export const WebSearchErrorView: React.FC<{ message: string; columns?: number }> = ({ message }) => {
   const theme = useTheme();
   return (
     <Box paddingX={2} marginBottom={1}>
@@ -114,9 +118,11 @@ export const WebSearchErrorView: React.FC<{ message: string }> = ({ message }) =
 };
 
 /** Convenience for callers that only have the raw tool result string. */
-export const WebSearchResultView: React.FC<{ raw: string }> = ({ raw }) => {
+export const WebSearchResultView: React.FC<{ raw: string; columns?: number }> = ({ raw, columns }) => {
   const payload = parseWebSearchResult(raw);
-  return payload ? <WebSearchView payload={payload} /> : <WebSearchErrorView message={raw} />;
+  return payload
+    ? <WebSearchView payload={payload} columns={columns} />
+    : <WebSearchErrorView message={raw} columns={columns} />;
 };
 
 export default WebSearchView;

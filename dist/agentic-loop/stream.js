@@ -242,9 +242,8 @@ export async function processStream(stream, messages, model, pricing, onEvent) {
     const cost = pricing
         ? createUsageInfo(inputTokens, outputTokens, pricing, cachedTokens).estimatedCost
         : 0;
-    const contextPercent = pricing
-        ? getContextInfo(messages, pricing).utilizationPercentage
-        : 0;
+    const contextInfo = pricing ? getContextInfo(messages, pricing) : null;
+    const contextPercent = contextInfo?.utilizationPercentage ?? 0;
     if (!actualUsage) {
         logger.warn('Stream usage is partial (estimated); provider did not report usage.');
     }
@@ -262,7 +261,12 @@ export async function processStream(stream, messages, model, pricing, onEvent) {
     });
     onEvent({
         type: 'usage',
-        usage: { inputTokens, outputTokens, cost, contextPercent },
+        usage: {
+            inputTokens, outputTokens, cost, contextPercent,
+            ...(contextInfo
+                ? { contextTokens: contextInfo.currentTokens, contextWindow: contextInfo.maxTokens }
+                : {}),
+        },
     });
     // Log the full assistant message for debugging
     logger.debug('Assistant response details', {
@@ -284,6 +288,11 @@ export async function processStream(stream, messages, model, pricing, onEvent) {
     return {
         assistantMessage,
         hasToolCalls,
-        usage: { inputTokens, outputTokens, cost, contextPercent },
+        usage: {
+            inputTokens, outputTokens, cost, contextPercent,
+            ...(contextInfo
+                ? { contextTokens: contextInfo.currentTokens, contextWindow: contextInfo.maxTokens }
+                : {}),
+        },
     };
 }

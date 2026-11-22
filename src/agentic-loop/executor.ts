@@ -21,7 +21,19 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentEventHandler, ToolCallEvent } from '../agentic-loop.js';
 import { handleToolCall, truncateToolResult, isPlanMode, isDynamicToolName } from '../tools/index.js';
-import { runSubAgent, type SubAgentProgressHandler } from '../sub-agent.js';
+import {
+  runSubAgent,
+  runSubAgentFollowUp,
+  abortSubAgentRun,
+  isSubAgentRunning,
+  listRunningSubAgentIds,
+  type SubAgentProgressHandler,
+} from '../sub-agent.js';
+import {
+  listSubAgentRuns,
+  loadSubAgentRun,
+  releaseSubAgentRun,
+} from '../utils/subagent-store.js';
 import { logger } from '../utils/logger.js';
 import { createCheckpoint } from '../utils/checkpoint.js';
 import { getWorkingDirectory } from '../utils/path-validation.js';
@@ -336,6 +348,7 @@ export async function executeToolCalls(
             onEvent({
               type: 'sub_agent_iteration',
               subAgentTool: { tool: evt.tool, status: evt.status, iteration: evt.iteration, args: evt.args },
+              ...(evt.subAgentTranscriptId ? { subAgentTranscriptId: evt.subAgentTranscriptId } : {}),
               ...(evt.subAgentId ? { subAgentId: evt.subAgentId } : {}),
               ...(evt.subAgentLabel ? { subAgentLabel: evt.subAgentLabel } : {}),
               ...(evt.subAgentStatus ? { subAgentStatus: evt.subAgentStatus } : {}),
@@ -364,6 +377,83 @@ export async function executeToolCalls(
             });
           }
           return subResult.response;
+        }
+        if (name === 'subagent_control') {
+          if (isPlanMode() && (args.action === 'prompt' || args.action === 'abort' || args.action === 'release')) {
+            throw new Error('subagent_control mutations are blocked in plan mode. Press Tab to switch to build mode.');
+          }
+          const action = String(args.action ?? '');
+          const id = typeof args.id === 'string' ? args.id.trim() : '';
+          if (action === 'list' || action === 'status') {
+            const runs = await listSubAgentRuns(sessionId ?? '');
+            if (action === 'list') {
+              const running = new Set(listRunningSubAgentIds());
+              const lines = runs.map((run) =>
+                `- ${run.id} · ${run.status}${running.has(run.id) ? ' · running' : ''}${run.released ? ' · released' : ''}` +
+                ` · ${run.agentType ?? 'general-purpose'} · ${run.task.slice(0, 80)}`
+              );
+              const liveOnly = [...running].filter((runId) => !runs.some((run) => run.id === runId));
+              return [
+                `Sub-agent sessions (${runs.length} saved, ${running.size} running):`,
+                ...lines,
+                ...liveOnly.map((runId) => `- ${runId} · running (not yet saved)`),
+              ].join('\n') || 'No sub-agent sessions.';
+            }
+            if (!id) return 'subagent_control status requires an id.';
+            const record = await loadSubAgentRun(sessionId ?? '', id);
+            if (!record) return `No sub-agent session found with id ${id}.`;
+            return [
+              `${record.id} · ${record.status}${isSubAgentRunning(id) ? ' · running' : ''}${record.released ? ' · released' : ''}`,
+              `task: ${record.task}`,
+              `type: ${record.agentType ?? 'general-purpose'}${record.parentId ? ` · parent: ${record.parentId}` : ''}`,
+              `messages: ${record.messageCount} · tokens: ${record.usage?.totalTokens ?? 0} · cost: $${(record.usage?.estimatedCost ?? 0).toFixed(4)}`,
+              record.error ? `error: ${record.error}` : '',
+            ].filter(Boolean).join('\n');
+          }
+          if (action === 'abort') {
+            if (!id) return 'subagent_control abort requires an id.';
+            return abortSubAgentRun(id)
+              ? `Aborted sub-agent ${id}.`
+              : `Sub-agent ${id} is not running (start/prompt a session to control it).`;
+          }
+          if (action === 'release') {
+            if (!id) return 'subagent_control release requires an id.';
+            abortSubAgentRun(id);
+            const ok = await releaseSubAgentRun(sessionId ?? '', id);
+            return ok ? `Released sub-agent ${id}.` : `Could not release sub-agent ${id} (not found).`;
+          }
+          if (action === 'prompt') {
+            const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+            if (!id || !prompt) return 'subagent_control prompt requires both id and prompt.';
+            const record = await loadSubAgentRun(sessionId ?? '', id);
+            if (!record) return `No sub-agent session found with id ${id}.`;
+            if (record.released) return `Sub-agent ${id} was released and cannot be prompted.`;
+            const controlProgress: SubAgentProgressHandler = (evt) => {
+              onEvent({
+                type: 'sub_agent_iteration',
+                subAgentTool: { tool: evt.tool, status: evt.status, iteration: evt.iteration, args: evt.args },
+                ...(evt.subAgentTranscriptId ? { subAgentTranscriptId: evt.subAgentTranscriptId } : {}),
+                ...(evt.subAgentId ? { subAgentId: evt.subAgentId } : {}),
+                ...(evt.subAgentLabel ? { subAgentLabel: evt.subAgentLabel } : {}),
+                ...(evt.subAgentStatus ? { subAgentStatus: evt.subAgentStatus } : {}),
+                ...(evt.subAgentTask ? { subAgentTask: evt.subAgentTask } : {}),
+                ...(evt.subAgentType ? { subAgentType: evt.subAgentType } : {}),
+              });
+            };
+            const result = await runSubAgentFollowUp(
+              client, model, sessionId ?? '', id, prompt,
+              {
+                requestDefaults,
+                onProgress: controlProgress,
+                abortSignal,
+                pricing,
+                maxIterations: args.max_iterations,
+              },
+            );
+            if (!result) return `Could not continue sub-agent ${id}.`;
+            return result.response;
+          }
+          return `Unknown subagent_control action: ${action || '(none)'}. Use list/status/prompt/release/abort.`;
         }
         return handleToolCall(name, args, { sessionId, abortSignal });
       };

@@ -181,7 +181,7 @@ function flushStreamingBuffer(ctx) {
     const { addStatic, setIsStreaming, setStreamingText, streamingBufferRef } = ctx;
     const buffer = streamingBufferRef.current;
     if (buffer.unflushedContent) {
-        addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(buffer.unflushedContent, transcriptWidth(ctx.columns), ctx.palette) }) }));
+        addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { wrap: "wrap", children: renderFormattedText(buffer.unflushedContent, transcriptWidth(ctx.columns), ctx.palette) }) }));
     }
     streamingBufferRef.current = { unflushedContent: '', hasFlushedAnyLine: false, lastUiUpdate: 0 };
     setIsStreaming(false);
@@ -308,7 +308,7 @@ function handleToolCall(event, ctx) {
     }
 }
 function handleToolResult(event, ctx) {
-    const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef, palette } = ctx;
+    const { addStatic, setCompletionMessages, setActiveTool, assistantMessageRef, palette, columns } = ctx;
     if (!event.toolCall)
         return;
     const toolCall = event.toolCall;
@@ -319,7 +319,7 @@ function handleToolResult(event, ctx) {
     // frame height so write() restores the correct frame.
     const rawResult = toolCall.result || '';
     try {
-        addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult, palette);
+        addToolResultView(addStatic, toolCall.name, toolCall.args, rawResult, palette, columns);
     }
     catch (err) {
         logger.warn('Could not render tool result', { error: err?.message ?? String(err) });
@@ -404,7 +404,7 @@ function handleDone(_event, ctx) {
         // no half-formatted block left above the live tail.
         const normalized = normalizeTranscriptText(finalRef.message.content || '');
         if (normalized) {
-            ctx.addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized, transcriptWidth(ctx.columns), ctx.palette) }) }));
+            ctx.addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { wrap: "wrap", children: renderFormattedText(normalized, transcriptWidth(ctx.columns), ctx.palette) }) }));
         }
         // Add final spacing after the streamed text so the reply does not sit
         // flush against the input or the next tool result.

@@ -42,6 +42,20 @@ const inflight = new Map<string, Promise<ProviderModelList>>();
 
 const CACHE_TTL_MS = 5 * 60_000;
 
+/**
+ * Synchronous context-window lookup from the already-fetched model catalogs.
+ * Used by the footer so a remote-only model gets its real limit without a
+ * network call at render time. Returns undefined when nothing was fetched yet.
+ */
+export function getCachedContextWindow(providerId: string, modelId: string): number | undefined {
+  for (const [key, entry] of memoryCache) {
+    if (!key.startsWith(`${providerId}::`)) continue;
+    const model = entry.items.find((item) => item.id === modelId);
+    if (model?.contextWindow && model.contextWindow > 0) return model.contextWindow;
+  }
+  return undefined;
+}
+
 export function formatContextWindow(contextWindow?: number): string | undefined {
   if (!contextWindow || contextWindow <= 0) return undefined;
   if (contextWindow >= 1_000_000) {

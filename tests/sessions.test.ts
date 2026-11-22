@@ -55,6 +55,21 @@ test('assistant reasoning survives save and load for replay', async () => {
   assert.equal(assistant.content, 'answer');
 });
 
+test('concurrent saves of one session never collide over a temp file', async () => {
+  const session = createSession('model', 'provider');
+  session.completionMessages = [{ role: 'user', content: 'hello' }];
+  await Promise.all(
+    Array.from({ length: 12 }, (_, i) => {
+      const copy: typeof session = { ...session, title: `title ${i}` };
+      return saveSession(copy);
+    })
+  );
+  const loaded = await loadSession(session.id);
+  assert.ok(loaded, 'the session is readable after a save burst');
+  const leftovers = fs.readdirSync(sessionsDir).filter((name) => name.includes('.tmp'));
+  assert.deepEqual(leftovers, [], 'no temp files survive a save burst');
+});
+
 test('sanitizeCompletionMessages keeps reasoning on tool-call assistant messages', () => {
   const result = sanitizeCompletionMessages([
     {

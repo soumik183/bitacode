@@ -145,8 +145,9 @@ export function footerBlockRows(dense: boolean): number {
 }
 
 /**
- * Total fixed chrome below the transcript: composer card, activity strip,
- * footer and the single breathing gap above the composer.
+ * Total fixed chrome below the transcript: composer card, activity strip and
+ * footer. There used to be a +1 here for a "breathing gap above the composer",
+ * but that row was never rendered — it only stole a row from the transcript.
  */
 export function fixedChromeRows(options: { composerRows?: number; status?: number; dense?: boolean } = {}): number {
   const dense = options.dense ?? false;
@@ -154,7 +155,6 @@ export function fixedChromeRows(options: { composerRows?: number; status?: numbe
     composerBlockRows(options.composerRows ?? 1, dense)
     + finiteDim(options.status ?? 0, 0)
     + footerBlockRows(dense)
-    + 1
   );
 }
 

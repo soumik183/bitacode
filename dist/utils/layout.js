@@ -89,15 +89,15 @@ export function footerBlockRows(dense) {
     return dense ? 1 : 2;
 }
 /**
- * Total fixed chrome below the transcript: composer card, activity strip,
- * footer and the single breathing gap above the composer.
+ * Total fixed chrome below the transcript: composer card, activity strip and
+ * footer. There used to be a +1 here for a "breathing gap above the composer",
+ * but that row was never rendered — it only stole a row from the transcript.
  */
 export function fixedChromeRows(options = {}) {
     const dense = options.dense ?? false;
     return (composerBlockRows(options.composerRows ?? 1, dense)
         + finiteDim(options.status ?? 0, 0)
-        + footerBlockRows(dense)
-        + 1);
+        + footerBlockRows(dense));
 }
 /**
  * Split the frame between the scrolling transcript and the fixed live area.

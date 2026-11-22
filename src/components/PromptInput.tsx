@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { stripMouseReports } from '../utils/mouse.js';
+import { splitPathTokens } from '../utils/path-highlight.js';
 import { useTheme } from '../theme.js';
 import type { MentionCandidate, MentionCollectionResult } from '../utils/mention-candidates.js';
 
@@ -33,6 +34,8 @@ export interface PromptInputProps {
    * selected label (a relative path for files, a name for skills).
    */
   onMentionCandidates?: (token: string) => Promise<MentionCollectionResult>;
+  /** Click-to-position request from the host: column within the caret row. */
+  caretRequest?: { col: number; nonce: number };
 }
 
 // Display columns without a dependency: CJK/emoji take two, combining/zero-width take none.
@@ -182,6 +185,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   onPaste,
   onCompleteMention,
   onMentionCandidates,
+  caretRequest,
 }) => {
   const theme = useTheme();
   // Cursor is a code-point index, not a UTF-16 offset: arrows and backspace
@@ -189,6 +193,36 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const points = useMemo(() => Array.from(value), [value]);
   const [cursor, setCursor] = useState(points.length);
   const offset = Math.min(cursor, points.length);
+
+  // Ink keeps one input listener per render, so an async state update (mention
+  // candidates, paste, history) can leave the handler holding an older value.
+  // Edits go through refs and update them synchronously; the caret can never
+  // point past the text it is editing or submit a stale draft.
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const pointsRef = useRef(points);
+  pointsRef.current = points;
+  const offsetRef = useRef(offset);
+  offsetRef.current = offset;
+
+  useEffect(() => {
+    if (cursor > points.length) setCursor(points.length);
+  }, [cursor, points.length]);
+
+  // A left click in the composer asks the host to move the caret to a column
+  // on its current visual row. Map the column through code points so emoji and
+  // CJK never get split, and keep the index inside that row.
+  useEffect(() => {
+    if (!caretRequest) return;
+    const chars = pointsRef.current;
+    let rowStart = offsetRef.current;
+    while (rowStart > 0 && chars[rowStart - 1] !== '\n') rowStart--;
+    let rowEnd = rowStart;
+    while (rowEnd < chars.length && chars[rowEnd] !== '\n') rowEnd++;
+    const next = rowStart + Math.max(0, Math.min(caretRequest.col, rowEnd - rowStart));
+    offsetRef.current = next;
+    setCursor(next);
+  }, [caretRequest?.nonce]);
   // Columns the text may occupy before soft-wrapping.
   const displayWidth = Math.max(1, Math.floor(width && width > 0 ? width : 10_000));
 
@@ -234,14 +268,38 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   const mentionRef = useRef(mention);
   mentionRef.current = mention;
 
-  const acceptMention = (candidate: MentionCandidate): void => {
-    const activeMention = mentionRef.current;
-    if (!activeMention) return;
-    const before = points.slice(0, activeMention.start).join('');
-    const after = points.slice(offset).join('');
-    const next = `${before}${candidate.label}${after}`;
+  /** Single edit path: splice code points, then move the caret with the text. */
+  const applyEdit = (start: number, end: number, insert: string): void => {
+    const chars = pointsRef.current;
+    const from = Math.max(0, Math.min(start, chars.length));
+    const to = Math.max(from, Math.min(end, chars.length));
+    const head = chars.slice(0, from).join('');
+    const next = `${head}${insert}${chars.slice(to).join('')}`;
+    const nextCursor = Array.from(`${head}${insert}`).length;
+    valueRef.current = next;
+    pointsRef.current = Array.from(next);
+    offsetRef.current = nextCursor;
     onChange(next);
-    setCursor(Array.from(before + candidate.label).length);
+    setCursor(nextCursor);
+  };
+
+  /** Newline that keeps the current line's indentation (lists, code, nested prose). */
+  const newlineWithIndent = (): string => {
+    const chars = pointsRef.current;
+    let lineStart = offsetRef.current;
+    while (lineStart > 0 && chars[lineStart - 1] !== '\n') lineStart--;
+    const indent = chars.slice(lineStart).join('').match(/^\s*/)?.[0] ?? '';
+    return `\n${indent}`;
+  };
+
+  const acceptMention = (candidate: MentionCandidate): void => {
+    // Recompute the token from the live text: the ref may be newer than the
+    // render that produced `mention` when candidates arrived asynchronously.
+    const activeMention = findMentionInValue(valueRef.current, offsetRef.current);
+    if (!activeMention) return;
+    // A trailing space closes the file token so the highlighter keeps colouring
+    // only the path while subsequent typing stays plain text.
+    applyEdit(activeMention.start, offsetRef.current, `${candidate.label} `);
     setSuggestion(null);
     setDismissedToken(null);
   };
@@ -249,9 +307,10 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   // Start index of the whitespace-delimited word before `at` (code points).
   // Like readline's word-rubout, trailing whitespace is eaten with the word.
   const wordStartBefore = (at: number): number => {
+    const chars = pointsRef.current;
     let i = at;
-    while (i > 0 && /\s/.test(points[i - 1])) i--;
-    while (i > 0 && !/\s/.test(points[i - 1])) i--;
+    while (i > 0 && /\s/.test(chars[i - 1] ?? '')) i--;
+    while (i > 0 && !/\s/.test(chars[i - 1] ?? '')) i--;
     return i;
   };
 
@@ -262,8 +321,8 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       // enter submits; the modifier variants insert a line break instead.
       if (key.return) {
         if (key.shift || key.meta || key.ctrl) {
-          onChange(points.slice(0, offset).join('') + '\n' + points.slice(offset).join(''));
-          setCursor(offset + 1);
+          const at = offsetRef.current;
+          applyEdit(at, at, newlineWithIndent());
           return;
         }
         // Enter accepts the highlighted @ candidate instead of submitting.
@@ -276,7 +335,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             return;
           }
         }
-        onSubmit(value);
+        onSubmit(valueRef.current);
         return;
       }
       if (key.escape && popupIsOpen) {
@@ -284,20 +343,33 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         if (mentionRef.current) setDismissedToken(mentionRef.current.token);
         return;
       }
-      if (key.leftArrow) {
-        setCursor(Math.max(0, offset - 1));
+      if (key.leftArrow || key.rightArrow) {
+        const at = offsetRef.current;
+        const chars = pointsRef.current;
+        if (key.ctrl || key.meta) {
+          // Word-wise navigation; App reserves only ctrl+up/down for scrolling.
+          let next = at;
+          if (key.leftArrow) {
+            while (next > 0 && /\s/.test(chars[next - 1] ?? '')) next--;
+            while (next > 0 && !/\s/.test(chars[next - 1] ?? '')) next--;
+          } else {
+            while (next < chars.length && !/\s/.test(chars[next] ?? '')) next++;
+            while (next < chars.length && /\s/.test(chars[next] ?? '')) next++;
+          }
+          offsetRef.current = next;
+          setCursor(next);
+        } else {
+          const next = key.leftArrow ? Math.max(0, at - 1) : Math.min(chars.length, at + 1);
+          offsetRef.current = next;
+          setCursor(next);
+        }
         return;
       }
-      if (key.rightArrow) {
-        setCursor(Math.min(points.length, offset + 1));
-        return;
-      }
-      // Alt+Backspace/Delete (Ink reports Alt as meta) deletes one whole word.
-      // Keep it ahead of the single-glyph backspace branch below.
-      if ((key.backspace || key.delete) && key.meta) {
-        const start = wordStartBefore(offset);
-        onChange(points.slice(0, start).join('') + points.slice(offset).join(''));
-        setCursor(start);
+      // Alt/Ctrl+Backspace deletes one whole word, ahead of the single-glyph
+      // branch below. Ink reports Alt as `meta`.
+      if ((key.backspace || key.delete) && (key.meta || key.ctrl)) {
+        const at = offsetRef.current;
+        applyEdit(wordStartBefore(at), at, '');
         return;
       }
       // Editing shortcuts run before the modifier guard so they never fall
@@ -310,44 +382,61 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         switch (input.toLowerCase()) {
           case 'j': {
             // ctrl+j is a line feed in most terminals: treat it as newline.
-            onChange(points.slice(0, offset).join('') + '\n' + points.slice(offset).join(''));
-            setCursor(offset + 1);
+            const at = offsetRef.current;
+            applyEdit(at, at, newlineWithIndent());
             return;
           }
           case 'a':
+            offsetRef.current = 0;
             setCursor(0);
             return;
-          case 'e':
-            setCursor(points.length);
-            return;
-          case 'u':
-            onChange('');
-            setCursor(0);
-            return;
-          case 'w': {
-            const start = wordStartBefore(offset);
-            onChange(points.slice(0, start).join('') + points.slice(offset).join(''));
-            setCursor(start);
+          case 'e': {
+            const end = pointsRef.current.length;
+            offsetRef.current = end;
+            setCursor(end);
             return;
           }
-          case 'd':
-            if (offset < points.length) {
-              onChange(points.slice(0, offset).join('') + points.slice(offset + 1).join(''));
-            }
+          case 'u':
+            applyEdit(0, pointsRef.current.length, '');
             return;
+          case 'w': {
+            const at = offsetRef.current;
+            applyEdit(wordStartBefore(at), at, '');
+            return;
+          }
+          case 'd': {
+            const at = offsetRef.current;
+            if (at < pointsRef.current.length) applyEdit(at, at + 1, '');
+            return;
+          }
           case 'k':
-            if (offset < points.length) {
-              onChange(points.slice(0, offset).join(''));
-            }
+            applyEdit(offsetRef.current, pointsRef.current.length, '');
             return;
           default:
             return;
         }
       }
       if (key.backspace || key.delete) {
-        if (offset === 0) return;
-        onChange(points.slice(0, offset - 1).join('') + points.slice(offset).join(''));
-        setCursor(offset - 1);
+        const at = offsetRef.current;
+        if (at === 0) return;
+        applyEdit(at - 1, at, '');
+        return;
+      }
+      // Home/End jump to the first/last candidate while the @ popup is open.
+      // Skills are last, so End is the quick route to them in a long list.
+      if (popupIsOpen && currentSuggestion && currentSuggestion.candidates.length > 0 &&
+          (key.home || key.end || key.pageUp || key.pageDown)) {
+        const count = currentSuggestion.candidates.length;
+        const page = Math.max(1, MAX_POPUP_ITEMS - 3);
+        setSuggestion((prev) => {
+          if (!prev) return prev;
+          let index = prev.index;
+          if (key.home) index = 0;
+          else if (key.end) index = count - 1;
+          else if (key.pageUp) index = Math.max(0, index - page);
+          else index = Math.min(count - 1, index + page);
+          return { ...prev, index };
+        });
         return;
       }
       // Up/down: walk prompt history on a single-row draft, otherwise move the
@@ -363,9 +452,14 @@ export const PromptInput: React.FC<PromptInputProps> = ({
         // Prompt history and slash-palette navigation are owned by App, which
         // can see both the draft and the palette. Keeping them out of this
         // handler prevents Up from silently replacing an open `/` draft.
-        const rows = wrapPromptLines(points, displayWidth);
-        const next = moveCursorVertically(points, rows, offset, key.upArrow ? -1 : 1);
-        if (next !== offset) setCursor(next);
+        const chars = pointsRef.current;
+        const at = offsetRef.current;
+        const rows = wrapPromptLines(chars, displayWidth);
+        const next = moveCursorVertically(chars, rows, at, key.upArrow ? -1 : 1);
+        if (next !== at) {
+          offsetRef.current = next;
+          setCursor(next);
+        }
         return;
       }
       // Tab completes an @mention when the caret is inside one; otherwise it is
@@ -380,9 +474,13 @@ export const PromptInput: React.FC<PromptInputProps> = ({
             return;
           }
         }
-        if (onCompleteMention && mention) {
-          void Promise.resolve(onCompleteMention(value, offset)).then((result) => {
+        const liveMention = findMentionInValue(valueRef.current, offsetRef.current);
+        if (onCompleteMention && liveMention) {
+          void Promise.resolve(onCompleteMention(valueRef.current, offsetRef.current)).then((result) => {
             if (!result) return;
+            valueRef.current = result.value;
+            pointsRef.current = Array.from(result.value);
+            offsetRef.current = result.cursor;
             onChange(result.value);
             setCursor(result.cursor);
           });
@@ -400,18 +498,15 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       // A big or multi-line paste goes through the caller, which may spill it to
       // disk and hand back a one-line marker instead of hundreds of rows.
       if (onPaste && (text.includes('\n') || text.length >= 2_000)) {
-        const before = points.slice(0, offset).join('');
-        const after = points.slice(offset).join('');
+        const at = offsetRef.current;
         void Promise.resolve(onPaste(text)).then((replacement) => {
           const inserted = typeof replacement === 'string' ? replacement : text;
-          const next = `${before}${inserted}${after}`;
-          onChange(next);
-          setCursor(Array.from(before + inserted).length);
+          applyEdit(at, at, inserted);
         });
         return;
       }
-      onChange(points.slice(0, offset).join('') + text + points.slice(offset).join(''));
-      setCursor(offset + Array.from(text).length);
+      const at = offsetRef.current;
+      applyEdit(at, at, text);
     },
     { isActive: !isDisabled }
   );
@@ -440,7 +535,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({
 
   // Suggestion popup geometry. Its rows are included in the reported height so
   // the surrounding layout reserves space instead of clipping the card.
-  const MAX_POPUP_ITEMS = 4;
+  // Files first, then skills. Both groups stay visible at once (the collector
+  // caps files and skills), so a skill title is never hidden below the fold.
+  const MAX_POPUP_ITEMS = 10;
   const popupVisible = suggestionOpen && Boolean(suggestion);
   const selected = suggestion ? Math.min(suggestion.index, Math.max(0, suggestion.candidates.length - 1)) : 0;
   const popupStart = suggestion && suggestion.candidates.length > MAX_POPUP_ITEMS
@@ -483,6 +580,43 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     file: 'muted', directory: 'info', skill: 'accent',
   };
 
+  // Render one visual row: text spans keep their path colour, and the caret is
+  // a separate inverse cell to the RIGHT of the text, never painted onto a
+  // character. Only when a row is completely full does it fall back to the
+  // last cell, so the composer never grows past its width budget.
+  const renderFieldRow = (text: string, rel: number | null): React.ReactNode => {
+    const spans = splitPathTokens(text || ' ');
+    const total = spans.reduce((sum, span) => sum + Array.from(span.text).length, 0);
+    const caretAtEnd = rel !== null && rel >= total;
+    let consumed = 0;
+    const nodes: React.ReactNode[] = spans.map((span, index) => {
+      const points = Array.from(span.text);
+      const spanStart = consumed;
+      consumed += points.length;
+      const color = span.path ? theme.accent : theme.text;
+      if (rel === null || rel < spanStart || rel >= spanStart + points.length) {
+        return <Text key={index} color={color}>{span.text}</Text>;
+      }
+      const local = rel - spanStart;
+      return (
+        <Text key={index} color={color}>
+          {points.slice(0, local).join('')}
+          <Text inverse>{points[local] ?? ' '}</Text>
+          {points.slice(local + 1).join('')}
+        </Text>
+      );
+    });
+    if (caretAtEnd) {
+      const used = Array.from(text).reduce((sum, ch) => sum + charWidth(ch), 0);
+      // Append only when the row has a spare column; a completely full row
+      // stays within budget and simply shows no separate caret cell.
+      if (used < displayWidth) {
+        nodes.push(<Text key="caret" inverse>{'▏'}</Text>);
+      }
+    }
+    return nodes;
+  };
+
   const fieldNode = !value ? (
     <Text color={theme.placeholder} wrap="truncate-end">{placeholder}</Text>
   ) : (
@@ -490,17 +624,13 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       {windowLines.map((line, index) => {
         const text = displayPoints.slice(line.start, line.end).join('');
         const newline = index > 0 ? '\n' : null;
-        if (firstRow + index !== cursorLine) {
-          return <React.Fragment key={index}>{newline}{text || ' '}</React.Fragment>;
-        }
-        const rel = Math.max(0, Math.min(offset - line.start, Array.from(text).length));
-        const shown = Array.from(text);
+        const rel = firstRow + index === cursorLine
+          ? Math.max(0, Math.min(offset - line.start, Array.from(text).length))
+          : null;
         return (
           <React.Fragment key={index}>
             {newline}
-            {shown.slice(0, rel).join('')}
-            <Text inverse>{shown[rel] ?? ' '}</Text>
-            {shown.slice(rel + 1).join('')}
+            {renderFieldRow(text, rel)}
           </React.Fragment>
         );
       })}
@@ -521,7 +651,7 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
         <Text color={theme.accent} bold wrap="truncate-end">{'◈ Reference'}</Text>
         <Text color={theme.dim} wrap="truncate-end">
-          {`${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · enter insert · esc close`}
+          {`${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ move · end skills · enter · esc`}
         </Text>
       </Box>
       <Text color={theme.border} wrap="truncate-end">{rule}</Text>
@@ -542,15 +672,17 @@ export const PromptInput: React.FC<PromptInputProps> = ({
               </Box>
             ) : null}
             <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
-              <Box flexShrink={1} minWidth={1} flexDirection="row">
+              {/* Title is primary and never shrinks away; the description is
+                  the part that gives way when the terminal is narrow. */}
+              <Box flexShrink={0} flexDirection="row">
                 <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
                 <Text color={theme[kindColor[candidate.kind]]}>{`${kindIcon[candidate.kind]} `}</Text>
-                <Text color={active ? theme.accent : theme.text} bold={active} wrap="truncate-end">
+                <Text color={active ? theme.accent : theme.text} bold={active || candidate.kind === 'skill'}>
                   {candidate.label}
                 </Text>
               </Box>
               {candidate.detail ? (
-                <Box flexShrink={0} marginLeft={1}>
+                <Box flexShrink={1} minWidth={0} marginLeft={2} overflow="hidden">
                   <Text color={theme.dim} wrap="truncate-end">
                     {candidate.source ? `${candidate.source} · ${candidate.detail}` : candidate.detail}
                   </Text>

@@ -8,7 +8,7 @@ export interface ReadSummaryViewProps {
   error?: string;
 }
 
-/** One-line transcript summary for a read_file result: no box, no code. */
+/** One-line transcript summary for a file read: no box, no code. */
 export const ReadSummaryView: React.FC<ReadSummaryViewProps> = ({ summary, error }) => {
   const theme = useTheme();
   const path = summary?.filePath || 'file';
@@ -19,15 +19,17 @@ export const ReadSummaryView: React.FC<ReadSummaryViewProps> = ({ summary, error
       : typeof summary?.total === 'number'
         ? `${summary.total} lines`
         : summary?.range
-          ? `lines ${summary.range}`
+          ? summary.range
           : 'empty';
+  const highlight = !error && !summary?.empty && (Boolean(summary?.range) || typeof summary?.total === 'number');
 
   return (
-    <Box paddingX={2} marginY={1} overflow="hidden">
+    <Box paddingX={2} marginBottom={1} overflow="hidden">
       <Text wrap="truncate-end">
         <Text color={theme.info}>{'▤ '}</Text>
         <Text color={theme.text}>{path}</Text>
-        <Text color={error ? theme.error : theme.dim}>{` · ${meta}`}</Text>
+        <Text color={theme.dim}>{' · '}</Text>
+        <Text color={error ? theme.error : highlight ? theme.accent : theme.dim}>{meta}</Text>
       </Text>
     </Box>
   );

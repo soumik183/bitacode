@@ -51,10 +51,10 @@ test('error boundary keeps the terminal open instead of unmounting', () => {
   assert.match(lastFrame() ?? '', /ctrl\+c/);
 });
 
-test('thinking block hides reasoning until expanded', () => {
+test('thinking block shows only the first line when collapsed', () => {
   const { lastFrame } = render(
     <ThinkingBlock
-      text="secret reasoning"
+      text={'first secret line\nsecond hidden line'}
       expanded={false}
       active
       animate={false}
@@ -65,7 +65,8 @@ test('thinking block hides reasoning until expanded', () => {
   );
   const frame = lastFrame() ?? '';
   assert.match(frame, /Thinking/);
-  assert.doesNotMatch(frame, /secret reasoning/);
+  assert.match(frame, /first secret line/);
+  assert.doesNotMatch(frame, /second hidden line/);
   assert.match(frame, /click to expand/);
 });
 
@@ -128,7 +129,7 @@ test('prompt input grows one row per wrapped line and keeps the tail visible', (
   for (const row of rows) {
     assert.ok(row.length <= 20, `row "${row}" exceeds 20 columns`);
   }
-  assert.match(rows[rows.length - 1], /TAILEND$/, 'the tail is visible with the cursor at the end');
+  assert.match(rows[rows.length - 1], /TAILEND▏$/, 'the tail stays visible and the caret sits to its right');
 });
 
 test('prompt input scrolls the row window when the cursor moves into the middle', async () => {
@@ -142,7 +143,7 @@ test('prompt input scrolls the row window when the cursor moves into the middle'
   };
   const { stdin, lastFrame } = render(<Harness />);
   await settle();
-  assert.match(plain(lastFrame() ?? ''), /END$/, 'starts at the tail');
+  assert.match(plain(lastFrame() ?? ''), /END▏$/, 'starts at the tail with the caret to its right');
 
   for (let i = 0; i < 27; i++) {
     stdin.write('\x1b[D');
@@ -179,7 +180,7 @@ test('prompt input wraps a long masked value and caps the visible rows', () => {
   assert.ok(rows.length > 1, 'ten wrapped rows must not collapse onto one');
   for (const row of rows) {
     assert.ok(row.length <= 20, `row "${row}" exceeds 20 columns`);
-    assert.match(row.trimEnd(), /^\*+$/, 'only asterisks are visible');
+    assert.match(row.trimEnd(), /^\*+▏?$/, 'only asterisks and the caret are visible');
   }
 });
 
@@ -241,7 +242,7 @@ test('prompt input mask shows one star per glyph, not per UTF-16 unit', () => {
   const { lastFrame } = render(
     <PromptInput value="a😀漢b" onChange={() => {}} onSubmit={() => {}} mask />
   );
-  assert.equal(plain(lastFrame() ?? '').trim(), '****');
+  assert.equal(plain(lastFrame() ?? '').trim(), '****▏');
 });
 
 test('prompt input reports growing rows so the layout can reserve space', async () => {
@@ -340,7 +341,7 @@ test('todo panel never overflows a narrow terminal', () => {
   }
 });
 
-test('thinking block collapses to a plain header once reasoning ends', async () => {
+test('thinking block collapses to one preview line once reasoning ends', async () => {
   const { lastFrame, rerender } = render(
     <ThinkingBlock
       text="live reasoning"
@@ -371,7 +372,7 @@ test('thinking block collapses to a plain header once reasoning ends', async () 
   const frame = lastFrame() ?? '';
   assert.match(frame, /Thought/);
   assert.doesNotMatch(frame, /Thinking\./);
-  assert.doesNotMatch(frame, /live reasoning/);
+  assert.match(frame, /live reasoning/, 'collapsed keeps one preview line');
   assert.doesNotMatch(frame, /\.\.\./);
 });
 
@@ -383,12 +384,15 @@ test('thinking preview is clipped by rows, not just characters', () => {
   assert.ok(hiddenChars > 0);
 });
 
-test('collapsed thinking block stays a two-row header', () => {
-  assert.equal(thinkingBlockHeight('anything at all', false, 80, 24), 2);
+test('collapsed thinking block shows exactly the first line', () => {
+  assert.equal(thinkingBlockHeight('first line\nsecond line', false, 80, 24), 3);
   const { lastFrame } = render(
-    <ThinkingBlock text="anything at all" expanded={false} active={false} animate={false} frame={0} columns={80} rows={24} />
+    <ThinkingBlock text={'first line\nsecond line'} expanded={false} active={false} animate={false} frame={0} columns={80} rows={24} />
   );
-  assert.equal((lastFrame() ?? '').split('\n').length, 2);
+  const frame = plain(lastFrame() ?? '');
+  assert.match(frame, /first line/);
+  assert.doesNotMatch(frame, /second line/);
+  assert.equal(frame.split('\n').length, 3);
 });
 
 test('thinking block height matches the rendered row count for multi-line reasoning', () => {
@@ -449,17 +453,15 @@ test('archived thinking keeps each reasoning line and expands to all of them on 
 
   // Each kept line is its own row, in order — never flattened with `/\s+/g`.
   const collapsedRows = collapsed.split('\n').map((row) => row.trim());
-  for (const line of lines.slice(0, 6)) {
-    assert.ok(collapsedRows.includes(line), `collapsed preview is missing "${line}"`);
-  }
-  assert.doesNotMatch(collapsed, /thought line 6/);
-  assert.match(collapsed, /… 4 more lines · click to expand/);
+  assert.ok(collapsedRows.includes(lines[0]), 'collapsed preview keeps the first line');
+  assert.doesNotMatch(collapsed, /thought line 1/);
+  assert.match(collapsed, /… 9 more lines · click to expand/);
   assert.doesNotMatch(collapsed, /thought line 0 thought line 1/);
 
   const expanded = plain(render(
     <ThinkingArchive text={text} elapsedMs={1000} columns={80} expanded />
   ).lastFrame() ?? '');
-  assert.match(expanded, /click to collapse/);
+  assert.doesNotMatch(expanded, /click to collapse/, 'only one expand hint is shown');
   const expandedRows = expanded.split('\n').map((row) => row.trim());
   for (const line of lines) {
     assert.ok(expandedRows.includes(line), `expanded view is missing "${line}"`);
@@ -774,9 +776,7 @@ test('resuming a session replays saved reasoning line by line before its answer,
     assert.equal((frame.match(/FINAL-ANSWER-MARKER/g) ?? []).length, 1, 'the answer appears once');
 
     const rows = frame.split('\n').map((row) => row.trim());
-    for (const step of ['THOUGHT-STEP-ONE', 'THOUGHT-STEP-TWO', 'THOUGHT-STEP-THREE']) {
-      assert.ok(rows.includes(step), `replayed reasoning is missing the line "${step}"`);
-    }
+    assert.ok(rows.includes('THOUGHT-STEP-ONE'), 'collapsed thought keeps its first line');
     assert.ok(
       frame.indexOf('THOUGHT-STEP-ONE') < frame.indexOf('FINAL-ANSWER-MARKER'),
       'the reasoning card is replayed above its answer'
@@ -887,7 +887,7 @@ test('launching with no config shows the main screen and a setup hint, not a wiz
     const frame = await waitForFrame(lastFrame, (f) => f.includes('Build anything…'));
     assert.match(frame, /No provider configured/, 'setup hint is visible');
     assert.doesNotMatch(frame, /Choose where to configure/, 'no blocking wizard on launch');
-    assert.match(frame, /📁/, 'footer is visible');
+    assert.match(frame, /~\//, 'footer is visible');
   } finally {
     process.env.HOME = originalHome;
     if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
@@ -905,7 +905,7 @@ test('opening help never pushes the composer or footer off screen', async () => 
     app.stdin.write('\x1bh'); // Alt+h
     const frame = await waitForFrame(app.lastFrame, (f) => f.includes('Keys (ctrl or alt)'));
     assert.match(frame, /Build anything…/, 'composer stays visible while help is open');
-    assert.match(frame, /📁/, 'footer stays visible while help is open');
+    assert.match(frame, /~\//, 'footer stays visible while help is open');
   } finally {
     app.cleanupAll();
   }
@@ -922,7 +922,7 @@ test('update notice renders once, keeps the composer/footer, and hides while hel
     );
     assert.match(frame, /v0\.1\.23/, 'notice message is shown');
     assert.match(frame, /Build anything…/, 'composer stays visible with the notice');
-    assert.match(frame, /📁|ctx/, 'footer stays visible with the notice');
+    assert.match(frame, /~\/|ctx/, 'footer stays visible with the notice');
 
     // Help takes over the live area; the notice must step aside.
     app.stdin.write('\x1bh'); // Alt+h
@@ -1514,7 +1514,7 @@ for (const [columns, rows] of [
       const frame = await waitForFrame(app.stdout.frame.bind(app.stdout), (f) => f.includes('┃'));
       assert.ok(frame.length > 0, `no real frame rendered at ${columns}x${rows}`);
       assert.match(frame, /┃/, 'composer stays visible');
-      assert.match(frame, /📁|ctx/, 'footer stays visible');
+      assert.match(frame, /~\/|ctx/, 'footer stays visible');
       assert.ok(
         frame.split('\n').length <= rows - 1,
         `frame grew to ${frame.split('\n').length} rows on a ${rows}-row terminal`
@@ -2007,6 +2007,30 @@ test('Up while the slash palette is open moves the palette, not prompt history',
     assert.doesNotMatch(moved, /PREVIOUS REQUEST MARKER/, 'the slash draft is not replaced by history');
   } finally {
     app.cleanupAll();
+  }
+});
+
+test('/github opens on the first Enter even when the palette has not re-rendered', async () => {
+  const originalBrowser = process.env.BITACODE_BROWSER;
+  // `true` is a harmless stand-in for a browser process on any Unix system.
+  process.env.BITACODE_BROWSER = 'true';
+  const app = renderApp();
+  try {
+    await waitForFrame(app.lastFrame, (f) => f.includes('Build anything…'));
+    await settle(400);
+    for (const ch of '/github') {
+      app.stdin.write(ch);
+      await settle(15);
+    }
+    // Enter immediately, without waiting for another render of the palette.
+    app.stdin.write('\r');
+    const frame = await waitForFrameText(app, 'Opened in browser', 3000);
+    assert.match(frame, /Opened in browser/);
+    assert.match(frame, /Build anything…/, 'the composer was cleared — the command ran once');
+  } finally {
+    app.cleanupAll();
+    if (originalBrowser === undefined) delete process.env.BITACODE_BROWSER;
+    else process.env.BITACODE_BROWSER = originalBrowser;
   }
 });
 

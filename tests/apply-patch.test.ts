@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { applyPatch } from '../src/tools/apply-patch.js';
 import { setApprovalHandler } from '../src/utils/approval.js';
+import { parseFileMutationDiff } from '../src/utils/file-diff.js';
 
 setApprovalHandler(async () => 'approve_once');
 
@@ -70,6 +71,43 @@ test('applyPatch applies a patch spanning multiple files', async () => {
     assert.match(result, /Applied patch to 2 file\(s\)/);
     assert.equal(await fs.readFile(fileA, 'utf8'), 'ONE\n');
     assert.equal(await fs.readFile(fileB, 'utf8'), 'TWO\n');
+  } finally {
+    await fs.rm(FIXTURE_DIR, { recursive: true, force: true });
+  }
+});
+
+test('applyPatch result carries a parseable multi-file diff', async () => {
+  await setup();
+  const fileA = path.join(FIXTURE_DIR, 'one.txt');
+  const fileB = path.join(FIXTURE_DIR, 'two.txt');
+  await fs.writeFile(fileA, 'one\n', 'utf8');
+  await fs.writeFile(fileB, 'two\n', 'utf8');
+
+  const patch = [
+    '--- a/tests/tmp-apply-patch/one.txt',
+    '+++ b/tests/tmp-apply-patch/one.txt',
+    '@@ -1 +1 @@',
+    '-one',
+    '+ONE',
+    '--- a/tests/tmp-apply-patch/two.txt',
+    '+++ b/tests/tmp-apply-patch/two.txt',
+    '@@ -1 +1 @@',
+    '-two',
+    '+TWO',
+  ].join('\n');
+
+  try {
+    const result = await applyPatch(patch);
+    assert.match(result, /Applied patch to 2 file\(s\)/);
+    assert.match(result, /\+1\/-1/);
+
+    const parsed = parseFileMutationDiff('apply_patch', '{}', result)!;
+    assert.ok(parsed);
+    assert.equal(parsed.entries.length, 2);
+    assert.equal(parsed.entries[0]!.filePath, 'tests/tmp-apply-patch/one.txt');
+    assert.equal(parsed.entries[1]!.filePath, 'tests/tmp-apply-patch/two.txt');
+    assert.match(parsed.entries[0]!.diff, /\+ONE/);
+    assert.match(parsed.entries[1]!.diff, /\+TWO/);
   } finally {
     await fs.rm(FIXTURE_DIR, { recursive: true, force: true });
   }

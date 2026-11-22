@@ -54,6 +54,10 @@ import { loadHistory, appendHistory, HistoryNavigator } from './utils/input-hist
 import { summarizePaste } from './utils/paste.js';
 import { findMentionToken, applyMention, listMentionCandidates } from './utils/mentions.js';
 import { collectMentionCandidates } from './utils/mention-candidates.js';
+import { readGitBranch } from './utils/git-branch.js';
+import { openInBrowser, REPO_URL, BUG_REPORT_URL } from './utils/browser.js';
+import { pickerClickIndex } from './utils/picker-click.js';
+import { splitPathTokens } from './utils/path-highlight.js';
 import { commonPrefix } from './utils/completion.js';
 import { detectChecks, runChecks, renderCheckReport } from './utils/autoverify.js';
 import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
@@ -74,7 +78,7 @@ import { stopAllProcesses } from './tools/process.js';
 import { initializeMcp, closeMcp } from './mcp.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { renderFormattedText, normalizeTranscriptText } from './utils/format-message.js';
-import { formatContextWindow, listProviderModels, prefetchProviderModels } from './utils/provider-models.js';
+import { formatContextWindow, getCachedContextWindow, listProviderModels, prefetchProviderModels } from './utils/provider-models.js';
 import { addToolResultView } from './utils/tool-result-view.js';
 import { itemAtViewportRow } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
@@ -159,11 +163,11 @@ function printMessageToScrollback(addStatic, role, text, palette, columns) {
         return;
     }
     if (role === 'user') {
-        addStatic(_jsx(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: _jsx(Box, { borderStyle: "single", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: palette.userBorder, paddingLeft: 1, children: _jsx(Text, { color: palette.userText, children: normalized }) }) }));
+        addStatic(_jsx(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: _jsx(Box, { borderStyle: "single", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: palette.userBorder, paddingLeft: 1, children: _jsx(Text, { color: palette.userText, children: splitPathTokens(normalized).map((span, index) => (_jsx(Text, { color: span.path ? palette.accent : palette.userText, children: span.text }, index))) }) }) }));
         return;
     }
     // Fallback is assistant, render with Markdown formatting (bold, italic)
-    addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { children: renderFormattedText(normalized, transcriptTextWidth(columns), palette) }) }));
+    addStatic(_jsx(Box, { paddingX: 2, paddingBottom: 1, children: _jsx(Text, { wrap: "wrap", children: renderFormattedText(normalized, transcriptTextWidth(columns), palette) }) }));
 }
 function replayOneMessage(addStatic, message, toolCallsById, palette, columns) {
     const msgAny = message;
@@ -190,7 +194,7 @@ function replayOneMessage(addStatic, message, toolCallsById, palette, columns) {
         const savedCall = msgAny.tool_call_id ? toolCallsById.get(msgAny.tool_call_id) : undefined;
         const toolName = typeof msgAny.name === 'string' && msgAny.name ? msgAny.name : savedCall?.name || 'tool';
         const toolArgs = msgAny.args ?? savedCall?.args;
-        addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''), palette);
+        addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''), palette, columns);
     }
 }
 function replayMessagesToScrollback(addStatic, messages, palette, maxMessages = messages.length, columns) {
@@ -433,6 +437,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         columns: finiteDim(stdout?.columns, 80),
         rows: finiteDim(stdout?.rows, 24),
     });
+    // Bumped on every resize event so the viewport is re-measured even when the
+    // clamped dims did not change (a zoom step can settle without a dim change).
+    const [resizeTick, setResizeTick] = useState(0);
     const { columns, rows } = dims;
     // One row shorter than the terminal. Rendering at exactly `rows` makes Ink
     // take its full-screen path (`clearTerminal` + full repaint) on every frame,
@@ -917,33 +924,10 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 if (restoredVariant)
                     setVariantId(restoredVariant);
                 loadedSession.variant = restoredVariant;
-                // A resumed session owns the provider/model it was created with.
-                let sessionConfig = loadedConfig;
-                if (loadedSession.provider && loadedSession.model) {
-                    try {
-                        const candidate = {
-                            provider: loadedSession.provider,
-                            model: loadedSession.model,
-                        };
-                        clientRef.current = buildClient(candidate);
-                        sessionConfig = candidate;
-                        try {
-                            const target = getActiveRuntimeConfigPath() === getRuntimeConfigPath('project')
-                                ? 'project'
-                                : 'user';
-                            writeActiveSelection(candidate.provider, candidate.model, target);
-                        }
-                        catch (err) {
-                            logger.warn('Could not persist resumed session selection', { error: err.message });
-                        }
-                    }
-                    catch (err) {
-                        setError(`Session model ${loadedSession.provider}/${loadedSession.model} is unavailable: ${err.message}`);
-                    }
-                }
-                loadedSession.provider = sessionConfig.provider;
-                loadedSession.model = sessionConfig.model;
-                setConfig(sessionConfig);
+                // The active provider/model is global; a resumed session does not
+                // override it. Its saved pair remains historical metadata only.
+                loadedSession.provider = loadedConfig.provider;
+                loadedSession.model = loadedConfig.model;
                 setTodosForSession(loadedSession.id, loadedSession.todos);
                 setSession(loadedSession);
                 setCompletionMessages(loadedSession.completionMessages);
@@ -1137,6 +1121,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             };
             // Skip no-op bursts (several resize events can fire for one zoom step).
             setDims((prev) => prev.columns === next.columns && prev.rows === next.rows ? prev : next);
+            // Force a viewport re-measure on every resize event, including the ones
+            // the dims guard above ignored, so zoom cannot leave stale geometry.
+            setResizeTick((tick) => tick + 1);
         };
         stdout.on('resize', onResize);
         return () => {
@@ -1153,11 +1140,26 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const liveAreaSignature = [
         rows,
         columns,
+        resizeTick,
         todos.length,
         thinkingText.length,
         thinkingExpanded,
         streamingText.length,
-        helpMessage ? helpMessage.length : 0,
+        // `busy` is declared later as loading || isStreaming || Boolean(activeTool);
+        // listing its parts here avoids a use-before-declaration and re-measures on
+        // every transition into or out of the activity strip.
+        loading ? 1 : 0,
+        isStreaming ? 1 : 0,
+        activeTool ?? '',
+        error ?? '',
+        threadErrors.length,
+        // searchMatches is staticItems filtered by searchQuery, both listed here.
+        staticItems.length,
+        searchQuery?.length ?? 0,
+        decodeTps ?? '',
+        // Full text, not just its length: two messages of equal length can wrap
+        // into a different number of help rows.
+        helpMessage ?? '',
         pendingApproval ? 1 : 0,
         pendingAsk ? 1 : 0,
         keyPrompt ? 1 : 0,
@@ -1170,7 +1172,6 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         updateNotice ? 1 : 0,
         mode,
         toast?.length ?? 0,
-        searchQuery?.length ?? 0,
         composerRows,
     ].join(':');
     useEffect(() => {
@@ -1423,6 +1424,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         const remote = remoteModelsRef.current[providerId]?.find((item) => item.id === modelId);
         if (remote)
             return { name: remote.label, contextWindow: remote.contextWindow };
+        const cachedWindow = getCachedContextWindow(providerId, modelId);
+        if (cachedWindow)
+            return { name: modelId, contextWindow: cachedWindow };
         const details = getModelDetails(providerId, modelId);
         return details ? { name: details.name, contextWindow: details.contextWindow } : undefined;
     }, []);
@@ -1742,7 +1746,10 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
     }, [session?.id]);
     /** Files in the current folder + fuzzy matches + installed skills for `@`. */
-    const provideMentionCandidates = useCallback(async (token) => collectMentionCandidates(process.cwd(), token, { limit: 30 }), []);
+    const provideMentionCandidates = useCallback(
+    // No UI-side trim: return every match the bounded file scan finds, then
+    // skills. The popup windows through long lists and End jumps to skills.
+    async (token) => collectMentionCandidates(process.cwd(), token, { limit: 600 }), []);
     const openSubagentDetail = useCallback(async (id) => {
         if (!session?.id)
             return;
@@ -1806,35 +1813,21 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             }
             const systemPrompt = await generateSystemPrompt();
             const messages = ensureSystemPromptAtTop(loaded.completionMessages, systemPrompt);
-            // Restore the session's own provider/model when it still has a key.
-            const providerId = loaded.provider || config.provider;
-            const modelId = loaded.model || config.model;
-            let nextConfig = config;
-            let modelError = null;
-            try {
-                clientRef.current = buildClient({ provider: providerId, model: modelId });
-                nextConfig = { provider: providerId, model: modelId };
-            }
-            catch (err) {
-                modelError = err.message;
-            }
+            // The active provider/model is global and stays fixed when jumping
+            // between sessions. A session's saved provider/model is history only.
             const savedVariant = loaded.variant;
             const nextVariant = savedVariant && VARIANTS.some((item) => item.id === savedVariant)
                 ? savedVariant
                 : variantId;
-            loaded.provider = nextConfig.provider;
-            loaded.model = nextConfig.model;
+            loaded.provider = config.provider;
+            loaded.model = config.model;
             loaded.variant = nextVariant;
             loaded.completionMessages = messages;
-            setConfig(nextConfig);
             setVariantId(nextVariant);
             if (settings.variant !== nextVariant) {
                 const nextSettings = { ...settings, variant: nextVariant };
                 setSettings(nextSettings);
                 saveSettings(nextSettings);
-            }
-            if (!modelError) {
-                persistActiveSelection(providerId, modelId, getModelPaletteInfo(providerId, modelId));
             }
             setCompletionMessages(messages);
             setSession(loaded);
@@ -1844,9 +1837,6 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             const loadedActivities = loaded.subAgentActivities ?? [];
             setSubAgentActivities(loadedActivities);
             setShowSubAgentPanel(false);
-            if (modelError) {
-                setError(`Session loaded, but its model is unavailable: ${modelError}`);
-            }
             setStaticItems([]);
             setUserScroll(0);
             if (hasConversationMessages(messages)) {
@@ -1868,8 +1858,6 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         settings,
         addStatic,
         resetLiveState,
-        persistActiveSelection,
-        getModelPaletteInfo,
         stdout,
         theme,
     ]);
@@ -1942,6 +1930,15 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             case '/subagents':
                 void openSubagents();
                 return true;
+            case '/github':
+            case '/bug': {
+                const url = command === '/bug' ? BUG_REPORT_URL : REPO_URL;
+                // Best-effort: never break the TUI if no browser can be launched.
+                void openInBrowser(url)
+                    .then((message) => showToast(message))
+                    .catch((err) => setError(`Could not open browser: ${err instanceof Error ? err.message : String(err)}`));
+                return true;
+            }
             case '/review': {
                 const target = parts.slice(1).join(' ').trim();
                 const prompt = target
@@ -2345,7 +2342,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
         // Slash commands work even before a provider is configured.
         if (trimmed.startsWith('/')) {
-            const selected = commandItems[commandIndex]?.label ?? trimmed.split(/\s+/)[0];
+            // Derive the command from the submitted text, not from the palette's
+            // last-rendered index: Ink can deliver Enter with a stale closure, which
+            // made the first Enter run the previous command (needing a second try).
+            const typed = trimmed.split(/\s+/)[0];
+            const matches = SLASH_COMMANDS.filter((cmd) => cmd.name.toLowerCase().startsWith(typed.toLowerCase()));
+            const selected = matches.find((cmd) => cmd.name.toLowerCase() === typed.toLowerCase())?.name
+                ?? matches[0]?.name
+                ?? typed;
             const handled = await handleSlashCommand(selected, trimmed);
             if (handled) {
                 if (!keepInput) {
@@ -2460,7 +2464,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         // Reset assistant message tracker (streamed indices were reset above)
         assistantMessageRef.current = null;
         try {
-            const pricing = getModelPricing(config.provider, config.model);
+            const basePricing = getModelPricing(config.provider, config.model);
+            // Remote model catalogs (OpenRouter, custom endpoints) can carry a real
+            // context window that the static registry does not know about. Prefer it
+            // so context% and compaction use the active model's actual limit.
+            const activeWindow = getModelPaletteInfo(config.provider, config.model)?.contextWindow;
+            const pricing = basePricing && activeWindow && activeWindow > 0
+                ? { ...basePricing, contextWindow: activeWindow }
+                : basePricing;
             const requestDefaults = getRequestDefaultParams(config.provider, config.model);
             const chosenVariant = VARIANTS.find((item) => item.id === variantId);
             if (chosenVariant?.reasoningEffort) {
@@ -2536,7 +2547,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 setLoading(false);
             }
         }
-    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme]);
+    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme, getModelPaletteInfo]);
     // Any command path can reject; never let that become an unhandled rejection
     // that kills the TUI after a turn.
     const submitSafely = useCallback(async (value, force = false, keepInput = false) => {
@@ -2571,7 +2582,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
     // Grow with the text, but never take more than about a third of the screen:
     // a long paste scrolls inside the composer instead of eating the transcript.
-    const composerMaxRows = Math.max(1, Math.min(10, Math.floor((rows - 4) / 2)));
+    // Keep enough room for a draft to wrap before PromptInput starts scrolling
+    // its own row window (which hides earlier typed lines). The old /2 budget
+    // gave only 1-2 rows on short terminals, so normal typing looked like text
+    // vanishing upward.
+    const composerMaxRows = Math.max(2, Math.min(12, rows - 6));
     // Provider-driven only: the block appears when the model actually streams
     // reasoning, never just because a request is in flight.
     const hasThinkingBlock = initialized && !thinkingArchived && thinkingText.length > 0;
@@ -2624,13 +2639,18 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const maxStreamRows = Math.max(2, Math.min(MAX_LIVE_STREAM_ROWS, area.transcriptRows));
     const streamingIsDiff = isStreaming && looksLikeDiff(streamingText);
     const liveStreamWidth = Math.max(1, columns - gutter * 2);
-    const liveStreamTextRows = wrappedRowCount(clipToRows(streamingText, maxStreamRows, liveStreamWidth), liveStreamWidth);
+    // Format the WHOLE reply, then clip only the view to its tail. Clipping the
+    // raw text first used to strip table headers and fence openers, so markdown
+    // only looked right after `done` when the full text was formatted again.
+    const liveStreamFullRows = wrappedRowCount(streamingText, liveStreamWidth);
+    const liveStreamTextRows = Math.min(liveStreamFullRows, maxStreamRows);
+    const liveStreamTrimRows = Math.max(0, liveStreamFullRows - liveStreamTextRows);
     const liveStreamRows = !isStreaming
         ? 0
         : streamingIsDiff
             ? Math.min(maxStreamRows, 10) + 4
             : liveStreamTextRows + (dense ? 0 : 1);
-    const liveStreamNode = !isStreaming ? null : streamingIsDiff ? (_jsx(DiffView, { header: "Streaming diff", diff: clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns), maxRows: Math.max(2, maxStreamRows - 3) })) : (_jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, children: _jsxs(Text, { wrap: "truncate-end", children: [renderFormattedText(clipToRows(streamingText, maxStreamRows, liveStreamWidth), liveStreamWidth, theme), _jsx(Text, { dimColor: true, children: "\u258D" })] }) }));
+    const liveStreamNode = !isStreaming ? null : streamingIsDiff ? (_jsx(DiffView, { header: "Streaming diff", diff: clipToRows(streamingText, Math.max(2, maxStreamRows - 3), columns), maxRows: Math.max(2, maxStreamRows - 3) })) : (_jsx(Box, { height: liveStreamTextRows + (dense ? 0 : 1), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { paddingX: gutter, paddingBottom: dense ? 0 : 1, marginTop: -liveStreamTrimRows, children: _jsxs(Text, { wrap: "wrap", children: [renderFormattedText(streamingText, liveStreamWidth, theme), _jsx(Text, { dimColor: true, children: "\u258D" })] }) }) }));
     // Live rows join the flow only for the normal transcript. /find keeps its
     // result set to saved messages so a moving stream cannot change the matches.
     const liveItems = [];
@@ -2788,17 +2808,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 if (picker === 'subagents' && subagentRuns.length > 0 && rows > 10) {
                     const press = getLeftMousePress(input);
                     if (press) {
-                        const windowSize = Math.max(3, Math.min(8, paletteWindow));
-                        const start = Math.max(0, Math.min(pickerIndex - Math.floor(windowSize / 2), subagentRuns.length - windowSize));
-                        const visibleCount = Math.min(windowSize, subagentRuns.length - start);
-                        const hiddenAbove = start > 0 ? 1 : 0;
-                        const hiddenBelow = subagentRuns.length - start - visibleCount > 0 ? 1 : 0;
-                        const counter = subagentRuns.length > windowSize ? 1 : 0;
-                        const cardHeight = 6 + visibleCount + hiddenAbove + hiddenBelow + counter;
-                        const cardTop = rows >= 14 ? Math.max(0, Math.floor((rows - cardHeight) / 2)) : 0;
-                        const firstRowY = cardTop + 3 + hiddenAbove;
-                        const clicked = start + (press.y - 1 - firstRowY);
-                        if (clicked >= start && clicked < start + visibleCount) {
+                        const clicked = pickerClickIndex({
+                            rows,
+                            count: subagentRuns.length,
+                            pickerIndex,
+                            maxVisible: paletteWindow,
+                            pressY: press.y,
+                        });
+                        if (clicked !== null) {
                             setPickerIndex(clicked);
                             void openSubagentDetail(subagentRuns[clicked].id);
                         }
@@ -2946,6 +2963,12 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     if (clickedId)
                         toggleStaticItem(clickedId);
                     return;
+                }
+                // Below the transcript is the composer: a click positions the caret.
+                if (!dialogActive && initialized) {
+                    const textLeft = Math.floor((columns - layout.inputWidth) / 2) + 3;
+                    const col = Math.max(0, press.x - 1 - textLeft);
+                    setCaretRequest((prev) => ({ col, nonce: (prev?.nonce ?? 0) + 1 }));
                 }
             }
             return;
@@ -3182,6 +3205,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         ? `${providerLabel} / ${remoteModelLabel ?? getModelDetails(config.provider, config.model)?.name ?? config.model}`
         : 'not configured';
     const folderName = basename(process.cwd());
+    // Footer location: `~/folder:branch`. Read once on mount; a failed git
+    // lookup simply leaves the branch suffix off.
+    const [gitBranch, setGitBranch] = useState(null);
+    // Left clicks in the composer move the caret; the nonce forces PromptInput
+    // to re-apply repeated clicks on the same column.
+    const [caretRequest, setCaretRequest] = useState(null);
+    useEffect(() => {
+        let cancelled = false;
+        void readGitBranch(process.cwd()).then((branch) => {
+            if (!cancelled)
+                setGitBranch(branch);
+        });
+        return () => { cancelled = true; };
+    }, []);
     // Any interactive prompt owns the live area. Optional panels are hidden so
     // the critical prompt keeps its rows instead of being clipped at the bottom.
     const hasCriticalPrompt = pendingApproval !== null || pendingAsk !== null || keyPrompt !== null;
@@ -3250,7 +3287,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // A dialog owns the full frame so its card floats on a clean canvas. This
     // can trigger Ink's full-repaint path while navigating, which is acceptable
     // for a modal that is not streaming.
-    return (_jsxs(Box, { flexDirection: "column", height: dialogActive ? rows : frameHeight, backgroundColor: theme.bg, overflow: "hidden", children: [!dialogActive && (_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", backgroundColor: theme.bg, children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
+    return (_jsxs(Box, { flexDirection: "column", height: dialogActive ? rows : frameHeight, backgroundColor: theme.bg, overflow: "hidden", children: [!dialogActive && (_jsxs(Box, { flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", children: [_jsxs(Box, { ref: viewportRef, flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 1, overflow: "hidden", flexDirection: "column", backgroundColor: theme.bg, children: [restoringTranscript ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: _jsx(Text, { color: theme.dim, children: "Restoring session\u2026" }) })) : showSplash ? (_jsx(Box, { flexGrow: 1, flexDirection: "column", alignItems: "center", justifyContent: "center", children: columns >= SPLASH_LINES[0].length ? _jsx(Splash, {}) : null })) : (_jsxs(_Fragment, { children: [_jsx(Box, { height: TOP_PAD, flexShrink: 0 }), visibleItems.map((item, index) => index === 0 && trimTop > 0 ? (
                                     // First item is partly above the viewport. Trim its top rows
                                     // by shifting it up inside a clipped, fixed-height box. A
                                     // blank spacer here shows empty rows and shoves the item's
@@ -3259,7 +3296,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                                     _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id))), fillerRows > 0 && _jsx(Box, { height: fillerRows, flexShrink: 0 })] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow, query: inputText.trim(), columns: columns, hint: "\u2191\u2193 move \u00B7 tab complete \u00B7 enter run \u00B7 esc close" }))] }), initialized && !dialogActive && (_jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, alignItems: "center", flexShrink: 0, overflow: "hidden", children: [busy && !hasCriticalPrompt ? (_jsx(Box, { width: layout.inputWidth, backgroundColor: theme.bg, flexShrink: 0, children: _jsx(LiveStatus, { columns: layout.inputWidth, activity: liveActivity, tool: activeTool, elapsedMs: busyElapsedMs, tps: decodeTps, frame: spinnerFrame, animate: animationsEnabled, gutter: 1 }) })) : null, _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: composerRows, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: composerRows, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: (value) => {
                                         setInputText(value);
                                         setCommandIndex(0);
-                                    }, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026  (shift+enter newline \u00B7 @file \u00B7 /commands)", width: composerWidth, maxRows: composerMaxRows, onRowsChange: setComposerRows, onPaste: async (text) => {
+                                    }, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026  (shift+enter newline \u00B7 @file \u00B7 /commands)", width: composerWidth, maxRows: composerMaxRows, onRowsChange: setComposerRows, caretRequest: caretRequest ?? undefined, onPaste: async (text) => {
                                         const summary = await summarizePaste(text, { label: session?.id ?? 'paste' });
                                         return summary.text;
                                     }, onMentionCandidates: provideMentionCandidates, onCompleteMention: async (value, cursor) => {
@@ -3269,10 +3306,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                                         const matches = await listMentionCandidates(process.cwd(), mention.token, 20);
                                         if (matches.length === 0)
                                             return null;
-                                        const replacement = matches.length === 1 ? matches[0] : commonPrefix(matches);
+                                        // Only a unique match closes the token with a space; a
+                                        // common-prefix completion is still being typed.
+                                        const replacement = matches.length === 1
+                                            ? `${matches[0]} `
+                                            : commonPrefix(matches);
                                         const applied = applyMention(value, mention, replacement);
                                         return { value: applied.text, cursor: applied.cursor };
-                                    } }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: composerRows, flexShrink: 0, alignItems: "flex-end", children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] })] })), initialized && !dialogActive && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, tps: decodeTps, folder: folderName, busy: false, tool: null, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense, segments: settings.statusLine ?? STATUS_LINE_ITEMS }))] }));
+                                    } }, inputResetKey) }), layout.showSubmitHint && (_jsx(Box, { paddingRight: 1, height: composerRows, flexShrink: 0, alignItems: "flex-end", children: _jsx(Text, { color: theme.dim, children: '↵' }) }))] })] })), initialized && !dialogActive && (_jsx(UsageDisplay, { usage: lastUsage ?? null, totalCost: totalCost, modelLabel: modelLabel, variantLabel: chosenVariant.label, variantColor: chosenVariant.color, tps: decodeTps, folder: folderName, branch: gitBranch, contextTokens: lastUsage?.contextTokens, contextWindow: lastUsage?.contextWindow ?? getModelPaletteInfo(config?.provider ?? '', config?.model ?? '')?.contextWindow, busy: false, tool: null, frame: spinnerFrame, compact: !layout.showFullFooter, gutter: gutter, dense: dense, segments: settings.statusLine ?? STATUS_LINE_ITEMS }))] }));
 };
 /**
  * Owns the UI settings so the selected palette can be published to the whole

@@ -13,6 +13,7 @@ import { statPath, statTool } from '../src/tools/stat.js';
 import { diffFiles, diffTool } from '../src/tools/diff.js';
 import { resetApprovalStateForTests, setApprovalHandler, type ApprovalResponse } from '../src/utils/approval.js';
 import { setAllowedPathRoots } from '../src/utils/path-validation.js';
+import { parseFileMutationDiff } from '../src/utils/file-diff.js';
 
 let root: string;
 
@@ -69,6 +70,26 @@ test('multiedit applies every edit and returns per-file diffs', async () => {
   assert.match(result, /-one two/);
   assert.equal(await fs.readFile(a, 'utf8'), 'ONE two\n');
   assert.equal(await fs.readFile(b, 'utf8'), '3 3\n');
+});
+
+test('multiedit result parses into one diff entry per file', async () => {
+  const a = p('a.txt');
+  const b = p('b.txt');
+  await fs.writeFile(a, 'one two\n');
+  await fs.writeFile(b, 'three\n');
+
+  const result = await multiedit([
+    { file_path: a, old_string: 'one', new_string: 'ONE' },
+    { file_path: b, old_string: 'three', new_string: 'THREE' },
+  ]);
+
+  const parsed = parseFileMutationDiff('multiedit', '{}', result)!;
+  assert.ok(parsed);
+  assert.equal(parsed.entries.length, 2);
+  assert.equal(parsed.entries[0]!.filePath, a);
+  assert.equal(parsed.entries[1]!.filePath, b);
+  assert.match(parsed.entries[0]!.diff, /\+ONE two/);
+  assert.match(parsed.entries[1]!.diff, /\+THREE/);
 });
 
 test('multiedit validates all edits first: a bad second edit changes nothing', async () => {

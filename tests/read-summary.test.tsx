@@ -115,20 +115,77 @@ test('error, empty and malformed inputs never throw', () => {
 test('ReadSummaryView renders one clean row with the path and meta', () => {
   const rangeFrame = summaryFrame({ filePath: 'src/tools/index.ts', range: '10-68' });
   const rangeText = stripAnsi(rangeFrame);
-  assert.match(rangeText, /src\/tools\/index\.ts/);
-  assert.match(rangeText, /lines 10-68/);
-  assert.match(rangeText, /▤/);
+  assert.match(rangeText, /▤ src\/tools\/index\.ts · 10-68/);
   assert.doesNotMatch(rangeText, /[╭│╰]/);
   assert.equal(rangeText.trim().split('\n').length, 1);
+  assert.ok(rangeFrame.includes(rgb(themes.dark.accent)), 'ranges use theme.accent');
+  assert.ok(rangeFrame.includes(rgb(themes.dark.dim)), 'separator uses theme.dim');
 
   const totalText = stripAnsi(summaryFrame({ filePath: 'src/tools/index.ts', total: 899 }));
-  assert.match(totalText, /899 lines/);
+  assert.match(totalText, /▤ src\/tools\/index\.ts · 899 lines/);
   const emptyText = stripAnsi(summaryFrame({ filePath: 'src/tools/index.ts', empty: true }));
-  assert.match(emptyText, /empty/);
+  assert.match(emptyText, /▤ src\/tools\/index\.ts · empty/);
 });
 
 test('ReadSummaryView shows an error message in the error colour', () => {
   const frame = summaryFrame({ filePath: 'src/tools/index.ts' }, 'read failed');
-  assert.match(stripAnsi(frame), /read failed/);
+  assert.match(stripAnsi(frame), /▤ src\/tools\/index\.ts · read failed/);
   assert.ok(frame.includes(rgb(themes.dark.error)), 'error text uses theme.error');
+});
+
+test('read_lines renders every requested range on one clean row', () => {
+  const body = (from: number, to: number) =>
+    Array.from({ length: to - from + 1 }, (_, i) => `line ${from + i}`).join('\n');
+  const parsed = parseFileReadResult(
+    'read_lines',
+    args('src/tool/index.ts', { from: 30, to: 35, ranges: '30-35, 67-70' }),
+    `[lines 30-35]\n${body(30, 35)}\n[lines 67-70]\n${body(67, 70)}`
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.sections.length, 2);
+  assert.deepEqual(describeRead(parsed), { filePath: 'src/tool/index.ts', range: '30-35, 67-70' });
+  const text = stripAnsi(summaryFrame(describeRead(parsed)));
+  assert.match(text, /▤ src\/tool\/index\.ts · 30-35, 67-70/);
+  assert.doesNotMatch(text, /[╭╮╰╯│]/, 'no box');
+  assert.equal(text.trim().split('\n').length, 1, 'one row');
+});
+
+test('overlapping requested ranges are preserved as-is, never merged', () => {
+  const a = Array.from({ length: 61 }, (_, i) => `a${30 + i}`).join('\n');
+  const b = Array.from({ length: 74 }, (_, i) => `b${67 + i}`).join('\n');
+  const parsed = parseFileReadResult(
+    'read_lines',
+    args('src/tools/index.ts', { ranges: '30-90, 67-140' }),
+    `[lines 30-90]\n${a}\n[lines 67-140]\n${b}`
+  );
+  assert.ok(parsed);
+  assert.deepEqual(describeRead(parsed), { filePath: 'src/tools/index.ts', range: '30-90, 67-140' });
+  assert.match(stripAnsi(summaryFrame(describeRead(parsed))), /· 30-90, 67-140/);
+});
+
+test('a clamped section still shows the requested range, not the truncated count', () => {
+  const body = Array.from({ length: 5 }, (_, i) => `line ${895 + i}`).join('\n');
+  const parsed = parseFileReadResult(
+    'read_lines',
+    args('src/tools/index.ts', { from: 895, to: 900, ranges: '895-900' }),
+    `[lines 895-900]\n${body}\n... (file ends at line 899)`
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.totalLines, 899);
+  assert.equal(parsed.sections[0]!.note, '... (file ends at line 899)');
+  assert.deepEqual(describeRead(parsed), { filePath: 'src/tools/index.ts', range: '895-900' });
+  assert.match(stripAnsi(summaryFrame(describeRead(parsed))), /· 895-900/);
+});
+
+test('a read_lines whole-file read still shows the total line count', () => {
+  const body = Array.from({ length: 899 }, (_, i) => `line ${i + 1}`).join('\n');
+  const parsed = parseFileReadResult(
+    'read_lines',
+    args('src/tools/index.ts', { ranges: '1-999' }),
+    `[lines 1-999]\n${body}\n... (file ends at line 899)`
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.totalLines, 899);
+  assert.deepEqual(describeRead(parsed), { filePath: 'src/tools/index.ts', total: 899 });
+  assert.match(stripAnsi(summaryFrame(describeRead(parsed))), /· 899 lines/);
 });

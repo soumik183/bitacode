@@ -5,7 +5,7 @@ import { formatDuration } from '../utils/duration.js';
 /** Fixed slice used only when no terminal width is known. */
 const FALLBACK_PREVIEW_CHARS = 240;
 /** How many reasoning lines the collapsed preview keeps before the "more" note. */
-const PREVIEW_LINE_BUDGET = 6;
+const PREVIEW_LINE_BUDGET = 1;
 /** Characters that fit on one archive line, allowing for the indent and ellipsis. */
 export function archivePreviewChars(columns) {
     if (!columns || columns <= 0)
@@ -29,9 +29,9 @@ export const ThinkingArchive = ({ text, elapsedMs, columns, expanded = false, })
     const lineCap = archivePreviewChars(columns);
     const shownLines = expanded ? lines : lines.slice(0, PREVIEW_LINE_BUDGET);
     const hiddenLines = lines.length - shownLines.length;
-    const hint = expanded ? 'click to collapse' : 'click to expand';
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: theme.muted, children: "Thought" }), _jsx(Text, { color: theme.dim, children: `  ${formatDuration(elapsedMs)} · ${reasoning.length} char${reasoning.length === 1 ? '' : 's'}` }), _jsx(Text, { color: theme.dim, children: `  ${hint}` })] }), shownLines.map((line, index) => {
+    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: theme.muted, children: "Thought" }), _jsx(Text, { color: theme.dim, children: `  ${formatDuration(elapsedMs)} · ${reasoning.length} char${reasoning.length === 1 ? '' : 's'}` })] }), shownLines.map((line, index) => {
                 // Bound each collapsed line to one row so the card can't grow the frame.
+                // Expanded keeps every line verbatim; only the collapsed preview clips.
                 const clipped = !expanded && line.length > lineCap
                     ? `${line.slice(0, lineCap).trimEnd()}…`
                     : line;

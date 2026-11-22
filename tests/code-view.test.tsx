@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { render } from 'ink-testing-library';
 import stripAnsi from 'strip-ansi';
+import chalk from 'chalk';
+import { getTheme } from '../src/theme.js';
 import { CodeBlock } from '../src/components/CodeBlock.js';
 import { DiffView } from '../src/components/DiffView.js';
 import { ReadFileView } from '../src/components/ReadFileView.js';
@@ -50,7 +52,7 @@ test('CodeBlock never crashes the UI on malformed input', () => {
   assert.match(plain(objectish), /\[object Object\]/);
 });
 
-test('DiffView keeps +/- colouring while syntax highlighting the content', () => {
+test('DiffView keeps +/- colouring with two number columns and an explicit language', () => {
   const diff = '@@ -1 +1 @@\n-const old = 1\n+const new = 2';
   const frame = plain(render(<DiffView header="Edited a.ts" diff={diff} filePath="a.ts" />).lastFrame());
 
@@ -58,9 +60,43 @@ test('DiffView keeps +/- colouring while syntax highlighting the content', () =>
   assert.match(frame, /- const old = 1/);
   assert.match(frame, /\+ const new = 2/);
 
-  // An explicit language must not change the rendered text.
+  // An explicit language is accepted for compatibility but cannot recolor a diff line.
   const styled = plain(render(<DiffView header="Edited a.ts" diff={diff} filePath="a.ts" language="ts" />).lastFrame());
   assert.match(styled, /\+ const new = 2/);
+});
+
+test('DiffView paints every content token in one row colour (raw ANSI)', () => {
+  const palette = getTheme();
+  const ansi = (hex: string): string => {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return `\u001b[38;2;${r};${g};${b}m`;
+  };
+  const contentOf = (row: string): string => (row.split(' │ ')[1] ?? row).split('\u001b[39m')[0] ?? '';
+
+  // `const` (keyword) and the string literals would normally pick up the gold
+  // accent token colour; a diff row must stay uniformly red or green instead.
+  const diff = '@@ -1 +1 @@\n-const old = "before"\n+const next = "after"';
+  const level = (chalk as unknown as { level: number }).level;
+  (chalk as unknown as { level: number }).level = 3;
+  let raw = '';
+  try {
+    raw = render(<DiffView header="Edited a.ts" diff={diff} filePath="a.ts" language="ts" />).lastFrame() ?? '';
+  } finally {
+    (chalk as unknown as { level: number }).level = level;
+  }
+
+  const rows = raw.split('\n');
+  const removal = rows.find((row) => row.includes('old = "before"')) ?? '';
+  const addition = rows.find((row) => row.includes('next = "after"')) ?? '';
+  assert.ok(removal && addition, 'both diff rows rendered');
+
+  assert.equal(contentOf(removal), `${ansi(palette.error)}- const old = "before"`);
+  assert.equal(contentOf(addition), `${ansi(palette.success)}+ const next = "after"`);
+  // No syntax token (notably the gold/accent one) leaks into a diff line.
+  assert.ok(!removal.includes(ansi(palette.accent)), 'no accent token in a removal row');
+  assert.ok(!addition.includes(ansi(palette.accent)), 'no accent token in an addition row');
 });
 
 test('ReadFileView combines line numbers with highlighted code', () => {

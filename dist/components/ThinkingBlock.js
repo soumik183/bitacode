@@ -2,13 +2,6 @@ import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
 import { formatDuration } from '../utils/duration.js';
-/** How many content rows the expanded panel may use at this terminal size. */
-function previewRowBudget(rows) {
-    return Math.max(2, Math.min(8, rows - 14));
-}
-function previewMaxChars(columns, rows) {
-    return Math.max(200, Math.min(1600, Math.max(20, columns - 8) * previewRowBudget(rows)));
-}
 /**
  * Clip reasoning so it occupies at most `maxRows` wrapped rows.
  * The character cap alone is not enough: many short lines can still overflow
@@ -44,20 +37,20 @@ export function clipToPreview(text, width, maxRows, maxChars) {
  * Wrapped rows cannot be known exactly before layout, so this estimate is
  * deliberately conservative; App refines it with a real measurement.
  */
-export function thinkingBlockHeight(text, expanded, columns, rows) {
+export function thinkingBlockHeight(text, expanded, columns, _rows) {
     const hasText = text.trim().length > 0;
     // The component renders nothing at all without reasoning text.
     if (!hasText)
         return 0;
-    // Collapsed: header + bottom margin.
-    if (!expanded)
-        return 2;
     const width = Math.max(1, columns - 6);
-    const { shown, hiddenChars } = clipToPreview(text, width, previewRowBudget(rows), previewMaxChars(columns, rows));
-    // Count the wrapped rows clipToPreview kept, plus its overflow note. The
-    // content rows were omitted before, so a long thought under-reserved up to
-    // `budget` rows and clicks missed the top of the expanded block.
-    const contentRows = shown.split('\n').reduce((total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / width)), 0) + (hiddenChars > 0 ? 1 : 0);
+    // Collapsed: header + the first reasoning line + bottom margin.
+    if (!expanded) {
+        const first = text.trim().split('\n')[0] ?? '';
+        const firstRows = Math.max(1, Math.ceil(Math.max(1, first.length) / width));
+        return 1 + firstRows + 1;
+    }
+    // Expanded: every line is shown, so count all wrapped rows.
+    const contentRows = text.trim().split('\n').reduce((total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / width)), 0);
     // header + marginTop(1) + content + marginBottom(1)
     return 1 + 1 + contentRows + 1;
 }
@@ -69,7 +62,7 @@ export function thinkingBlockHeight(text, expanded, columns, rows) {
  * thinking ends it collapses to a plain "Thought · 3s" line (no animation).
  * A left click on the header (or ctrl+t) toggles it.
  */
-export const ThinkingBlock = ({ text, expanded, active, animate, frame, columns, rows, elapsedMs = 0, }) => {
+export const ThinkingBlock = ({ text, expanded, active, animate, frame, columns, rows: _rows, elapsedMs = 0, }) => {
     const theme = useTheme();
     const hasText = text.trim().length > 0;
     // No provider reasoning means nothing to show. Rendering an empty header
@@ -78,11 +71,14 @@ export const ThinkingBlock = ({ text, expanded, active, animate, frame, columns,
         return null;
     const dots = active ? (animate ? '.'.repeat((frame % 3) + 1).padEnd(3) : '...') : '';
     const label = active ? 'Thinking' : 'Thought';
-    const maxChars = previewMaxChars(columns, rows);
     const contentWidth = Math.max(1, columns - 6);
-    const { shown, hiddenChars } = clipToPreview(text, contentWidth, previewRowBudget(rows), maxChars);
+    const lines = text.trim().split('\n');
+    const firstLine = lines[0] ?? '';
+    const shownFirst = firstLine.length > contentWidth
+        ? `${firstLine.slice(0, Math.max(1, contentWidth - 1))}…`
+        : firstLine;
     const hint = hasText
         ? `${expanded ? 'click to collapse' : 'click to expand'} · ctrl+t`
         : '';
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: expanded ? theme.muted : theme.dim, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: active ? theme.text : theme.muted, bold: active, children: label }), active && _jsx(Text, { color: theme.accent, children: dots }), elapsedMs > 0 && _jsx(Text, { color: theme.dim, children: ` · ${formatDuration(elapsedMs)}` }), hint && _jsx(Text, { color: theme.dim, children: `  ${hint}` })] }), expanded && hasText && (_jsx(Box, { paddingLeft: 2, marginTop: 1, children: _jsxs(Text, { color: theme.muted, wrap: "wrap", children: [shown, hiddenChars > 0 ? `\n… ${hiddenChars} more characters` : ''] }) }))] }));
+    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: expanded ? theme.muted : theme.dim, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: active ? theme.text : theme.muted, bold: active, children: label }), active && _jsx(Text, { color: theme.accent, children: dots }), elapsedMs > 0 && _jsx(Text, { color: theme.dim, children: ` · ${formatDuration(elapsedMs)}` }), hint && _jsx(Text, { color: theme.dim, children: `  ${hint}` })] }), !expanded && hasText && (_jsx(Box, { paddingLeft: 2, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: shownFirst }) })), expanded && hasText && (_jsx(Box, { paddingLeft: 2, marginTop: 1, children: _jsx(Text, { color: theme.muted, wrap: "wrap", children: text.trim() }) }))] }));
 };

@@ -2,6 +2,7 @@ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-run
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { stripMouseReports } from '../utils/mouse.js';
+import { splitPathTokens } from '../utils/path-highlight.js';
 import { useTheme } from '../theme.js';
 // Display columns without a dependency: CJK/emoji take two, combining/zero-width take none.
 const WIDE = /[\u{1100}-\u{115F}\u{2329}-\u{232A}\u{2E80}-\u{A4CF}\u{AC00}-\u{D7A3}\u{F900}-\u{FAFF}\u{FE10}-\u{FE19}\u{FE30}-\u{FE6F}\u{FF00}-\u{FF60}\u{FFE0}-\u{FFE6}\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
@@ -121,13 +122,44 @@ export function findMentionInValue(value, cursor) {
  * `maxRows`, then it scrolls), so multi-line prompts stay readable. `enter`
  * submits; `shift+enter`, `alt+enter` and `ctrl+j` insert a newline.
  */
-export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDisabled = false, mask = false, width, maxRows = DEFAULT_MAX_ROWS, onRowsChange, onPaste, onCompleteMention, onMentionCandidates, }) => {
+export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDisabled = false, mask = false, width, maxRows = DEFAULT_MAX_ROWS, onRowsChange, onPaste, onCompleteMention, onMentionCandidates, caretRequest, }) => {
     const theme = useTheme();
     // Cursor is a code-point index, not a UTF-16 offset: arrows and backspace
     // must land on whole glyphs (emoji are two UTF-16 units, CJK are two columns).
     const points = useMemo(() => Array.from(value), [value]);
     const [cursor, setCursor] = useState(points.length);
     const offset = Math.min(cursor, points.length);
+    // Ink keeps one input listener per render, so an async state update (mention
+    // candidates, paste, history) can leave the handler holding an older value.
+    // Edits go through refs and update them synchronously; the caret can never
+    // point past the text it is editing or submit a stale draft.
+    const valueRef = useRef(value);
+    valueRef.current = value;
+    const pointsRef = useRef(points);
+    pointsRef.current = points;
+    const offsetRef = useRef(offset);
+    offsetRef.current = offset;
+    useEffect(() => {
+        if (cursor > points.length)
+            setCursor(points.length);
+    }, [cursor, points.length]);
+    // A left click in the composer asks the host to move the caret to a column
+    // on its current visual row. Map the column through code points so emoji and
+    // CJK never get split, and keep the index inside that row.
+    useEffect(() => {
+        if (!caretRequest)
+            return;
+        const chars = pointsRef.current;
+        let rowStart = offsetRef.current;
+        while (rowStart > 0 && chars[rowStart - 1] !== '\n')
+            rowStart--;
+        let rowEnd = rowStart;
+        while (rowEnd < chars.length && chars[rowEnd] !== '\n')
+            rowEnd++;
+        const next = rowStart + Math.max(0, Math.min(caretRequest.col, rowEnd - rowStart));
+        offsetRef.current = next;
+        setCursor(next);
+    }, [caretRequest?.nonce]);
     // Columns the text may occupy before soft-wrapping.
     const displayWidth = Math.max(1, Math.floor(width && width > 0 ? width : 10_000));
     // `@` suggestion popup. The token is derived from the live value/caret; the
@@ -167,25 +199,49 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
     suggestionRef.current = suggestion;
     const mentionRef = useRef(mention);
     mentionRef.current = mention;
+    /** Single edit path: splice code points, then move the caret with the text. */
+    const applyEdit = (start, end, insert) => {
+        const chars = pointsRef.current;
+        const from = Math.max(0, Math.min(start, chars.length));
+        const to = Math.max(from, Math.min(end, chars.length));
+        const head = chars.slice(0, from).join('');
+        const next = `${head}${insert}${chars.slice(to).join('')}`;
+        const nextCursor = Array.from(`${head}${insert}`).length;
+        valueRef.current = next;
+        pointsRef.current = Array.from(next);
+        offsetRef.current = nextCursor;
+        onChange(next);
+        setCursor(nextCursor);
+    };
+    /** Newline that keeps the current line's indentation (lists, code, nested prose). */
+    const newlineWithIndent = () => {
+        const chars = pointsRef.current;
+        let lineStart = offsetRef.current;
+        while (lineStart > 0 && chars[lineStart - 1] !== '\n')
+            lineStart--;
+        const indent = chars.slice(lineStart).join('').match(/^\s*/)?.[0] ?? '';
+        return `\n${indent}`;
+    };
     const acceptMention = (candidate) => {
-        const activeMention = mentionRef.current;
+        // Recompute the token from the live text: the ref may be newer than the
+        // render that produced `mention` when candidates arrived asynchronously.
+        const activeMention = findMentionInValue(valueRef.current, offsetRef.current);
         if (!activeMention)
             return;
-        const before = points.slice(0, activeMention.start).join('');
-        const after = points.slice(offset).join('');
-        const next = `${before}${candidate.label}${after}`;
-        onChange(next);
-        setCursor(Array.from(before + candidate.label).length);
+        // A trailing space closes the file token so the highlighter keeps colouring
+        // only the path while subsequent typing stays plain text.
+        applyEdit(activeMention.start, offsetRef.current, `${candidate.label} `);
         setSuggestion(null);
         setDismissedToken(null);
     };
     // Start index of the whitespace-delimited word before `at` (code points).
     // Like readline's word-rubout, trailing whitespace is eaten with the word.
     const wordStartBefore = (at) => {
+        const chars = pointsRef.current;
         let i = at;
-        while (i > 0 && /\s/.test(points[i - 1]))
+        while (i > 0 && /\s/.test(chars[i - 1] ?? ''))
             i--;
-        while (i > 0 && !/\s/.test(points[i - 1]))
+        while (i > 0 && !/\s/.test(chars[i - 1] ?? ''))
             i--;
         return i;
     };
@@ -195,8 +251,8 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         // enter submits; the modifier variants insert a line break instead.
         if (key.return) {
             if (key.shift || key.meta || key.ctrl) {
-                onChange(points.slice(0, offset).join('') + '\n' + points.slice(offset).join(''));
-                setCursor(offset + 1);
+                const at = offsetRef.current;
+                applyEdit(at, at, newlineWithIndent());
                 return;
             }
             // Enter accepts the highlighted @ candidate instead of submitting.
@@ -207,7 +263,7 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
                     return;
                 }
             }
-            onSubmit(value);
+            onSubmit(valueRef.current);
             return;
         }
         if (key.escape && popupIsOpen) {
@@ -216,20 +272,39 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
                 setDismissedToken(mentionRef.current.token);
             return;
         }
-        if (key.leftArrow) {
-            setCursor(Math.max(0, offset - 1));
+        if (key.leftArrow || key.rightArrow) {
+            const at = offsetRef.current;
+            const chars = pointsRef.current;
+            if (key.ctrl || key.meta) {
+                // Word-wise navigation; App reserves only ctrl+up/down for scrolling.
+                let next = at;
+                if (key.leftArrow) {
+                    while (next > 0 && /\s/.test(chars[next - 1] ?? ''))
+                        next--;
+                    while (next > 0 && !/\s/.test(chars[next - 1] ?? ''))
+                        next--;
+                }
+                else {
+                    while (next < chars.length && !/\s/.test(chars[next] ?? ''))
+                        next++;
+                    while (next < chars.length && /\s/.test(chars[next] ?? ''))
+                        next++;
+                }
+                offsetRef.current = next;
+                setCursor(next);
+            }
+            else {
+                const next = key.leftArrow ? Math.max(0, at - 1) : Math.min(chars.length, at + 1);
+                offsetRef.current = next;
+                setCursor(next);
+            }
             return;
         }
-        if (key.rightArrow) {
-            setCursor(Math.min(points.length, offset + 1));
-            return;
-        }
-        // Alt+Backspace/Delete (Ink reports Alt as meta) deletes one whole word.
-        // Keep it ahead of the single-glyph backspace branch below.
-        if ((key.backspace || key.delete) && key.meta) {
-            const start = wordStartBefore(offset);
-            onChange(points.slice(0, start).join('') + points.slice(offset).join(''));
-            setCursor(start);
+        // Alt/Ctrl+Backspace deletes one whole word, ahead of the single-glyph
+        // branch below. Ink reports Alt as `meta`.
+        if ((key.backspace || key.delete) && (key.meta || key.ctrl)) {
+            const at = offsetRef.current;
+            applyEdit(wordStartBefore(at), at, '');
             return;
         }
         // Editing shortcuts run before the modifier guard so they never fall
@@ -242,45 +317,68 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
             switch (input.toLowerCase()) {
                 case 'j': {
                     // ctrl+j is a line feed in most terminals: treat it as newline.
-                    onChange(points.slice(0, offset).join('') + '\n' + points.slice(offset).join(''));
-                    setCursor(offset + 1);
+                    const at = offsetRef.current;
+                    applyEdit(at, at, newlineWithIndent());
                     return;
                 }
                 case 'a':
+                    offsetRef.current = 0;
                     setCursor(0);
                     return;
-                case 'e':
-                    setCursor(points.length);
-                    return;
-                case 'u':
-                    onChange('');
-                    setCursor(0);
-                    return;
-                case 'w': {
-                    const start = wordStartBefore(offset);
-                    onChange(points.slice(0, start).join('') + points.slice(offset).join(''));
-                    setCursor(start);
+                case 'e': {
+                    const end = pointsRef.current.length;
+                    offsetRef.current = end;
+                    setCursor(end);
                     return;
                 }
-                case 'd':
-                    if (offset < points.length) {
-                        onChange(points.slice(0, offset).join('') + points.slice(offset + 1).join(''));
-                    }
+                case 'u':
+                    applyEdit(0, pointsRef.current.length, '');
                     return;
+                case 'w': {
+                    const at = offsetRef.current;
+                    applyEdit(wordStartBefore(at), at, '');
+                    return;
+                }
+                case 'd': {
+                    const at = offsetRef.current;
+                    if (at < pointsRef.current.length)
+                        applyEdit(at, at + 1, '');
+                    return;
+                }
                 case 'k':
-                    if (offset < points.length) {
-                        onChange(points.slice(0, offset).join(''));
-                    }
+                    applyEdit(offsetRef.current, pointsRef.current.length, '');
                     return;
                 default:
                     return;
             }
         }
         if (key.backspace || key.delete) {
-            if (offset === 0)
+            const at = offsetRef.current;
+            if (at === 0)
                 return;
-            onChange(points.slice(0, offset - 1).join('') + points.slice(offset).join(''));
-            setCursor(offset - 1);
+            applyEdit(at - 1, at, '');
+            return;
+        }
+        // Home/End jump to the first/last candidate while the @ popup is open.
+        // Skills are last, so End is the quick route to them in a long list.
+        if (popupIsOpen && currentSuggestion && currentSuggestion.candidates.length > 0 &&
+            (key.home || key.end || key.pageUp || key.pageDown)) {
+            const count = currentSuggestion.candidates.length;
+            const page = Math.max(1, MAX_POPUP_ITEMS - 3);
+            setSuggestion((prev) => {
+                if (!prev)
+                    return prev;
+                let index = prev.index;
+                if (key.home)
+                    index = 0;
+                else if (key.end)
+                    index = count - 1;
+                else if (key.pageUp)
+                    index = Math.max(0, index - page);
+                else
+                    index = Math.min(count - 1, index + page);
+                return { ...prev, index };
+            });
             return;
         }
         // Up/down: walk prompt history on a single-row draft, otherwise move the
@@ -296,10 +394,14 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
             // Prompt history and slash-palette navigation are owned by App, which
             // can see both the draft and the palette. Keeping them out of this
             // handler prevents Up from silently replacing an open `/` draft.
-            const rows = wrapPromptLines(points, displayWidth);
-            const next = moveCursorVertically(points, rows, offset, key.upArrow ? -1 : 1);
-            if (next !== offset)
+            const chars = pointsRef.current;
+            const at = offsetRef.current;
+            const rows = wrapPromptLines(chars, displayWidth);
+            const next = moveCursorVertically(chars, rows, at, key.upArrow ? -1 : 1);
+            if (next !== at) {
+                offsetRef.current = next;
                 setCursor(next);
+            }
             return;
         }
         // Tab completes an @mention when the caret is inside one; otherwise it is
@@ -312,10 +414,14 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
                     return;
                 }
             }
-            if (onCompleteMention && mention) {
-                void Promise.resolve(onCompleteMention(value, offset)).then((result) => {
+            const liveMention = findMentionInValue(valueRef.current, offsetRef.current);
+            if (onCompleteMention && liveMention) {
+                void Promise.resolve(onCompleteMention(valueRef.current, offsetRef.current)).then((result) => {
                     if (!result)
                         return;
+                    valueRef.current = result.value;
+                    pointsRef.current = Array.from(result.value);
+                    offsetRef.current = result.cursor;
                     onChange(result.value);
                     setCursor(result.cursor);
                 });
@@ -334,18 +440,15 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         // A big or multi-line paste goes through the caller, which may spill it to
         // disk and hand back a one-line marker instead of hundreds of rows.
         if (onPaste && (text.includes('\n') || text.length >= 2_000)) {
-            const before = points.slice(0, offset).join('');
-            const after = points.slice(offset).join('');
+            const at = offsetRef.current;
             void Promise.resolve(onPaste(text)).then((replacement) => {
                 const inserted = typeof replacement === 'string' ? replacement : text;
-                const next = `${before}${inserted}${after}`;
-                onChange(next);
-                setCursor(Array.from(before + inserted).length);
+                applyEdit(at, at, inserted);
             });
             return;
         }
-        onChange(points.slice(0, offset).join('') + text + points.slice(offset).join(''));
-        setCursor(offset + Array.from(text).length);
+        const at = offsetRef.current;
+        applyEdit(at, at, text);
     }, { isActive: !isDisabled });
     // Mask keeps one star per glyph (not per UTF-16 unit), so display and the
     // value share a code-point index and the cursor lands on the right column.
@@ -365,7 +468,9 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
     const rows = Math.max(1, windowLines.length);
     // Suggestion popup geometry. Its rows are included in the reported height so
     // the surrounding layout reserves space instead of clipping the card.
-    const MAX_POPUP_ITEMS = 4;
+    // Files first, then skills. Both groups stay visible at once (the collector
+    // caps files and skills), so a skill title is never hidden below the fold.
+    const MAX_POPUP_ITEMS = 10;
     const popupVisible = suggestionOpen && Boolean(suggestion);
     const selected = suggestion ? Math.min(suggestion.index, Math.max(0, suggestion.candidates.length - 1)) : 0;
     const popupStart = suggestion && suggestion.candidates.length > MAX_POPUP_ITEMS
@@ -402,20 +507,48 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
     const kindColor = {
         file: 'muted', directory: 'info', skill: 'accent',
     };
+    // Render one visual row: text spans keep their path colour, and the caret is
+    // a separate inverse cell to the RIGHT of the text, never painted onto a
+    // character. Only when a row is completely full does it fall back to the
+    // last cell, so the composer never grows past its width budget.
+    const renderFieldRow = (text, rel) => {
+        const spans = splitPathTokens(text || ' ');
+        const total = spans.reduce((sum, span) => sum + Array.from(span.text).length, 0);
+        const caretAtEnd = rel !== null && rel >= total;
+        let consumed = 0;
+        const nodes = spans.map((span, index) => {
+            const points = Array.from(span.text);
+            const spanStart = consumed;
+            consumed += points.length;
+            const color = span.path ? theme.accent : theme.text;
+            if (rel === null || rel < spanStart || rel >= spanStart + points.length) {
+                return _jsx(Text, { color: color, children: span.text }, index);
+            }
+            const local = rel - spanStart;
+            return (_jsxs(Text, { color: color, children: [points.slice(0, local).join(''), _jsx(Text, { inverse: true, children: points[local] ?? ' ' }), points.slice(local + 1).join('')] }, index));
+        });
+        if (caretAtEnd) {
+            const used = Array.from(text).reduce((sum, ch) => sum + charWidth(ch), 0);
+            // Append only when the row has a spare column; a completely full row
+            // stays within budget and simply shows no separate caret cell.
+            if (used < displayWidth) {
+                nodes.push(_jsx(Text, { inverse: true, children: '▏' }, "caret"));
+            }
+        }
+        return nodes;
+    };
     const fieldNode = !value ? (_jsx(Text, { color: theme.placeholder, wrap: "truncate-end", children: placeholder })) : (_jsx(Text, { color: theme.text, wrap: "truncate-end", children: windowLines.map((line, index) => {
             const text = displayPoints.slice(line.start, line.end).join('');
             const newline = index > 0 ? '\n' : null;
-            if (firstRow + index !== cursorLine) {
-                return _jsxs(React.Fragment, { children: [newline, text || ' '] }, index);
-            }
-            const rel = Math.max(0, Math.min(offset - line.start, Array.from(text).length));
-            const shown = Array.from(text);
-            return (_jsxs(React.Fragment, { children: [newline, shown.slice(0, rel).join(''), _jsx(Text, { inverse: true, children: shown[rel] ?? ' ' }), shown.slice(rel + 1).join('')] }, index));
+            const rel = firstRow + index === cursorLine
+                ? Math.max(0, Math.min(offset - line.start, Array.from(text).length))
+                : null;
+            return (_jsxs(React.Fragment, { children: [newline, renderFieldRow(text, rel)] }, index));
         }) }));
-    const popupNode = popupVisible && suggestion ? (_jsxs(Box, { flexDirection: "column", width: popupWidth, flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: '◈ Reference' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · enter insert · esc close` })] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), hiddenAbove > 0 ? _jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` }) : null, visibleCandidates.map((candidate, index) => {
+    const popupNode = popupVisible && suggestion ? (_jsxs(Box, { flexDirection: "column", width: popupWidth, flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: '◈ Reference' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ move · end skills · enter · esc` })] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), hiddenAbove > 0 ? _jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` }) : null, visibleCandidates.map((candidate, index) => {
                 const active = popupStart + index === selected;
                 const group = candidateGroup(candidate);
-                return (_jsxs(React.Fragment, { children: [startsGroup(index) ? (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, bold: true, wrap: "truncate-end", children: group === 'skill' ? 'Skills' : 'Files' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: ` ${group === 'skill' ? skillCount : fileCount}` })] })) : null, _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexShrink: 1, minWidth: 1, flexDirection: "row", children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Text, { color: theme[kindColor[candidate.kind]], children: `${kindIcon[candidate.kind]} ` }), _jsx(Text, { color: active ? theme.accent : theme.text, bold: active, wrap: "truncate-end", children: candidate.label })] }), candidate.detail ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: candidate.source ? `${candidate.source} · ${candidate.detail}` : candidate.detail }) })) : null] })] }, candidate.id));
+                return (_jsxs(React.Fragment, { children: [startsGroup(index) ? (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, bold: true, wrap: "truncate-end", children: group === 'skill' ? 'Skills' : 'Files' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: ` ${group === 'skill' ? skillCount : fileCount}` })] })) : null, _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexShrink: 0, flexDirection: "row", children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Text, { color: theme[kindColor[candidate.kind]], children: `${kindIcon[candidate.kind]} ` }), _jsx(Text, { color: active ? theme.accent : theme.text, bold: active || candidate.kind === 'skill', children: candidate.label })] }), candidate.detail ? (_jsx(Box, { flexShrink: 1, minWidth: 0, marginLeft: 2, overflow: "hidden", children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: candidate.source ? `${candidate.source} · ${candidate.detail}` : candidate.detail }) })) : null] })] }, candidate.id));
             }), hiddenBelow > 0 ? _jsx(Text, { color: theme.dim, children: `  ↓ ${hiddenBelow} more` }) : null, suggestion.error ? (_jsx(Text, { color: theme.error, wrap: "truncate-end", children: `⚠ ${suggestion.error}` })) : null] })) : null;
     // A fragment (not a Box) keeps the field's full-width layout: a wrapping Box
     // would measure the Text at its content width and truncate multi-row drafts.

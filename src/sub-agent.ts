@@ -16,7 +16,13 @@ import { generateSystemPrompt } from './system-prompt.js';
 import { logger } from './utils/logger.js';
 import { clearTodos } from './tools/todo.js';
 import { calculateCost, type ModelPricing, type UsageInfo } from './utils/cost-tracker.js';
-import { saveSubAgentRun, type SubAgentRunStatus } from './utils/subagent-store.js';
+import {
+  saveSubAgentRun,
+  loadSubAgentRun,
+  isValidSubAgentId,
+  type SubAgentRunStatus,
+  type SubAgentMessage,
+} from './utils/subagent-store.js';
 import { sanitizeMessagesForProvider } from './utils/message-sanitize.js';
 
 /** Default concurrent children for a `tasks` fan-out. */
@@ -25,6 +31,28 @@ const FANOUT_CAP = 3;
 const MAX_FANOUT_CAP = 5;
 /** Soft total iteration budget shared by all children of one fan-out. */
 const FANOUT_ITERATION_BUDGET = 500;
+
+/**
+ * Live children, keyed by their persisted transcript id. The main agent can
+ * list or abort them through the `subagent_control` tool. Entries are removed
+ * in the child's `finally` block, so a stale controller can never linger.
+ */
+const runningChildren = new Map<string, AbortController>();
+
+export function listRunningSubAgentIds(): string[] {
+  return [...runningChildren.keys()];
+}
+
+export function isSubAgentRunning(id: string): boolean {
+  return runningChildren.has(id);
+}
+
+export function abortSubAgentRun(id: string): boolean {
+  const controller = runningChildren.get(id);
+  if (!controller) return false;
+  controller.abort();
+  return true;
+}
 
 export const subAgentTool = {
   type: 'function' as const,
@@ -92,6 +120,35 @@ Do NOT ask the user questions — work autonomously with the tools available.`;
   return agentType === 'Review' ? `${prompt}\n\n${SUB_AGENT_REVIEW_MODE}` : prompt;
 }
 
+/**
+ * Main-agent control surface for sub-agents. The user never drives this; the
+ * model calls it to list, inspect, continue, release or abort child sessions.
+ */
+export const subagentControlTool = {
+  type: 'function' as const,
+  function: {
+    name: 'subagent_control',
+    description:
+      'Control sub-agent sessions owned by this main session. `list` shows all saved and running children; ' +
+      '`status` shows one session; `prompt` continues a saved child with a new task and full prior context; ' +
+      '`release` closes a child (it can no longer be prompted); `abort` stops a running child by id. ' +
+      'Use the transcript id from progress events or `list` as `id`.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list', 'status', 'prompt', 'release', 'abort'],
+          description: 'The control action to perform.',
+        },
+        id: { type: 'string', description: 'Sub-agent transcript id, required for status/prompt/release/abort.' },
+        prompt: { type: 'string', description: 'Follow-up task for the child. Required for `prompt`.' },
+      },
+      required: ['action'],
+    },
+  },
+};
+
 /** Lifecycle status for a child sub-agent (distinct from a tool call's status). */
 export type SubAgentLifecycleStatus = 'start' | 'done' | 'error';
 
@@ -105,6 +162,8 @@ export interface SubAgentProgressEvent {
   status: 'running' | 'done' | 'error';
   iteration: number;
   args?: Record<string, unknown>;
+  /** Stable persisted transcript id, usable by the main agent's control tool. */
+  subAgentTranscriptId?: string;
   subAgentId?: string;
   subAgentLabel?: string;
   subAgentStatus?: SubAgentLifecycleStatus;
@@ -220,6 +279,9 @@ async function runSubAgentOnce(
   thoroughness: string | undefined,
   sessionId?: string,
   label?: string,
+  seedMessages?: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  continueId?: string,
+  parentId?: string,
 ): Promise<SubAgentResult> {
   const requestedIterations = Number(maxIterations);
   let iterationLimit = Number.isFinite(requestedIterations)
@@ -242,15 +304,27 @@ async function runSubAgentOnce(
 
   const op = logger.startOperation('sub-agent');
   const startedAt = Date.now();
-  const subAgentSessionId = `sub-agent-${crypto.randomUUID()}`;
+  const subAgentSessionId = continueId ?? `sub-agent-${crypto.randomUUID()}`;
+  // Own the child's cancellation so the main agent can abort a specific run by
+  // id, while a parent abort still propagates to every child.
+  const childController = new AbortController();
+  const childSignal = childController.signal;
+  runningChildren.set(subAgentSessionId, childController);
+  const forwardAbort = (): void => childController.abort();
+  abortSignal?.addEventListener('abort', forwardAbort, { once: true });
 
   const systemPrompt = await generateSystemPrompt();
   const subSystemPrompt = buildSubAgentSystemPrompt(systemPrompt, agentType);
 
-  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-    { role: 'system', content: subSystemPrompt },
-    { role: 'user', content: task },
-  ];
+  // A follow-up run starts from the saved transcript, then appends the new task
+  // as a fresh user turn. The original record stays untouched; this one links
+  // back to it through `parentId`.
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = seedMessages
+    ? [...seedMessages, { role: 'user', content: task }]
+    : [
+        { role: 'system', content: subSystemPrompt },
+        { role: 'user', content: task },
+      ];
 
   // Track cumulative usage across all API calls in the sub-agent
   let totalInputTokens = 0;
@@ -274,7 +348,7 @@ async function runSubAgentOnce(
   try {
     for (let i = 0; i < iterationLimit; i++) {
       // Check abort at the top of each iteration
-      if (abortSignal?.aborted) {
+      if (childSignal.aborted) {
         return finish('(sub-agent aborted)');
       }
 
@@ -290,7 +364,7 @@ async function runSubAgentOnce(
           tool_choice: 'auto',
           stream: true,
           stream_options: { include_usage: true },
-        }, { signal: abortSignal });
+        }, { signal: childSignal });
 
         // Accumulate the streamed response
         assistantMessage = {
@@ -351,7 +425,7 @@ async function runSubAgentOnce(
         }
       } catch (err) {
         // If aborted during streaming, return gracefully
-        if (abortSignal?.aborted || (err instanceof Error && (err.name === 'AbortError' || err.message === 'Operation aborted'))) {
+        if (childSignal.aborted || (err instanceof Error && (err.name === 'AbortError' || err.message === 'Operation aborted'))) {
           logger.debug('Sub-agent aborted during streaming');
           return finish('(sub-agent aborted)');
         }
@@ -389,7 +463,7 @@ async function runSubAgentOnce(
 
         for (const toolCall of assistantMessage.tool_calls) {
           // Check abort between tool calls
-          if (abortSignal?.aborted) {
+          if (childSignal.aborted) {
             return finish('(sub-agent aborted)');
           }
 
@@ -404,7 +478,7 @@ async function runSubAgentOnce(
           onProgress?.({ tool: name, status: 'running', iteration: i, args });
 
           try {
-            const result = await handleToolCall(name, args, { sessionId: subAgentSessionId, abortSignal });
+            const result = await handleToolCall(name, args, { sessionId: subAgentSessionId, abortSignal: childSignal });
             messages.push({
               role: 'tool',
               name,
@@ -461,6 +535,7 @@ async function runSubAgentOnce(
           task,
           label,
           agentType,
+          ...(parentId ? { parentId } : {}),
           status,
           startedAt,
           endedAt: Date.now(),
@@ -473,6 +548,8 @@ async function runSubAgentOnce(
         logger.warn('Sub-agent transcript persistence failed', { id: subAgentSessionId, err: String(err) });
       }
     }
+    runningChildren.delete(subAgentSessionId);
+    abortSignal?.removeEventListener('abort', forwardAbort);
     op.end();
     clearTodos(subAgentSessionId);
   }
@@ -519,24 +596,29 @@ export async function runSubAgent(
     tasks,
     (childTask, index, id) => {
       const label = `Task ${index + 1}/${tasks.length}`;
+      const persistedId = `sub-agent-${crypto.randomUUID()}`;
       const childProgress: SubAgentProgressHandler = (evt) =>
-        onProgress?.({ ...evt, subAgentId: id, subAgentLabel: label, subAgentTask: childTask });
+        onProgress?.({
+          ...evt, subAgentId: id, subAgentTranscriptId: persistedId,
+          subAgentLabel: label, subAgentTask: childTask,
+        });
 
       onProgress?.({
         tool: 'sub_agent', status: 'running', iteration: 0,
-        subAgentId: id, subAgentLabel: label, subAgentStatus: 'start', subAgentTask: childTask,
+        subAgentId: id, subAgentTranscriptId: persistedId,
+        subAgentLabel: label, subAgentStatus: 'start', subAgentTask: childTask,
         subAgentType: agentType,
       });
 
       return runSubAgentOnce(
         client, model, childTask, perChildIterations, requestDefaults,
         childProgress, abortSignal, pricing, agentType, thoroughness,
-        sessionId, label,
+        sessionId, label, undefined, persistedId,
       ).then(
         (result) => {
           onProgress?.({
             tool: 'sub_agent', status: 'done', iteration: 0,
-            subAgentId: id, subAgentLabel: label, subAgentStatus: 'done',
+            subAgentId: id, subAgentTranscriptId: persistedId, subAgentLabel: label, subAgentStatus: 'done',
             subAgentTask: childTask, args: { ...result.usage }, subAgentType: agentType,
           });
           return result;
@@ -544,7 +626,7 @@ export async function runSubAgent(
         (err) => {
           onProgress?.({
             tool: 'sub_agent', status: 'error', iteration: 0,
-            subAgentId: id, subAgentLabel: label, subAgentStatus: 'error',
+            subAgentId: id, subAgentTranscriptId: persistedId, subAgentLabel: label, subAgentStatus: 'error',
             subAgentTask: childTask,
             args: { error: err instanceof Error ? err.message : String(err) }, subAgentType: agentType,
           });
@@ -557,4 +639,104 @@ export async function runSubAgent(
   );
 
   return combineResults(tasks, results);
+}
+
+/** Rebuild provider-safe history from a persisted transcript. */
+function seedFromRecord(messages: SubAgentMessage[]): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+  const recent = messages.slice(-80);
+  const system = messages.find((message) => message.role === 'system');
+  if (system && recent[0]?.role !== 'system') recent.unshift(system);
+  const seed: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [];
+  for (const message of recent) {
+    const role = message.role;
+    if (role !== 'system' && role !== 'user' && role !== 'assistant' && role !== 'tool') continue;
+    if (role === 'tool') {
+      if (!message.tool_call_id || !message.content) continue;
+      // `name` is not valid on a provider tool message; the call already has it.
+      seed.push({ role: 'tool', tool_call_id: message.tool_call_id, content: message.content });
+      continue;
+    }
+    if (role === 'assistant' && message.tool_calls?.length) {
+      seed.push({
+        role: 'assistant',
+        content: message.content,
+        tool_calls: message.tool_calls.map((call) => ({
+          id: call.id ?? `call-${crypto.randomUUID()}`,
+          type: 'function' as const,
+          function: {
+            name: call.function?.name ?? 'unknown',
+            arguments: call.function?.arguments ?? '{}',
+          },
+        })),
+      });
+      continue;
+    }
+    if (!message.content) continue;
+    seed.push({ role, content: message.content });
+  }
+  return seed;
+}
+
+export interface SubAgentFollowUpOptions {
+  maxIterations?: number;
+  requestDefaults?: Record<string, unknown>;
+  onProgress?: SubAgentProgressHandler;
+  abortSignal?: AbortSignal;
+  pricing?: ModelPricing;
+}
+
+/**
+ * Continue a saved sub-agent with a new prompt from the main agent. The child
+ * sees its own prior transcript plus the new task; a new record is saved and
+ * linked to the original so either can still be inspected on its own.
+ */
+export async function runSubAgentFollowUp(
+  client: OpenAI,
+  model: string,
+  sessionId: string,
+  parentId: string,
+  prompt: string,
+  options: SubAgentFollowUpOptions = {},
+): Promise<SubAgentResult | null> {
+  if (!isValidSubAgentId(sessionId) || !isValidSubAgentId(parentId)) {
+    logger.warn('Sub-agent follow-up rejected invalid id', { sessionId, parentId });
+    return null;
+  }
+  const record = await loadSubAgentRun(sessionId, parentId);
+  if (!record) {
+    logger.warn('Sub-agent follow-up could not load parent', { sessionId, parentId });
+    return null;
+  }
+  const task = String(prompt ?? '').trim();
+  if (!task) return null;
+
+  const id = `sub-agent-${crypto.randomUUID()}`;
+  const onProgress = options.onProgress;
+  onProgress?.({
+    tool: 'sub_agent', status: 'running', iteration: 0,
+    subAgentId: id, subAgentTranscriptId: id, subAgentStatus: 'start',
+    subAgentLabel: 'Continue', subAgentTask: task,
+  });
+  try {
+    const result = await runSubAgentOnce(
+      client, model, task, options.maxIterations, options.requestDefaults ?? {},
+      onProgress, options.abortSignal, options.pricing,
+      record.agentType, undefined, sessionId, 'Continue',
+      seedFromRecord(record.messages), id, parentId,
+    );
+    onProgress?.({
+      tool: 'sub_agent', status: 'done', iteration: 0,
+      subAgentId: id, subAgentTranscriptId: id, subAgentStatus: 'done',
+      subAgentLabel: 'Continue', subAgentTask: task, args: { ...result.usage },
+    });
+    return result;
+  } catch (err) {
+    onProgress?.({
+      tool: 'sub_agent', status: 'error', iteration: 0,
+      subAgentId: id, subAgentTranscriptId: id, subAgentStatus: 'error',
+      subAgentLabel: 'Continue', subAgentTask: task,
+      args: { error: err instanceof Error ? err.message : String(err) },
+    });
+    throw err;
+  }
 }

@@ -98,8 +98,9 @@ export async function collectMentionCandidates(
     }));
 
   const seen = new Set<string>();
-  // Skills go first so the four-row popup shows them before a long file list.
-  const candidates = [...skillCandidates, ...fileCandidates].filter((candidate) => {
+  // Files/folders first, installed skills last. The popup reserves rows for
+  // both groups so skills stay reachable even when the folder has many files.
+  const candidates = [...fileCandidates, ...skillCandidates].filter((candidate) => {
     if (seen.has(candidate.id)) return false;
     seen.add(candidate.id);
     return true;

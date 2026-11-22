@@ -71,6 +71,10 @@ import { loadHistory, appendHistory, HistoryNavigator } from './utils/input-hist
 import { summarizePaste } from './utils/paste.js';
 import { findMentionToken, applyMention, listMentionCandidates } from './utils/mentions.js';
 import { collectMentionCandidates } from './utils/mention-candidates.js';
+import { readGitBranch } from './utils/git-branch.js';
+import { openInBrowser, REPO_URL, BUG_REPORT_URL } from './utils/browser.js';
+import { pickerClickIndex } from './utils/picker-click.js';
+import { splitPathTokens } from './utils/path-highlight.js';
 import { commonPrefix } from './utils/completion.js';
 import { detectChecks, runChecks, renderCheckReport } from './utils/autoverify.js';
 import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
@@ -121,7 +125,7 @@ import { stopAllProcesses } from './tools/process.js';
 import { initializeMcp, closeMcp } from './mcp.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { renderFormattedText, normalizeTranscriptText } from './utils/format-message.js';
-import { formatContextWindow, listProviderModels, prefetchProviderModels } from './utils/provider-models.js';
+import { formatContextWindow, getCachedContextWindow, listProviderModels, prefetchProviderModels } from './utils/provider-models.js';
 import { addToolResultView } from './utils/tool-result-view.js';
 import { itemAtViewportRow, type AddStaticFn } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
@@ -277,7 +281,13 @@ function printMessageToScrollback(
           borderLeftColor={palette.userBorder}
           paddingLeft={1}
         >
-          <Text color={palette.userText}>{normalized}</Text>
+          <Text color={palette.userText}>
+            {splitPathTokens(normalized).map((span, index) => (
+              <Text key={index} color={span.path ? palette.accent : palette.userText}>
+                {span.text}
+              </Text>
+            ))}
+          </Text>
         </Box>
       </Box>
     );
@@ -286,7 +296,7 @@ function printMessageToScrollback(
   // Fallback is assistant, render with Markdown formatting (bold, italic)
   addStatic(
     <Box paddingX={2} paddingBottom={1}>
-      <Text>{renderFormattedText(normalized, transcriptTextWidth(columns), palette)}</Text>
+      <Text wrap="wrap">{renderFormattedText(normalized, transcriptTextWidth(columns), palette)}</Text>
     </Box>
   );
 }
@@ -323,7 +333,7 @@ function replayOneMessage(
     const savedCall = msgAny.tool_call_id ? toolCallsById.get(msgAny.tool_call_id) : undefined;
     const toolName = typeof msgAny.name === 'string' && msgAny.name ? msgAny.name : savedCall?.name || 'tool';
     const toolArgs = msgAny.args ?? savedCall?.args;
-    addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''), palette);
+    addToolResultView(addStatic, toolName, toolArgs, String(msgAny.content || ''), palette, columns);
   }
 }
 
@@ -624,6 +634,9 @@ const AppContent: React.FC<AppContentProps> = ({
     columns: finiteDim(stdout?.columns, 80),
     rows: finiteDim(stdout?.rows, 24),
   });
+  // Bumped on every resize event so the viewport is re-measured even when the
+  // clamped dims did not change (a zoom step can settle without a dim change).
+  const [resizeTick, setResizeTick] = useState(0);
   const { columns, rows } = dims;
   // One row shorter than the terminal. Rendering at exactly `rows` makes Ink
   // take its full-screen path (`clearTerminal` + full repaint) on every frame,
@@ -1159,34 +1172,10 @@ const AppContent: React.FC<AppContentProps> = ({
         if (restoredVariant) setVariantId(restoredVariant);
         loadedSession.variant = restoredVariant;
 
-        // A resumed session owns the provider/model it was created with.
-        let sessionConfig = loadedConfig;
-        if (loadedSession.provider && loadedSession.model) {
-          try {
-            const candidate = {
-              provider: loadedSession.provider,
-              model: loadedSession.model,
-            };
-            clientRef.current = buildClient(candidate);
-            sessionConfig = candidate;
-            try {
-              const target =
-                getActiveRuntimeConfigPath() === getRuntimeConfigPath('project')
-                  ? 'project'
-                  : 'user';
-              writeActiveSelection(candidate.provider, candidate.model, target);
-            } catch (err: any) {
-              logger.warn('Could not persist resumed session selection', { error: err.message });
-            }
-          } catch (err: any) {
-            setError(
-              `Session model ${loadedSession.provider}/${loadedSession.model} is unavailable: ${err.message}`
-            );
-          }
-        }
-        loadedSession.provider = sessionConfig.provider;
-        loadedSession.model = sessionConfig.model;
-        setConfig(sessionConfig);
+        // The active provider/model is global; a resumed session does not
+        // override it. Its saved pair remains historical metadata only.
+        loadedSession.provider = loadedConfig.provider;
+        loadedSession.model = loadedConfig.model;
 
         setTodosForSession(loadedSession.id, loadedSession.todos);
         setSession(loadedSession);
@@ -1404,6 +1393,9 @@ const AppContent: React.FC<AppContentProps> = ({
       setDims((prev) =>
         prev.columns === next.columns && prev.rows === next.rows ? prev : next
       );
+      // Force a viewport re-measure on every resize event, including the ones
+      // the dims guard above ignored, so zoom cannot leave stale geometry.
+      setResizeTick((tick) => tick + 1);
     };
     stdout.on('resize', onResize);
     return () => {
@@ -1421,11 +1413,26 @@ const AppContent: React.FC<AppContentProps> = ({
   const liveAreaSignature = [
     rows,
     columns,
+    resizeTick,
     todos.length,
     thinkingText.length,
     thinkingExpanded,
     streamingText.length,
-    helpMessage ? helpMessage.length : 0,
+    // `busy` is declared later as loading || isStreaming || Boolean(activeTool);
+    // listing its parts here avoids a use-before-declaration and re-measures on
+    // every transition into or out of the activity strip.
+    loading ? 1 : 0,
+    isStreaming ? 1 : 0,
+    activeTool ?? '',
+    error ?? '',
+    threadErrors.length,
+    // searchMatches is staticItems filtered by searchQuery, both listed here.
+    staticItems.length,
+    searchQuery?.length ?? 0,
+    decodeTps ?? '',
+    // Full text, not just its length: two messages of equal length can wrap
+    // into a different number of help rows.
+    helpMessage ?? '',
     pendingApproval ? 1 : 0,
     pendingAsk ? 1 : 0,
     keyPrompt ? 1 : 0,
@@ -1438,7 +1445,6 @@ const AppContent: React.FC<AppContentProps> = ({
     updateNotice ? 1 : 0,
     mode,
     toast?.length ?? 0,
-    searchQuery?.length ?? 0,
     composerRows,
   ].join(':');
 
@@ -1724,6 +1730,8 @@ const AppContent: React.FC<AppContentProps> = ({
   const getModelPaletteInfo = useCallback((providerId: string, modelId: string) => {
     const remote = remoteModelsRef.current[providerId]?.find((item) => item.id === modelId);
     if (remote) return { name: remote.label, contextWindow: remote.contextWindow };
+    const cachedWindow = getCachedContextWindow(providerId, modelId);
+    if (cachedWindow) return { name: modelId, contextWindow: cachedWindow };
     const details = getModelDetails(providerId, modelId);
     return details ? { name: details.name, contextWindow: details.contextWindow } : undefined;
   }, []);
@@ -2077,7 +2085,9 @@ const AppContent: React.FC<AppContentProps> = ({
 
   /** Files in the current folder + fuzzy matches + installed skills for `@`. */
   const provideMentionCandidates = useCallback(
-    async (token: string) => collectMentionCandidates(process.cwd(), token, { limit: 30 }),
+    // No UI-side trim: return every match the bounded file scan finds, then
+    // skills. The popup windows through long lists and End jumps to skills.
+    async (token: string) => collectMentionCandidates(process.cwd(), token, { limit: 600 }),
     []
   );
 
@@ -2147,38 +2157,24 @@ const AppContent: React.FC<AppContentProps> = ({
         const systemPrompt = await generateSystemPrompt();
         const messages = ensureSystemPromptAtTop(loaded.completionMessages, systemPrompt);
 
-        // Restore the session's own provider/model when it still has a key.
-        const providerId = loaded.provider || config.provider;
-        const modelId = loaded.model || config.model;
-        let nextConfig = config;
-        let modelError: string | null = null;
-        try {
-          clientRef.current = buildClient({ provider: providerId, model: modelId });
-          nextConfig = { provider: providerId, model: modelId };
-        } catch (err: any) {
-          modelError = err.message;
-        }
-
+        // The active provider/model is global and stays fixed when jumping
+        // between sessions. A session's saved provider/model is history only.
         const savedVariant = loaded.variant;
         const nextVariant =
           savedVariant && VARIANTS.some((item) => item.id === savedVariant)
             ? savedVariant
             : variantId;
 
-        loaded.provider = nextConfig.provider;
-        loaded.model = nextConfig.model;
+        loaded.provider = config.provider;
+        loaded.model = config.model;
         loaded.variant = nextVariant;
         loaded.completionMessages = messages;
 
-        setConfig(nextConfig);
         setVariantId(nextVariant);
         if (settings.variant !== nextVariant) {
           const nextSettings = { ...settings, variant: nextVariant };
           setSettings(nextSettings);
           saveSettings(nextSettings);
-        }
-        if (!modelError) {
-          persistActiveSelection(providerId, modelId, getModelPaletteInfo(providerId, modelId));
         }
 
         setCompletionMessages(messages);
@@ -2189,10 +2185,6 @@ const AppContent: React.FC<AppContentProps> = ({
         const loadedActivities = loaded.subAgentActivities ?? [];
         setSubAgentActivities(loadedActivities);
         setShowSubAgentPanel(false);
-
-        if (modelError) {
-          setError(`Session loaded, but its model is unavailable: ${modelError}`);
-        }
 
         setStaticItems([]);
         setUserScroll(0);
@@ -2215,8 +2207,6 @@ const AppContent: React.FC<AppContentProps> = ({
       settings,
       addStatic,
       resetLiveState,
-      persistActiveSelection,
-      getModelPaletteInfo,
       stdout,
       theme,
     ]
@@ -2296,6 +2286,17 @@ const AppContent: React.FC<AppContentProps> = ({
       case '/subagents':
         void openSubagents();
         return true;
+      case '/github':
+      case '/bug': {
+        const url = command === '/bug' ? BUG_REPORT_URL : REPO_URL;
+        // Best-effort: never break the TUI if no browser can be launched.
+        void openInBrowser(url)
+          .then((message) => showToast(message))
+          .catch((err: unknown) =>
+            setError(`Could not open browser: ${err instanceof Error ? err.message : String(err)}`)
+          );
+        return true;
+      }
       case '/review': {
         const target = parts.slice(1).join(' ').trim();
         const prompt = target
@@ -2710,7 +2711,16 @@ const AppContent: React.FC<AppContentProps> = ({
 
     // Slash commands work even before a provider is configured.
     if (trimmed.startsWith('/')) {
-      const selected = commandItems[commandIndex]?.label ?? trimmed.split(/\s+/)[0];
+      // Derive the command from the submitted text, not from the palette's
+      // last-rendered index: Ink can deliver Enter with a stale closure, which
+      // made the first Enter run the previous command (needing a second try).
+      const typed = trimmed.split(/\s+/)[0];
+      const matches = SLASH_COMMANDS.filter((cmd) =>
+        cmd.name.toLowerCase().startsWith(typed.toLowerCase())
+      );
+      const selected = matches.find((cmd) => cmd.name.toLowerCase() === typed.toLowerCase())?.name
+        ?? matches[0]?.name
+        ?? typed;
       const handled = await handleSlashCommand(selected, trimmed);
       if (handled) {
         if (!keepInput) {
@@ -2835,7 +2845,14 @@ const AppContent: React.FC<AppContentProps> = ({
     assistantMessageRef.current = null;
 
     try {
-      const pricing = getModelPricing(config.provider, config.model);
+      const basePricing = getModelPricing(config.provider, config.model);
+      // Remote model catalogs (OpenRouter, custom endpoints) can carry a real
+      // context window that the static registry does not know about. Prefer it
+      // so context% and compaction use the active model's actual limit.
+      const activeWindow = getModelPaletteInfo(config.provider, config.model)?.contextWindow;
+      const pricing = basePricing && activeWindow && activeWindow > 0
+        ? { ...basePricing, contextWindow: activeWindow }
+        : basePricing;
       const requestDefaults = getRequestDefaultParams(config.provider, config.model);
       const chosenVariant = VARIANTS.find((item) => item.id === variantId);
       if (chosenVariant?.reasoningEffort) {
@@ -2916,7 +2933,7 @@ const AppContent: React.FC<AppContentProps> = ({
         setLoading(false);
       }
     }
-  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme]);
+  }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme, getModelPaletteInfo]);
 
   // Any command path can reject; never let that become an unhandled rejection
   // that kills the TUI after a turn.
@@ -2956,7 +2973,11 @@ const AppContent: React.FC<AppContentProps> = ({
   const composerWidth = composerTextWidth(layout.inputWidth, layout.showSubmitHint);
   // Grow with the text, but never take more than about a third of the screen:
   // a long paste scrolls inside the composer instead of eating the transcript.
-  const composerMaxRows = Math.max(1, Math.min(10, Math.floor((rows - 4) / 2)));
+  // Keep enough room for a draft to wrap before PromptInput starts scrolling
+  // its own row window (which hides earlier typed lines). The old /2 budget
+  // gave only 1-2 rows on short terminals, so normal typing looked like text
+  // vanishing upward.
+  const composerMaxRows = Math.max(2, Math.min(12, rows - 6));
 
   // Provider-driven only: the block appears when the model actually streams
   // reasoning, never just because a request is in flight.
@@ -3012,10 +3033,12 @@ const AppContent: React.FC<AppContentProps> = ({
   const maxStreamRows = Math.max(2, Math.min(MAX_LIVE_STREAM_ROWS, area.transcriptRows));
   const streamingIsDiff = isStreaming && looksLikeDiff(streamingText);
   const liveStreamWidth = Math.max(1, columns - gutter * 2);
-  const liveStreamTextRows = wrappedRowCount(
-    clipToRows(streamingText, maxStreamRows, liveStreamWidth),
-    liveStreamWidth
-  );
+  // Format the WHOLE reply, then clip only the view to its tail. Clipping the
+  // raw text first used to strip table headers and fence openers, so markdown
+  // only looked right after `done` when the full text was formatted again.
+  const liveStreamFullRows = wrappedRowCount(streamingText, liveStreamWidth);
+  const liveStreamTextRows = Math.min(liveStreamFullRows, maxStreamRows);
+  const liveStreamTrimRows = Math.max(0, liveStreamFullRows - liveStreamTextRows);
   const liveStreamRows = !isStreaming
     ? 0
     : streamingIsDiff
@@ -3028,15 +3051,13 @@ const AppContent: React.FC<AppContentProps> = ({
       maxRows={Math.max(2, maxStreamRows - 3)}
     />
   ) : (
-    <Box paddingX={gutter} paddingBottom={dense ? 0 : 1}>
-      <Text wrap="truncate-end">
-        {renderFormattedText(
-          clipToRows(streamingText, maxStreamRows, liveStreamWidth),
-          liveStreamWidth,
-          theme
-        )}
-        <Text dimColor>▍</Text>
-      </Text>
+    <Box height={liveStreamTextRows + (dense ? 0 : 1)} overflow="hidden" flexShrink={0}>
+      <Box paddingX={gutter} paddingBottom={dense ? 0 : 1} marginTop={-liveStreamTrimRows}>
+        <Text wrap="wrap">
+          {renderFormattedText(streamingText, liveStreamWidth, theme)}
+          <Text dimColor>▍</Text>
+        </Text>
+      </Box>
     </Box>
   );
 
@@ -3219,20 +3240,14 @@ const AppContent: React.FC<AppContentProps> = ({
         if (picker === 'subagents' && subagentRuns.length > 0 && rows > 10) {
           const press = getLeftMousePress(input);
           if (press) {
-            const windowSize = Math.max(3, Math.min(8, paletteWindow));
-            const start = Math.max(
-              0,
-              Math.min(pickerIndex - Math.floor(windowSize / 2), subagentRuns.length - windowSize)
-            );
-            const visibleCount = Math.min(windowSize, subagentRuns.length - start);
-            const hiddenAbove = start > 0 ? 1 : 0;
-            const hiddenBelow = subagentRuns.length - start - visibleCount > 0 ? 1 : 0;
-            const counter = subagentRuns.length > windowSize ? 1 : 0;
-            const cardHeight = 6 + visibleCount + hiddenAbove + hiddenBelow + counter;
-            const cardTop = rows >= 14 ? Math.max(0, Math.floor((rows - cardHeight) / 2)) : 0;
-            const firstRowY = cardTop + 3 + hiddenAbove;
-            const clicked = start + (press.y - 1 - firstRowY);
-            if (clicked >= start && clicked < start + visibleCount) {
+            const clicked = pickerClickIndex({
+              rows,
+              count: subagentRuns.length,
+              pickerIndex,
+              maxVisible: paletteWindow,
+              pressY: press.y,
+            });
+            if (clicked !== null) {
               setPickerIndex(clicked);
               void openSubagentDetail(subagentRuns[clicked].id);
             }
@@ -3386,6 +3401,12 @@ const AppContent: React.FC<AppContentProps> = ({
           }
           if (clickedId) toggleStaticItem(clickedId);
           return;
+        }
+        // Below the transcript is the composer: a click positions the caret.
+        if (!dialogActive && initialized) {
+          const textLeft = Math.floor((columns - layout.inputWidth) / 2) + 3;
+          const col = Math.max(0, press.x - 1 - textLeft);
+          setCaretRequest((prev) => ({ col, nonce: (prev?.nonce ?? 0) + 1 }));
         }
       }
       return;
@@ -3606,6 +3627,20 @@ const AppContent: React.FC<AppContentProps> = ({
     ? `${providerLabel} / ${remoteModelLabel ?? getModelDetails(config.provider, config.model)?.name ?? config.model}`
     : 'not configured';
   const folderName = basename(process.cwd());
+
+  // Footer location: `~/folder:branch`. Read once on mount; a failed git
+  // lookup simply leaves the branch suffix off.
+  const [gitBranch, setGitBranch] = useState<string | null>(null);
+  // Left clicks in the composer move the caret; the nonce forces PromptInput
+  // to re-apply repeated clicks on the same column.
+  const [caretRequest, setCaretRequest] = useState<{ col: number; nonce: number } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void readGitBranch(process.cwd()).then((branch) => {
+      if (!cancelled) setGitBranch(branch);
+    });
+    return () => { cancelled = true; };
+  }, []);
   // Any interactive prompt owns the live area. Optional panels are hidden so
   // the critical prompt keeps its rows instead of being clipped at the bottom.
   const hasCriticalPrompt = pendingApproval !== null || pendingAsk !== null || keyPrompt !== null;
@@ -3885,7 +3920,7 @@ const AppContent: React.FC<AppContentProps> = ({
       {/* Scrollable transcript viewport; the input and footer below stay fixed.
           A dialog removes it entirely so the card floats on a clean canvas. */}
       {!dialogActive && (
-      <Box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0} minHeight={1}>
+      <Box flexDirection="row" flexGrow={1} flexShrink={1} flexBasis={0} minHeight={1} overflow="hidden">
         <Box
           ref={viewportRef}
           flexGrow={1}
@@ -4126,6 +4161,7 @@ const AppContent: React.FC<AppContentProps> = ({
                 width={composerWidth}
                 maxRows={composerMaxRows}
                 onRowsChange={setComposerRows}
+                caretRequest={caretRequest ?? undefined}
                 onPaste={async (text) => {
                   const summary = await summarizePaste(text, { label: session?.id ?? 'paste' });
                   return summary.text;
@@ -4136,7 +4172,11 @@ const AppContent: React.FC<AppContentProps> = ({
                   if (!mention) return null;
                   const matches = await listMentionCandidates(process.cwd(), mention.token, 20);
                   if (matches.length === 0) return null;
-                  const replacement = matches.length === 1 ? matches[0] : commonPrefix(matches);
+                  // Only a unique match closes the token with a space; a
+                  // common-prefix completion is still being typed.
+                  const replacement = matches.length === 1
+                    ? `${matches[0]} `
+                    : commonPrefix(matches);
                   const applied = applyMention(value, mention, replacement);
                   return { value: applied.text, cursor: applied.cursor };
                 }}
@@ -4162,6 +4202,9 @@ const AppContent: React.FC<AppContentProps> = ({
           variantColor={chosenVariant.color}
           tps={decodeTps}
           folder={folderName}
+          branch={gitBranch}
+          contextTokens={lastUsage?.contextTokens}
+          contextWindow={lastUsage?.contextWindow ?? getModelPaletteInfo(config?.provider ?? '', config?.model ?? '')?.contextWindow}
           busy={false}
           tool={null}
           frame={spinnerFrame}

@@ -16,6 +16,8 @@ export const SLASH_COMMANDS = [
     { name: '/find', description: 'Search the transcript', category: 'Session', keywords: 'grep lookup' },
     { name: '/subagents', description: 'Browse and inspect child agents', category: 'Session', keywords: 'agents children transcripts' },
     { name: '/review', description: 'Delegate a code review to a sub-agent', category: 'Tools', keywords: 'audit findings review' },
+    { name: '/github', description: 'Open the Bitacode repository in your browser', category: 'App', keywords: 'repo source code' },
+    { name: '/bug', description: 'Open the GitHub bug report form', category: 'App', keywords: 'issue report bug' },
     { name: '/model', description: 'Switch model', category: 'Model', keywords: 'llm ai model' },
     { name: '/variant', description: 'Reasoning effort', category: 'Model', keywords: 'thinking effort' },
     { name: '/provider', description: 'Switch provider or add a key', category: 'Model', keywords: 'api key openai anthropic' },

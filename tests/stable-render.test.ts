@@ -67,3 +67,65 @@ test('a zoom-out clamps painted rows to the live terminal height', () => {
   assert.ok(!out.includes('\x1b[1A'), 'no erase-and-move-up sequence');
   assert.ok(out.includes('A\x1b[K\nB\x1b[K\nC\x1b[K'), 'new rows still painted');
 });
+
+const repaintWithSuffix = (lines: string, suffix: string) =>
+  `\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[G${lines}\n${suffix}`;
+
+test('the last written row erases to display end and keeps the cursor suffix', () => {
+  const stdout = fakeStdout();
+  stdout.rows = 20;
+  const many = Array.from({ length: 30 }, (_, i) => `L${i}`).join('\n');
+  stdout.write(repaintWithSuffix(many, '\x1b[10;1H'));
+  const out = stdout.writes[0];
+  assert.equal(count(out, '\x1b[J'), 1, 'ED0 appended exactly once');
+  assert.ok(out.includes('L18\x1b[K\x1b[J'), 'ED0 is on the final written row');
+  assert.ok(!out.includes('L19'), 'rows beyond rows-1 are not written');
+  assert.equal(count(out, '\x1b[K'), 19, 'writes at most R-1 erase-end-line rows');
+  assert.ok(out.endsWith('\n\x1b[10;1H'), 'Ink cursor suffix survives');
+});
+
+test('a zero/NaN/undefined/negative row burst keeps the last valid height', () => {
+  const stdout = fakeStdout();
+  stdout.rows = 20;
+  stdout.write(repaint(Array.from({ length: 19 }, (_, i) => `L${i}`).join('\n')));
+  for (const bad of [0, NaN, undefined, -5]) {
+    stdout.rows = bad as any;
+    stdout.writes.length = 0;
+    stdout.write(repaint(Array.from({ length: 25 }, (_, i) => `x${i}`).join('\n')));
+    const out = stdout.writes[0];
+    assert.equal(
+      count(out, '\x1b[K'),
+      19,
+      `rows=${String(bad)} keeps 20-1=19, not the 24 fallback`
+    );
+    assert.ok(!out.includes('x20'), 'no rows beyond the clamped height');
+  }
+});
+
+test('a frame shrink keeps ED0 and stays within the last valid height', () => {
+  const stdout = fakeStdout();
+  stdout.rows = 20;
+  stdout.write(repaint(Array.from({ length: 19 }, (_, i) => `old${i}`).join('\n')));
+  stdout.writes.length = 0;
+  stdout.write(repaint(Array.from({ length: 5 }, (_, i) => `new${i}`).join('\n')));
+  const out = stdout.writes[0];
+  assert.ok(out.includes('\x1b[J'), 'last row erases to display end');
+  assert.equal(count(out, '\x1b[K'), 19, 'padded to old count, capped at 19');
+  assert.ok(out.endsWith('\x1b[K\x1b[J\n'), 'ED0 is the last body action');
+});
+
+test('a passthrough full clear resets padding bookkeeping', () => {
+  for (const clear of ['\x1b[2J', '\x1b[3J', '\x1b[H\x1b[2J']) {
+    const stdout = fakeStdout();
+    stdout.rows = 20;
+    stdout.write(repaint(Array.from({ length: 15 }, (_, i) => `L${i}`).join('\n')));
+    stdout.writes.length = 0;
+    stdout.write(clear);
+    assert.equal(stdout.writes[0], clear, 'full clear passes through untouched');
+    stdout.writes.length = 0;
+    stdout.write(repaint('A\nB'));
+    const out = stdout.writes[0];
+    assert.equal(count(out, '\x1b[K'), 2, `no padding after ${JSON.stringify(clear)}`);
+    assert.ok(out.includes('A\x1b[K\nB\x1b[K\x1b[J'));
+  }
+});

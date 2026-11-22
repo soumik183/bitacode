@@ -14,15 +14,6 @@ export interface ThinkingBlockProps {
   elapsedMs?: number;
 }
 
-/** How many content rows the expanded panel may use at this terminal size. */
-function previewRowBudget(rows: number): number {
-  return Math.max(2, Math.min(8, rows - 14));
-}
-
-function previewMaxChars(columns: number, rows: number): number {
-  return Math.max(200, Math.min(1600, Math.max(20, columns - 8) * previewRowBudget(rows)));
-}
-
 /**
  * Clip reasoning so it occupies at most `maxRows` wrapped rows.
  * The character cap alone is not enough: many short lines can still overflow
@@ -70,28 +61,23 @@ export function thinkingBlockHeight(
   text: string,
   expanded: boolean,
   columns: number,
-  rows: number
+  _rows: number
 ): number {
   const hasText = text.trim().length > 0;
   // The component renders nothing at all without reasoning text.
   if (!hasText) return 0;
-  // Collapsed: header + bottom margin.
-  if (!expanded) return 2;
   const width = Math.max(1, columns - 6);
-  const { shown, hiddenChars } = clipToPreview(
-    text,
-    width,
-    previewRowBudget(rows),
-    previewMaxChars(columns, rows)
+  // Collapsed: header + the first reasoning line + bottom margin.
+  if (!expanded) {
+    const first = text.trim().split('\n')[0] ?? '';
+    const firstRows = Math.max(1, Math.ceil(Math.max(1, first.length) / width));
+    return 1 + firstRows + 1;
+  }
+  // Expanded: every line is shown, so count all wrapped rows.
+  const contentRows = text.trim().split('\n').reduce(
+    (total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / width)),
+    0
   );
-  // Count the wrapped rows clipToPreview kept, plus its overflow note. The
-  // content rows were omitted before, so a long thought under-reserved up to
-  // `budget` rows and clicks missed the top of the expanded block.
-  const contentRows =
-    shown.split('\n').reduce(
-      (total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / width)),
-      0
-    ) + (hiddenChars > 0 ? 1 : 0);
   // header + marginTop(1) + content + marginBottom(1)
   return 1 + 1 + contentRows + 1;
 }
@@ -111,7 +97,7 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   animate,
   frame,
   columns,
-  rows,
+  rows: _rows,
   elapsedMs = 0,
 }) => {
   const theme = useTheme();
@@ -122,9 +108,12 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   const dots = active ? (animate ? '.'.repeat((frame % 3) + 1).padEnd(3) : '...') : '';
   const label = active ? 'Thinking' : 'Thought';
 
-  const maxChars = previewMaxChars(columns, rows);
   const contentWidth = Math.max(1, columns - 6);
-  const { shown, hiddenChars } = clipToPreview(text, contentWidth, previewRowBudget(rows), maxChars);
+  const lines = text.trim().split('\n');
+  const firstLine = lines[0] ?? '';
+  const shownFirst = firstLine.length > contentWidth
+    ? `${firstLine.slice(0, Math.max(1, contentWidth - 1))}…`
+    : firstLine;
 
   const hint = hasText
     ? `${expanded ? 'click to collapse' : 'click to expand'} · ctrl+t`
@@ -142,12 +131,15 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
         {hint && <Text color={theme.dim}>{`  ${hint}`}</Text>}
       </Text>
 
+      {!expanded && hasText && (
+        <Box paddingLeft={2}>
+          <Text color={theme.dim} wrap="truncate-end">{shownFirst}</Text>
+        </Box>
+      )}
+
       {expanded && hasText && (
         <Box paddingLeft={2} marginTop={1}>
-          <Text color={theme.muted} wrap="wrap">
-            {shown}
-            {hiddenChars > 0 ? `\n… ${hiddenChars} more characters` : ''}
-          </Text>
+          <Text color={theme.muted} wrap="wrap">{text.trim()}</Text>
         </Box>
       )}
     </Box>

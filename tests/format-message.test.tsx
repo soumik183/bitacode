@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { getTheme, themes } from '../src/theme.js';
-import { renderFormattedText, normalizeTranscriptText } from '../src/utils/format-message.js';
+import { renderFormattedText, normalizeTranscriptText, wrapPlainText } from '../src/utils/format-message.js';
 
 /** Pure helpers default to the active palette (black). */
 const theme = getTheme();
@@ -61,9 +61,9 @@ test('headings are bold and coloured per level, with the # markers stripped', ()
 test('bold, italic and bold-italic still work', () => {
   const node = renderFormattedText('**b** *i* ***bi***');
   const found = elements(node);
-  assert.ok(found.some((e) => e.props.bold === true && e.props.children === 'b'));
-  assert.ok(found.some((e) => e.props.italic === true && e.props.children === 'i'));
-  assert.ok(found.some((e) => e.props.bold === true && e.props.italic === true && e.props.children === 'bi'));
+  assert.ok(found.some((e) => e.props.bold === true && textOf(e) === 'b'));
+  assert.ok(found.some((e) => e.props.italic === true && textOf(e) === 'i'));
+  assert.ok(found.some((e) => e.props.bold === true && e.props.italic === true && textOf(e) === 'bi'));
 });
 
 test('inline code uses a distinct background and stays on one line', () => {
@@ -204,6 +204,19 @@ test('long input is capped so rendering stays cheap', () => {
   assert.ok(textOf(node).length <= 50_000);
 });
 
+test('plain prose gets word-boundary line breaks at the terminal width', () => {
+  const text = 'alpha beta gamma delta epsilon zeta eta theta iota kappa';
+  const wrapped = wrapPlainText(text, 20);
+  assert.ok(wrapped.includes('\n'), 'long normal text is broken into rows');
+  for (const line of wrapped.split('\n')) {
+    assert.ok(line.length <= 20, `row "${line}" exceeds 20 columns`);
+  }
+  assert.equal(wrapPlainText('short text', 80), 'short text');
+  assert.equal(wrapPlainText('para one\n\npara two', 80), 'para one\n\npara two');
+  // No width (legacy callers) keeps the text untouched.
+  assert.equal(wrapPlainText(text, 0), text);
+});
+
 test('normalizeTranscriptText trims the ends but keeps paragraph breaks', () => {
   // Blank lines carry markdown structure (tables, fenced blocks, paragraphs),
   // so they are preserved; only runs of three or more collapse to one break.
@@ -219,6 +232,26 @@ test('an explicit palette paints headings, code and dividers', () => {
   assert.ok(found.some((e) => e.props.bold === true && e.props.color === light.accent && textOf(e) === 'Title'));
   assert.ok(found.some((e) => e.props.backgroundColor === light.surfaceAlt));
   assert.ok(found.some((e) => e.props.color === light.dim && /─{3,}/.test(textOf(e))));
+});
+
+test('underscore emphasis, escapes, images and mixed emphasis are formatted', () => {
+  const node = renderFormattedText('__bold__ and _italic_ and **bold *nested* text** and \\*literal\\* and ![alt](x.png)', 80, theme);
+  const text = textOf(node);
+  assert.match(text, /bold and italic and bold nested text and \*literal\* and 🖼 alt/);
+  assert.doesNotMatch(text, /\\\*/, 'escape markers are consumed');
+  const found = elements(node);
+  assert.ok(found.some((e) => e.props.bold === true && textOf(e) === 'bold'), '__bold__ is bold');
+  assert.ok(found.some((e) => e.props.italic === true && textOf(e) === 'italic'), '_italic_ is italic');
+  assert.ok(found.some((e) => e.props.italic === true && textOf(e) === 'nested'), 'mixed emphasis works');
+});
+
+test('a table with a long preamble still renders boxed when formatted as a whole', () => {
+  const preamble = Array.from({ length: 18 }, (_, i) => `intro line ${i}`).join('\n');
+  const text = `${preamble}\n\n| name | value |\n| --- | --- |\n| alpha | 1 |`;
+  const node = renderFormattedText(text, 80, theme);
+  const found = elements(node);
+  assert.ok(found.some((e) => /name/.test(textOf(e))), 'table header is rendered');
+  assert.ok(found.some((e) => /─{2,}/.test(textOf(e))), 'table divider is drawn');
 });
 
 test('the highlight memo does not leak colours across palettes', () => {

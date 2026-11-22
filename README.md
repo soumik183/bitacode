@@ -7,42 +7,44 @@
 [![Security](https://github.com/soumik183/bitacode/actions/workflows/security.yml/badge.svg)](https://github.com/soumik183/bitacode/actions/workflows/security.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A minimal, educational AI coding agent CLI written in TypeScript. It stays small enough to read in an afternoon, but it still has the core pieces you expect from a real coding agent: a streaming tool-use loop, approvals, sessions, MCP, skills, sub-agents, and cost tracking.
+<div align="center">
 
-Ask it to build something and it will read your code, edit files, run commands, and ask you questions when a decision is genuinely yours to make.
+<img
+  src="assets/bitacode-cli-screenshot.jpg"
+  alt="Bitacode CLI — fresh launch screen with the splash wordmark, composer, and live status line"
+  width="720"
+  style="max-width: 100%; height: auto; border: 1px solid #30363d; border-radius: 10px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);"
+/>
+
+<br>
+
+</div>
+
+Bitacode is a small AI coding agent for your terminal. It reads your code, edits files, runs commands, and asks you when a decision is actually yours. No setup wall, no magic abstractions — open it and start typing.
+
+It is written in TypeScript and short enough to read in an afternoon. Everything a real coding agent needs is in here: a streaming tool loop, approvals, sessions, MCP, skills, sub-agents, and live cost tracking. If you like understanding the tools you use, this one is built for you.
 
 ## Features
 
-- **Multi-provider chat** — OpenAI, Anthropic, Google Gemini, and OpenRouter via the OpenAI SDK
-- **Tools** — File ops (read/write/edit/multi-edit/apply-patch/delete/rename/move/copy/mkdir/stat/diff), search (glob/grep/find_symbol/web_search/codesearch/search_docs/history), shell & background processes, git, todos, plans, sub-agents, and `ask_user`
-- **Approval modes** — `manual` (ask every time), `auto` (auto-approve), `yolo` (skip permission checks); change with `/settings`
-- **Rich terminal UI** — Colorful Markdown (headings, tables, nested lists, code), syntax highlighting, stable scrolling, scrollbar, and responsive layout that survives zoom
-- **Session persistence** — Conversations and TODO state are saved automatically and can be resumed with `--session`
-<!-- - **Dynamic extensions** — Load skills on demand and add external tools through MCP servers -->
-- **Sub-agents** — Delegate tasks to isolated children, run them in parallel, and inspect their saved transcripts with `read_subagent`
-- **Usage tracking** — Live token, context, and estimated cost display in the TUI
+- **Multiple providers** — OpenAI, Anthropic, Gemini, and OpenRouter through one SDK.
+- **Real tools** — file ops, search, shell, git, todos, plans, web search, sub-agents, and `ask_user`.
+- **You stay in control** — `manual`, `auto`, and `yolo` approval modes; change them with `/settings`.
+- **Terminal UI that behaves** — Markdown, syntax colours, stable scrolling, responsive layout, seven audited themes.
+- **Sessions that survive** — conversations and todos save themselves; resume with `--session`.
+- **Sub-agents you can inspect** — delegate, run in parallel, and browse every child transcript.
+- **Honest usage numbers** — live tokens, context window, and estimated cost in the footer.
 
-## Quick Start
+## Install
 
-Install from npm (the package and binary are both `bitacode`):
-
-```bash
-npm install -g bitacode
-# or, without installing:
-npx bitacode@latest
-# or, as a project dependency:
-npm install bitacode
-```
-
-Update to the newest release from npm at any time:
+Pick what fits you:
 
 ```bash
-bitacode update              # global install
-bitacode update --local      # current project
-bitacode update --check      # check only
+npm install -g bitacode      # one global command
+npx bitacode@latest          # no install at all
+npm install bitacode         # as a project dependency
 ```
 
-From a clone:
+From source:
 
 ```bash
 git clone https://github.com/soumik183/bitacode.git
@@ -51,46 +53,55 @@ npm install
 npm run dev
 ```
 
-`dist/` is committed, so you can also run the compiled build directly:
+`dist/` is committed, so `node dist/cli.js` works too.
+
+### Alternative: install script
+
+`install.sh` does the same job in one command. By default it installs the published package from npm; pass `--source` to download the GitHub release tarball and build it locally instead (handy when the npm registry is blocked).
 
 ```bash
-node dist/cli.js
+curl -fsSL https://raw.githubusercontent.com/soumik183/bitacode/main/install.sh | sh
+# or, with wget:
+wget -qO- https://raw.githubusercontent.com/soumik183/bitacode/main/install.sh | sh
+
+# build from the GitHub release source instead of npm:
+curl -fsSL https://raw.githubusercontent.com/soumik183/bitacode/main/install.sh | sh -s -- --source
+
+# pin a version/tag:
+VERSION=v0.1.25 sh install.sh --source
 ```
 
-Running `bitacode` always opens the main screen immediately — there is no blocking setup step. If an API key is found in the environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, or `BITACODE_API_KEY`), Bitacode automatically picks that provider and its first model. Otherwise you get a one-line hint and can set up from the main screen. The selection is saved to the shared user `bitacode.jsonc`; use `bitacode configure --project` if you want a project-local file instead.
+It needs Node/npm, plus `curl` or `wget` for the source mode. Run `sh install.sh --help` for all options.
 
-From the main screen, type `/provider` to choose a provider (you'll be prompted for an API key if none is set) and `/model` to pick a model. If no key is configured, sending a normal message shows a hint instead of failing silently.
+### First run
 
-Runtime config lookup is simple:
+`bitacode` opens the main screen immediately. If an API key is already in your environment (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, or `BITACODE_API_KEY`), it picks that provider and model for you. Otherwise you get a one-line hint and can configure from the screen.
 
-- if `<cwd>/.bitacode/bitacode.jsonc` exists, Bitacode uses it
-- otherwise it falls back to the shared user config at `~/.config/bitacode/bitacode.jsonc` on macOS/Linux and `~/AppData/Local/bitacode/bitacode.jsonc` on Windows
+Tip: type `/provider` to pick a provider (you'll be prompted for a key) and `/model` to pick a model.
 
-You can also run setup directly. `bitacode configure` has no flags: it first creates the global config file (`~/.config/bitacode/bitacode.jsonc`), then — if an API key is in the environment — fills it in and exits; otherwise it opens a provider → model → API key picker that saves to the global config automatically.
-
-```bash
-bitacode configure
-```
-
-To create a runtime config file for the current project or your shared user config, run:
+Need to set things up from a script?
 
 ```bash
-bitacode init
-```
-
-`bitacode init` creates `bitacode.jsonc` in either `<cwd>/.bitacode/bitacode.jsonc` or your shared user config location and prints the exact path it used.
-
-For scripts or non-interactive setup, use:
-
-```bash
-bitacode init --project
-bitacode init --user
+bitacode configure          # create global config, detect env keys, or open the picker
+bitacode init               # create a runtime config and print its path
+bitacode init --project     # <cwd>/.bitacode/bitacode.jsonc
+bitacode init --user        # shared user config
 bitacode init --project --force
 ```
 
-## Headless / CI mode
+Config lookup is deliberately boring: `<cwd>/.bitacode/bitacode.jsonc` first, then `~/.config/bitacode/bitacode.jsonc` on macOS/Linux (`~/AppData/Local/bitacode/bitacode.jsonc` on Windows). Project rules and hooks only load when the project is trusted.
 
-Run one prompt without the TUI, optionally emitting one JSON object per event:
+### Update
+
+```bash
+bitacode update             # global install
+bitacode update --local     # current project
+bitacode update --check     # check only
+```
+
+## Headless / CI
+
+One prompt, no TUI, optional JSON events. Exit code is `0` on success, so scripts and GitHub Actions just work.
 
 ```bash
 bitacode -p "fix the failing test"
@@ -99,255 +110,119 @@ bitacode -p "summarise the repo" --approval auto --provider openai --model gpt-4
 bitacode -p "commit the change" --max-iterations 8 --save-session
 ```
 
-`--cwd` sets the working directory. `--session <id>` resumes a saved session.
-Exit code is `0` on success and non-zero on failure, so it works in scripts and
-GitHub Actions.
+`--cwd` sets the working directory; `--session <id>` resumes a saved one.
 
-## Configuration, trust and automation
+## Configuration, trust & automation
 
-- `bitacode permissions show|trust|untrust|allow|deny|ask` — granular per-tool,
-  per-command and per-path rules with last-match-wins ordering. Project rules
-  are only read from a trusted directory.
-- `bitacode hooks` configuration lives in `~/.config/bitacode/hooks.json` and
-  `<repo>/.bitacode/hooks.json`. Events: `SessionStart`, `UserPromptSubmit`,
-  `PreToolUse`, `PostToolUse`. Project hooks require a trusted project.
-- Custom slash commands are Markdown files in `~/.config/bitacode/commands/` and
-  `<repo>/.bitacode/commands/` (project ones require trust).
-- Plugins are discovered from `~/.config/bitacode/plugins/` and
-  `<repo>/.bitacode/plugins/`; manage them with `bitacode plugins list|enable|disable|info`.
-- `bitacode sessions list|show|replay|stats|journal|fork|rename|pin|export [id]`
-  manages saved conversations.
-- `bitacode doctor` diagnoses config, permissions, hooks, storage and terminal support.
-- `bitacode completion bash|zsh|fish` prints a shell completion script.
+- `bitacode permissions show|trust|untrust|allow|deny|ask` — per-tool, per-command, per-path rules. Project rules need a trusted directory.
+- `bitacode hooks` — `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` in `~/.config/bitacode/hooks.json` or `<repo>/.bitacode/hooks.json`.
+- **Custom commands** — Markdown files in `~/.config/bitacode/commands/` or `<repo>/.bitacode/commands/`.
+- **Plugins** — discovered from `~/.config/bitacode/plugins/`; manage with `bitacode plugins list|enable|disable|info`.
+- `bitacode sessions list|show|replay|stats|journal|fork|rename|pin|export [id]` — your saved conversations.
+- `bitacode doctor` — config, permissions, hooks, storage, terminal support.
+- `bitacode completion bash|zsh|fish` — shell completion.
 
-The agent also keeps a small durable memory (`fact`, `preference`, `decision`,
-`constraint`) and folds stable repo context into prompts to keep the
-provider prompt cache warm across turns.
+Bitacode also keeps a small durable memory (`fact`, `preference`, `decision`, `constraint`) and folds stable repo context into prompts to keep the provider cache warm.
 
-## Interactive Commands
+## Commands
 
-- `/help` — Show available slash commands
-- `/new` — Start a fresh session
-- `/session` — Resume a saved session (`/session <id>` also works); press `d` in the picker to delete one, or use `/session delete <id>`
-- `/find <text>` — Search the transcript; `Esc` clears
-- `/image <path>` — Attach a screenshot/image for the agent to inspect
-- `/model` — Switch model
-- `/provider` — Switch API provider
-- `/variant` — Set reasoning variant
-- `/theme` — Choose a colour theme (live swatches; press `1`–`7` or use ↑↓ + Enter)
+Slash commands work from the composer. Type `/` to see the full list with descriptions; filter as you type.
 
-  Palettes: `black` (graphite + gold), `midnight` (navy + violet), `dark` (slate + blue), `light` (paper + ink), `sand` (warm notebook), `moss` (forest), `high-contrast` (pure black/white). Every palette is contrast-audited: body text ≥ 4.5:1, borders ≥ 2.2:1, status colours visually distinct.
-- `/settings` — Toggle animations and mouse clicks, change approval mode (manual / auto / yolo), or open the theme picker from the Theme row
-- `/undo` — Undo the last file change
-- `/update` — Check npm and install the latest `bitacode` release (`/update --local` for this project)
-- `/quit` or `/exit` — Save and exit
+| Command | What it does |
+|---|---|
+| `/help` | Show keys, hints, and every command |
+| `/new` | Start a fresh session |
+| `/session` | Resume a saved session (`/session <id>` works too; `d` deletes in the picker) |
+| `/find <text>` | Search the transcript (`Esc` clears) |
+| `/subagents` | Browse and inspect child-agent transcripts |
+| `/review` | Delegate a code review to a sub-agent |
+| `/github` | Open the Bitacode repository in your browser (Chrome first on Android, then your default browser) |
+| `/bug` | Open the GitHub new-issue form to report a bug |
+| `/model` | Switch model |
+| `/provider` | Switch provider or add an API key |
+| `/variant` | Set reasoning effort |
+| `/theme` | Choose a colour theme (live swatches, `1`–`7`) |
+| `/settings` | Animations, mouse clicks, approval mode, status line |
+| `/memory` | Saved facts about you and the repo |
+| `/checkpoint` | Working notes that survive compaction |
+| `/rewind` | Undo the last turn |
+| `/undo` | Undo the last file change |
+| `/trust` | Trust this project |
+| `/permissions` | Show permission rules |
+| `/verify` | Run typecheck, lint, and tests |
+| `/doctor` | Diagnose configuration |
+| `/image <path>` | Attach a screenshot for the agent to inspect |
+| `/update` | Check npm and install the newest release (`--local` for this project) |
+| `/quit`, `/exit` | Save and exit |
 
-Other useful shortcuts (each works with **Ctrl** or **Alt**):
+### Keyboard shortcuts
 
-- `n` new session · `s` sessions · `m` model · `p` provider · `v` variant
-- `h` or `/` help · `,` settings · `q` sessions
-- `k` clear input · `l` clear transcript · `t` toggle thinking
-- `Tab` toggle plan/build mode · `Ctrl+R` retry · `Ctrl+E` collapse/expand all cards
-- `Ctrl+Y` copy card · `Ctrl+↑` edit last message · `! <cmd>` run a shell command
-- `b` / `f` scroll a page up/down
-- **Text area**: `a` start · `e` end · `u` clear line · `w` delete word · `d` delete char · `k` delete to end
-- `PageUp` / `PageDown`, `↑` / `↓` (`Shift` for three), `Home` / `End` — scroll the transcript
-- `Esc` — Abort the current completion or close a prompt
-- `Ctrl+C` — Save the session and exit, printing a resume command
+Modifier keys work with **Ctrl** or **Alt** (Ink reports Alt as meta).
 
-The agent can pause and ask you a question with the `ask_user` tool. The prompt
-takes over the composer area: pick an option with `1`-`9` or `↑`/`↓` and press
-`enter`, press `tab` to type your own answer instead, and press `esc` to skip.
-When the agent offers choices, its own pick is marked `recommended` and listed
-first. Several questions can arrive at once; they are asked one at a time with a
-progress counter, and the answers are returned to the agent together.
+| Keys | Action |
+|---|---|
+| <kbd>n</kbd> / <kbd>s</kbd> / <kbd>q</kbd> | New session / open sessions |
+| <kbd>m</kbd> / <kbd>p</kbd> / <kbd>v</kbd> | Model / provider / variant |
+| <kbd>h</kbd> or <kbd>/</kbd> | Help · <kbd>,</kbd> settings |
+| <kbd>g</kbd> | Open the sub-agent list |
+| <kbd>k</kbd> / <kbd>l</kbd> | Clear input / clear transcript |
+| <kbd>t</kbd> / <kbd>Ctrl</kbd>+<kbd>T</kbd> | Toggle thinking |
+| <kbd>Tab</kbd> | Plan ↔ build mode |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> | Retry the last prompt |
+| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Collapse / expand all cards |
+| <kbd>Ctrl</kbd>+<kbd>Y</kbd> | Copy the last visible card |
+| <kbd>Ctrl</kbd>+<kbd>↑</kbd> | Edit the last message |
+| <kbd>!</kbd> + command | Run a shell command locally |
+| <kbd>@</kbd> | File and skill picker — type to filter, <kbd>Enter</kbd> to insert, <kbd>End</kbd> for skills |
+| <kbd>↑</kbd>/<kbd>↓</kbd>, <kbd>PageUp</kbd>/<kbd>PageDown</kbd>, <kbd>Home</kbd>/<kbd>End</kbd> | Scroll the transcript (`Shift` scrolls three rows) |
+| <kbd>Esc</kbd> | Abort the turn or close a prompt |
+| <kbd>Ctrl</kbd>+<kbd>C</kbd> | Save, exit, and print a resume command |
 
-Thinking is driven entirely by the provider. When the model streams reasoning
-the block opens on its own and shows the live animated header; when reasoning
-ends it folds back to a plain `Thought · 3s` line. If the provider sends no
-reasoning, no thinking block appears at all — there is no preset state.
-`Ctrl+T` or a click on the header still overrides it for that thought.
+`/github` and `/bug` try Google Chrome first on Android, then fall back to your default browser. On desktop they use `xdg-open` (Linux), `open` (macOS), or `start` (Windows). Set `BITACODE_BROWSER=default` to skip Chrome, or set it to a command like `firefox` to force one.
 
-A one-column scrollbar on the right edge of the transcript shows where you are
-in the history; it appears only once the transcript is taller than the visible
-viewport. The layout is responsive: on narrow or short terminals the footer
-drops the variant and cost columns, the composer uses a tighter margin, and
-panels show fewer rows so the composer always stays on screen.
+In the text area: <kbd>a</kbd> start · <kbd>e</kbd> end · <kbd>u</kbd> clear line · <kbd>w</kbd> delete word · <kbd>d</kbd> delete char · <kbd>k</kbd> delete to end. Ctrl/Alt + <kbd>←</kbd>/<kbd>→</kbd> move by word.
 
-The transcript resizes automatically. When the todo panel or the thinking block
-appears it takes rows from the transcript, and when they go away the space is
-handed straight back, so the composer is always visible without manual
-adjustment. The root frame is kept one row shorter than the terminal because
-Ink repaints the whole screen whenever its output reaches the terminal height,
-which is what made scrolling blink.
-
-The composer is a borderless text area with a single vertical blue accent bar on
-the left. It is bright when the input has focus and dimmer when it does not. There is
-no horizontal rule between the chat and the composer, so the bar is the only
-border in that area and the two do not read as a double edge.
-
-## Building From Source
-
-```bash
-npm install
-npm run build        # compile to dist/ (tracked - commit after building)
-npm run dev          # run from source with tsx
-npm run typecheck    # tsc --noEmit
-npm test             # 424 tests
-npm run lint         # eslint
-```
-
-CI runs all of the above on Node 20, 22, and 24, and fails if the committed
-`dist/` no longer matches `src/`.
-
-## Releasing
-
-The package is published as `bitacode` (binary: `bitacode`).
-
-### Automatic (GitHub Actions)
-Pushing to `main` runs typecheck, tests, lint and build, packs the tarball,
-installs it in a clean directory to prove it works, then publishes to npm only
-if that version is not already on the registry. It also tags `vX.Y.Z` and
-creates a GitHub Release. Pushing a `v*` tag does the same via `release.yml`
-(with a duplicate-publish guard).
-
-The repo needs one secret: **`NPM_TOKEN`** — an npm token with publish rights
-to the `bitacode` package. Manual runs of **Actions → Publish** support a
-`dry_run` that builds and packs without publishing.
-
-### From your terminal
-```bash
-npm run release:check    # typecheck + test + lint + build + smoke test
-npm run release:dry      # npm pack --dry-run (no publish)
-npm run release          # publish current version
-npm run release:patch    # npm version patch + publish (also :minor, :major)
-git push && git push --tags
-```
-`npm version` creates a commit and tag; `prepack` rebuilds `dist/` before publish.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security issues go through
-[SECURITY.md](SECURITY.md), not a public issue.
-
-## Documentation
-
-Technical references live in the repository root:
-
-- `SPEC.md` — current implementation specification
-- `ARCHITECTURE.md` — current runtime architecture and module relationships
-
-## Bitacode Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ USER INTERFACE (Ink/React)                                                                      │
-│ ┌───────────────────────────────────────────────────────────────────────────────────────────┐   │
-│ │ App.tsx: Banner | History | Streaming | Loading | Approval | Usage Info                   │   │
-│ │ • Manages React state (messages, streaming, loading)                                      │   │
-│ │ • Event router → State updates → Re-render                                                │   │
-│ └───────────────────────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────────────────────┘
-                                              ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ AGENTIC LOOP (src/agentic-loop/)                                                                │
-│ ┌───────────────────────────────────────────────────────────────────────────────────────────┐   │
-│ │ INITIALIZATION (once per session)                                                         │   │
-│ │ • generateSystemPrompt() (src/system-prompt.ts)                                           │   │
-│ │ • initializeMcp() (src/mcp.ts) → listTools() → registerDynamicTool()                      │   │
-│ │ • initializeSkillsSupport() (src/skills.ts) → discover → loadSKILL.md → inject prompt     │   │
-│ └───────────────────────────────────────────────────────────────────────────────────────────┘   │
-│                                              ▼                                                  │
-│ ┌───────────────────────────────────────────────────────────────────────────────────────────┐   │
-│ │ while (iteration < maxIterations) {                                                       │   │
-│ │                                                                                           │   │
-│ │   1. CHECK ABORT → Emit 'done' → Return                                                   │   │
-│ │                                                                                           │   │
-│ │   2. CHECK COMPACT → Context ≥ 90%? → compactIfNeeded()                                   │   │
-│ │                                                                                           │   │
-│ │   3. CALL LLM → client.chat.completions.create({stream: true, tools})                     │   │
-│ │      ├─ processStream() → accumulate content, build tool_calls[], emit text_delta         │   │
-│ │      └─ Response type?                                                                    │   │
-│ │         │                                                                                 │   │
-│ │         ├─ Tool Calls → executeToolCalls()                                                │   │
-│ │         │   │                                                                             │   │
-│ │         │   ├─ CORE TOOLS (src/tools/*.ts):                                               │   │
-│ │         │   │  ├─ read_file, write_file, edit_file, list_directory, bash, etc.            │   │
-│ │         │   │  └─ Emit: tool_call, tool_result events                                     │   │
-│ │         │   │                                                                             │   │
-│ │         │   ├─ DYNAMIC TOOLS (Runtime registered):                                        │   │
-│ │         │   │  ├─ MCP tools (mcp_{server}_{tool})                                         │   │
-│ │         │   │  ├─ activate_skill(name) → loads skill, injects into prompt                 │   │
-│ │         │   │  └─ Emit: tool_call, tool_result events                                     │   │
-│ │         │   │                                                                             │   │
-│ │         │   └─ SUB-AGENT TOOL (src/sub-agent.ts):                                         │   │
-│ │         │      ├─ runSubAgent() → Isolated conversation                                   │   │
-│ │         │      ├─ • Own system prompt + task prompt                                       │   │
-│ │         │      ├─ • Own message history                                                   │   │
-│ │         │      ├─ • Access same tools as parent                                           │   │
-│ │         │      ├─ • Separate usage tracking                                               │   │
-│ │         │      ├─ • Returns summary + events                                              │   │
-│ │         │      └─ Emit: sub_agent_iteration, tool_result events                           │   │
-│ │         │                                                                                 │   │
-│ │         │   → Loop back with tool results                                                 │   │
-│ │         │                                                                                 │   │
-│ │         └─ Text Response → Add to messages, emit 'done', return                           │   │
-│ │                                                                                           │   │
-│ │   4. ERROR HANDLING (src/agentic-loop/errors.ts):                                         │   │
-│ │      └─ 400 repairs (JSON/orphaned/truncate) | 429 backoff | 5xx retry | context compact  │   │
-│ │                                                                                           │   │
-│ │   5. SESSION PERSISTENCE (src/sessions.ts):                                               │   │
-│ │      └─ saveSession() → ~/.local/share/bitacode/sessions/                               │   │
-│ │                                                                                           │   │
-│ │ }                                                                                         │   │
-│ └───────────────────────────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────────────────────────┘
-```
-
-The codebase is organized so each part is easy to trace:
-
-- `src/cli.tsx` — CLI flags and the `configure` subcommand
-- `src/App.tsx` — Ink app shell, runtime orchestration, slash commands, approvals, session display
-- `src/agentic-loop.ts` — Streaming tool-use loop and error handling
-- `src/tools/` — Built-in tools such as file I/O, shell, todo tracking, `webfetch`, and `ask_user`
-- `src/config.tsx` — Config persistence and setup wizard
-- `src/providers/` — One file per built-in provider, plus the merged provider/model catalog
-- `src/sessions.ts` — Session save/load and TODO persistence
-- `src/skills.ts` — Skill discovery and dynamic `activate_skill` tool registration
-- `src/mcp.ts` — MCP server loading and dynamic tool registration
-- `src/sub-agent.ts` — Isolated child agent execution
-
-## Supported Providers
-
-### OpenAI
-- GPT-5.4
-- GPT-5 Mini
-- GPT-4.1
-
-### Anthropic Claude
-- Claude Opus 4.6
-- Claude Sonnet 4.6
-- Claude Haiku 4.5
-
-### Google Gemini
-- Gemini 3 Flash (Preview)
-- Gemini 3.1 Pro (Preview)
-- Gemini 2.5 Flash
-- Gemini 2.5 Pro
-
-### OpenRouter
-- GPT-4o
-- Claude Sonnet 4.5
-- Gemini 2.5 Flash
-- DeepSeek Chat
-
-OpenRouter uses the OpenAI-compatible endpoint at `https://openrouter.ai/api/v1`. Add any other OpenRouter model through `bitacode.jsonc` under `providers.openrouter.models`.
+The agent can ask you a question with `ask_user`: pick with `1`–`9` or arrows, `Tab` to type your own answer, `Esc` to skip. Thinking blocks open only when the provider actually streams reasoning — no fake state. The composer stays on screen while panels come and go, and the layout reflows on zoom.
 
 ## Why Bitacode?
 
-Bitacode is not trying to be a giant framework. It is a compact reference implementation for how coding agents work in practice: configuration, dynamic system prompts, a streaming agent loop, tool registries, approvals, sessions, MCP, skills, and delegated sub-agents.
+Bitacode is not trying to be a giant framework. It is a working coding agent you can actually read: configuration, prompts, a streaming loop, tools, approvals, sessions, MCP, skills, and sub-agents — all in plain TypeScript.
 
-If you want to learn by reading source instead of magic abstractions, this repo is built for that.
+If you've ever wondered what happens between "build me X" and the files changing, clone it and follow the code. That's the whole point.
+
+## Building from source
+
+```bash
+npm install
+npm run build        # compile to dist/ (tracked — commit after building)
+npm run dev          # run from source with tsx
+npm run typecheck    # tsc --noEmit
+npm test             # full suite (800+ tests)
+npm run lint         # eslint
+```
+
+CI runs the same checks on Node 20, 22, and 24 and fails if committed `dist/` no longer matches `src/`.
+
+## Releasing
+
+Published as `bitacode` (binary: `bitacode`).
+
+- **Automatic:** pushing to `main` or a `v*` tag runs the checks, packs, smoke-tests the tarball, and publishes if that version isn't on npm. Requires the `NPM_TOKEN` secret. Manual **Actions → Publish** supports `dry_run`.
+- **From your terminal:**
+
+```bash
+npm run release:check    # typecheck + tests + lint + build + smoke test
+npm run release:dry      # npm pack --dry-run
+npm run release          # publish
+npm run release:patch    # version patch + publish (also :minor, :major)
+git push && git push --tags
+```
+
+## Documentation & contributing
+
+Technical references live in the repo root: `SPEC.md` (behaviour) and `ARCHITECTURE.md` (module map).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to chip in. Security issues go to [SECURITY.md](SECURITY.md), not a public issue.
 
 ## License
 

@@ -21,7 +21,7 @@ import type OpenAI from 'openai';
 import { setMaxListeners } from 'node:events';
 import { getAllTools, TOOL_NAME_ALIASES } from './tools/index.js';
 import { generateSystemPrompt } from './system-prompt.js';
-import { subAgentTool, type SubAgentUsage } from './sub-agent.js';
+import { subAgentTool, subagentControlTool, type SubAgentUsage } from './sub-agent.js';
 import {
   getContextInfo,
   type ModelPricing,
@@ -60,12 +60,23 @@ export interface AgentEvent {
    *  without adding it to the parent's tool-call message history. */
   subAgentTool?: { tool: string; status: 'running' | 'done' | 'error'; iteration: number; args?: Record<string, unknown> };
   /** Optional per-child metadata for parallel sub-agent fan-out. */
+  /** Persisted transcript id — the handle the AI's subagent_control tool uses. */
+  subAgentTranscriptId?: string;
   subAgentId?: string;
   subAgentLabel?: string;
   subAgentStatus?: 'start' | 'done' | 'error';
   subAgentTask?: string;
   subAgentType?: string;
-  usage?: { inputTokens: number; outputTokens: number; cost: number; contextPercent: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cost: number;
+    contextPercent: number;
+    /** Estimated conversation tokens used against the active context window. */
+    contextTokens?: number;
+    /** The active model's real context window (static catalog, config, or remote). */
+    contextWindow?: number;
+  };
   /** Emitted when a sub-agent completes, carrying its accumulated usage. */
   subAgentUsage?: SubAgentUsage;
   error?: string;
@@ -145,7 +156,7 @@ export function ensureUsableHistory(
  */
 export function getValidToolNames(): Set<string> {
   const names = new Set(
-    [...getAllTools(), subAgentTool]
+    [...getAllTools(), subAgentTool, subagentControlTool]
       .map((tool: any) => tool.function?.name)
       .filter((name: string | undefined): name is string => Boolean(name))
   );
@@ -341,7 +352,7 @@ export async function runAgenticLoop(
 
     try {
       // Build tools list: core tools + sub-agent tool + dynamic (MCP) tools
-      const allTools = [...getAllTools(), subAgentTool];
+      const allTools = [...getAllTools(), subAgentTool, subagentControlTool];
 
       logger.info('Making API request', {
         model,

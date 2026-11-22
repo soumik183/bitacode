@@ -150,6 +150,10 @@ function sanitizeRecord(value) {
         sanitized.label = cap(record.label, MAX_TEXT_CHARS);
     if (typeof record.agentType === 'string')
         sanitized.agentType = cap(record.agentType, 100);
+    if (isValidSubAgentId(record.parentId))
+        sanitized.parentId = record.parentId;
+    if (record.released === true)
+        sanitized.released = true;
     if (typeof record.endedAt === 'number' && Number.isFinite(record.endedAt)) {
         sanitized.endedAt = record.endedAt;
     }
@@ -221,6 +225,29 @@ export async function listSubAgentRuns(sessionId) {
     catch (err) {
         logger.warn('Sub-agent store: failed to list transcripts', { sessionId, err: String(err) });
         return [];
+    }
+}
+/**
+ * Mark a run released (closed for further control). Best-effort; returns false
+ * when the record is missing or the write fails. Never throws.
+ */
+export async function releaseSubAgentRun(sessionId, id) {
+    try {
+        if (!isValidSubAgentId(sessionId) || !isValidSubAgentId(id))
+            return false;
+        const filePath = path.join(getSubagentsDir(), sessionId, `${id}.json`);
+        const raw = await fs.readFile(filePath, 'utf8');
+        const record = sanitizeRecord(JSON.parse(raw));
+        if (!record || record.id !== id)
+            return false;
+        record.released = true;
+        await fs.writeFile(filePath, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: FILE_MODE });
+        hardenPermissions(filePath, FILE_MODE);
+        return true;
+    }
+    catch (err) {
+        logger.warn('Sub-agent store: failed to release transcript', { sessionId, id, err: String(err) });
+        return false;
     }
 }
 /** Load one full transcript; null when missing, invalid, or unreadable. */

@@ -10,6 +10,7 @@
  */
 
 import { readFileTool, readFile } from './read-file.js';
+import { readLinesTool, readLines } from './read-lines.js';
 import { writeFileTool, writeFile } from './write-file.js';
 import { editFileTool, editFile } from './edit-file.js';
 import { listDirectoryTool, listDirectory } from './list-directory.js';
@@ -107,6 +108,7 @@ export interface ToolCallContext {
 // All tool definitions — passed to the LLM
 export const tools = [
   readFileTool,
+  readLinesTool,
   writeFileTool,
   editFileTool,
   listDirectoryTool,
@@ -295,6 +297,7 @@ const S = {
  */
 const TOOL_ARGS: Record<string, ArgSpec[]> = {
   read_file: [S.filePath],
+  read_lines: [S.filePath],
   write_file: [S.filePath, { canonical: 'content', aliases: ['text'], required: true }],
   edit_file: [
     S.filePath,
@@ -494,6 +497,14 @@ async function dispatchToolCall(toolName: string, rawArgs: any, context: ToolCal
         return 'Error: use either ranges or offset/limit, not both.';
       }
       return await readFile(args.file_path, args.offset, args.limit, context.sessionId, args.ranges);
+    case 'read_lines':
+      return await readLines(args.file_path, {
+        from: args.from,
+        to: args.to,
+        ranges: args.ranges,
+        maxLines: args.max_lines,
+        sessionId: context.sessionId,
+      });
     case 'write_file':
       return await writeFile(args.file_path, args.content, context.sessionId);
     case 'edit_file':

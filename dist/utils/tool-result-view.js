@@ -8,7 +8,7 @@ import { getTheme } from '../theme.js';
 import { detectLanguage } from './code-highlight.js';
 import { annotateDiff, displayFilePath, describeRead, parseFileMutationDiff, parseFileReadResult } from './file-diff.js';
 import { parseShellResult } from './shell-result.js';
-import { formatToolActivity } from './tool-display.js';
+import { formatToolLabel } from './tool-display.js';
 import { isNotification } from '../tools/notify.js';
 import { parseProgress } from '../tools/progress.js';
 import { WebSearchView, WebSearchErrorView } from '../components/WebSearchView.js';
@@ -59,7 +59,7 @@ function toolCodeLanguage(args, result) {
  * get a bounded highlighted box; everything else keeps the compact one-line
  * activity row.
  */
-export function addToolResultView(addStatic, toolName, toolArgs, rawResult, palette = getTheme()) {
+export function addToolResultView(addStatic, toolName, toolArgs, rawResult, palette = getTheme(), columns) {
     // Notifications and progress reports get dedicated, colorful cards instead
     // of being flattened into a generic one-line activity row.
     if (isNotification(rawResult)) {
@@ -78,7 +78,9 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
     // queries are shown to the human. The model still receives the full payload.
     if (toolName === 'web_search') {
         const payload = parseWebSearchResult(rawResult);
-        addStatic(payload ? _jsx(WebSearchView, { payload: payload }) : _jsx(WebSearchErrorView, { message: rawResult }));
+        addStatic(payload
+            ? _jsx(WebSearchView, { payload: payload, columns: columns })
+            : _jsx(WebSearchErrorView, { message: rawResult }));
         return;
     }
     const fileDiff = parseFileMutationDiff(toolName, toolArgs, rawResult);
@@ -93,7 +95,7 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
     }
     // Reads render as a clean one-line summary: relative path + range read (or
     // the total when the whole file was read). No boxed code preview.
-    if (toolName === 'read_file') {
+    if (toolName === 'read_file' || toolName === 'read_lines') {
         const fileRead = parseFileReadResult(toolName, toolArgs, rawResult);
         if (fileRead) {
             addStatic(_jsx(ReadSummaryView, { summary: describeRead(fileRead) }));
@@ -116,9 +118,7 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
         addStatic(_jsx(CodeBlock, { code: rawResult, language: code.language, filename: code.hint ? displayFilePath(code.hint) : undefined, showHeader: true, showLineNumbers: true, maxRows: 8 }));
         return;
     }
-    const parsedArgs = parseArgs(toolArgs);
-    const toolDisplay = parsedArgs ? formatToolActivity(toolName, parsedArgs) : toolName;
     const compactResult = rawResult.replace(/\s+/g, ' ').trim().slice(0, 180);
     const isError = /^(Error\b|File not found\b|Operation cancelled\b)/i.test(rawResult.trim());
-    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? palette.error : undefined, dimColor: !isError, children: ['▶ ', toolDisplay, ': ', compactResult] }) }));
+    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? palette.error : undefined, dimColor: !isError, children: ['▶ ', _jsx(Text, { bold: true, children: formatToolLabel(toolName, toolArgs) }), ': ', compactResult] }) }));
 }

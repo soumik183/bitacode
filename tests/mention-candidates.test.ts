@@ -53,11 +53,11 @@ test('empty token returns immediate folder entries and all skills', async () => 
   assert.deepEqual(files.map((candidate) => candidate.id), ['file:README.md']);
   assert.deepEqual(skills.map((candidate) => candidate.label), ['guidebook', 'releaser', 'reviewer']);
 
-  const lastSkillIndex = Math.max(
-    ...result.candidates.map((candidate, index) => (candidate.kind === 'skill' ? index : -1)),
+  const firstSkillIndex = result.candidates.findIndex((candidate) => candidate.kind === 'skill');
+  const lastFsIndex = Math.max(
+    ...result.candidates.map((candidate, index) => (candidate.kind === 'skill' ? -1 : index)),
   );
-  const firstFsIndex = result.candidates.findIndex((candidate) => candidate.kind !== 'skill');
-  assert.ok(lastSkillIndex < firstFsIndex, 'skills must precede files');
+  assert.ok(lastFsIndex < firstSkillIndex, 'files and folders must precede skills');
 
   assert.equal(skills.find((candidate) => candidate.label === 'reviewer')?.source, 'user');
   assert.equal(skills.find((candidate) => candidate.label === 'releaser')?.source, 'project');
@@ -66,12 +66,13 @@ test('empty token returns immediate folder entries and all skills', async () => 
   assert.ok(longDetail.endsWith('…'));
 });
 
-test('skills are returned before files with their kind and source intact', async () => {
+test('files and folders come before skills, with skill kind and source intact', async () => {
   const result = await collectMentionCandidates(cwd, '', { homeDir });
-  const firstFileIndex = result.candidates.findIndex((candidate) => candidate.kind !== 'skill');
+  const firstSkillIndex = result.candidates.findIndex((candidate) => candidate.kind === 'skill');
 
-  assert.ok(firstFileIndex > 0, 'the result mixes skills and files');
-  const skills = result.candidates.slice(0, firstFileIndex);
+  assert.ok(firstSkillIndex > 0, 'the result mixes files and skills');
+  assert.ok(result.candidates.slice(0, firstSkillIndex).every((candidate) => candidate.kind !== 'skill'));
+  const skills = result.candidates.slice(firstSkillIndex);
   assert.ok(skills.every((candidate) => candidate.kind === 'skill'));
   assert.deepEqual(
     skills.map((candidate) => candidate.id).sort(),
@@ -79,7 +80,6 @@ test('skills are returned before files with their kind and source intact', async
   );
   assert.equal(skills.find((candidate) => candidate.id === 'skill:reviewer')?.source, 'user');
   assert.equal(skills.find((candidate) => candidate.id === 'skill:releaser')?.source, 'project');
-  assert.ok(result.candidates.slice(firstFileIndex).every((candidate) => candidate.kind !== 'skill'));
 });
 
 test('typed token finds a nested file with its full relative-path label', async () => {

@@ -58,7 +58,7 @@ test('expanded cards are capped and say when output was truncated', () => {
   assert.match(expanded, /preview truncated/);
 });
 
-test('read and diff cards advertise expansion only when content is clipped', () => {
+test('read card advertises expansion only when content is clipped', () => {
   const lines = Array.from({ length: READ_PREVIEW_LINES + 12 }, (_, i) => `const v${i} = ${i};`);
   const read = {
     filePath: '/tmp/demo.ts',
@@ -70,18 +70,63 @@ test('read and diff cards advertise expansion only when content is clipped', () 
   assert.match(readCollapsed, new RegExp(`lines 1–${READ_PREVIEW_LINES} · ${lines.length} total`));
   assert.doesNotMatch(readExpanded, /click to expand/);
   assert.ok(rows(readExpanded) > rows(readCollapsed));
+});
 
+test('diff card renders the full patch by default with a stable, aligned gutter', () => {
   const diff = [
-    '--- a/demo.ts',
-    '+++ b/demo.ts',
-    ...Array.from({ length: DIFF_PREVIEW_LINES + 8 }, (_, i) => `+line ${i}`),
+    '@@ -1,3 +1,4 @@',
+    ' context',
+    '-old line',
+    '+new line',
+    ...Array.from({ length: 30 }, (_, i) => `+added ${i}`),
+    'plain meta row',
   ].join('\n');
-  const diffCollapsed = frame(<DiffView header="Edited demo.ts" diff={diff} filePath="demo.ts" operation="Edited" />);
-  const diffExpanded = frame(<DiffView header="Edited demo.ts" diff={diff} filePath="demo.ts" operation="Edited" expanded />);
-  assert.match(diffCollapsed, /click to expand/);
-  assert.match(diffCollapsed, /8 more lines/);
-  assert.ok(rows(diffExpanded) > rows(diffCollapsed));
-  assert.doesNotMatch(diffExpanded, /click to expand/);
+  const props = { header: 'Edited demo.ts', diff, filePath: 'demo.ts', operation: 'Edited' as const };
+  const collapsed = frame(<DiffView {...props} />);
+  const expanded = frame(<DiffView {...props} expanded />);
+
+  // Full by default: no preview slice, no toggle for an ordinary patch.
+  assert.match(collapsed, /added 29/);
+  assert.doesNotMatch(collapsed, /more lines|diff truncated|click to/);
+  assert.equal(collapsed, expanded, 'collapsed and expanded are identical for a normal diff');
+  assert.equal(rows(collapsed), rows(expanded));
+
+  const internalRule = (line: string): number => {
+    const left = line.indexOf('│');
+    return line.indexOf('│', left + 1);
+  };
+  // content rows have three rules: left border, side rule, right border.
+  const contentLines = (text: string) => text.split('\n').filter((line) => {
+    const first = line.indexOf('│');
+    const second = line.indexOf('│', first + 1);
+    return second !== -1 && line.indexOf('│', second + 1) !== -1;
+  });
+  const columns = new Set(contentLines(collapsed).map(internalRule));
+  assert.equal(columns.size, 1, 'the side rule stays in one column on every row');
+
+  const rule = [...columns][0]!;
+  const removal = contentLines(collapsed).find((line) => line.includes('- old line')) ?? '';
+  const addition = contentLines(collapsed).find((line) => line.includes('+ new line')) ?? '';
+  const hunk = contentLines(collapsed).find((line) => line.includes('@@')) ?? '';
+  const meta = contentLines(collapsed).find((line) => line.includes('plain meta row')) ?? '';
+  for (const line of [removal, addition, hunk, meta]) {
+    assert.ok(line, 'all row kinds present');
+    assert.equal(internalRule(line), rule, 'side rule is continuous on hunk and meta rows');
+  }
+  // Two distinct number columns: old for a removal, new for an addition.
+  const firstDigit = (line: string) => line.slice(0, rule).search(/\d/);
+  assert.ok(firstDigit(removal) >= 0 && firstDigit(addition) >= 0, 'both gutters hold a number');
+  assert.notEqual(firstDigit(removal), firstDigit(addition), 'the number sits in different columns');
+
+  // A genuine ceiling clip still draws the rule and reports the truncation.
+  const huge = Array.from({ length: DIFF_PREVIEW_LINES + 2 }, (_, i) => `+line ${i}`).join('\n');
+  const clipped = frame(<DiffView {...props} diff={huge} />);
+  assert.match(clipped, /diff truncated/);
+  const footer = contentLines(clipped).find((line) => line.includes('diff truncated')) ?? '';
+  assert.ok(footer, 'footer row rendered');
+  const clippedColumns = new Set(contentLines(clipped).map(internalRule));
+  assert.equal(clippedColumns.size, 1, 'gutter width is stable on the clipped card too');
+  assert.equal(internalRule(footer), [...clippedColumns][0], 'side rule is continuous on the footer row');
 });
 
 test('archived thought collapses back to the same preview rows', () => {
@@ -91,7 +136,7 @@ test('archived thought collapses back to the same preview rows', () => {
   const collapsedAgain = frame(<ThinkingArchive text={text} elapsedMs={1200} columns={80} />);
 
   assert.match(collapsed, /click to expand/);
-  assert.match(expanded, /click to collapse/);
+  assert.doesNotMatch(expanded, /click to collapse/, 'the duplicate header hint is gone');
   assert.ok(rows(expanded) > rows(collapsed), 'expanded reasoning shows more lines');
   assert.equal(collapsedAgain, collapsed, 'collapse restores the exact preview shape');
 });

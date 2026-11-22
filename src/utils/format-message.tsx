@@ -124,8 +124,9 @@ function ctxFor(palette: Theme): RenderCtx {
 }
 
 // Inline alternatives are ordered most-specific first so *** wins over ** over *.
+// Escapes come before every marker so `\*` stays literal.
 const INLINE_PATTERN =
-  /(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(https?:\/\/[^\s)]+)|(\*\*\*[^*\n]+?\*\*\*)|(\*\*[^*\n]+?\*\*)|(~~[^~\n]+?~~)|(\*[^\s*][^*]*?\*)/g;
+  /(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(!\[[^\]\n]*\]\([^)\n]+\))|(https?:\/\/[^\s)]+)|(\\[*_~`[\]])|(\*\*\*[\s\S]+?\*\*\*)|(\*\*[\s\S]+?\*\*)|(~~[^~\n]+?~~)|(\*[^\s*][^*]*?\*)|(__[^_\n]+?__)|(_[^\s_][^_]*?_)/g;
 
 const FENCE_OPEN = /^\s*(?:```|~~~)\s*([\w.+-]*)\s*$/;
 const FENCE_CLOSE = /^\s*(?:```|~~~)\s*$/;
@@ -203,6 +204,14 @@ function renderLink(raw: string, key: string, ctx: RenderCtx): React.ReactNode {
   );
 }
 
+/** Nested emphasis: preserve the outer regex cursor across the recursive scan. */
+function renderNestedInline(text: string, keyPrefix: string, ctx: RenderCtx): React.ReactNode[] {
+  const saved = INLINE_PATTERN.lastIndex;
+  const nodes = renderInline(text, keyPrefix, ctx);
+  INLINE_PATTERN.lastIndex = saved;
+  return nodes;
+}
+
 function renderInline(text: string, keyPrefix: string, ctx: RenderCtx): React.ReactNode[] {
   const nodes: React.ReactNode[] = [];
   let last = 0;
@@ -223,15 +232,26 @@ function renderInline(text: string, keyPrefix: string, ctx: RenderCtx): React.Re
     } else if (match[2] !== undefined) {
       nodes.push(renderLink(match[2], key, ctx));
     } else if (match[3] !== undefined) {
-      nodes.push(<Text key={key} color={ctx.palette.info}>{match[3]}</Text>);
+      // Images have no terminal payload: show the alt text as a labelled link.
+      const image = match[3];
+      const split = image.indexOf('](');
+      nodes.push(<Text key={key} color={ctx.palette.info}>{`🖼 ${image.slice(2, split)}`}</Text>);
     } else if (match[4] !== undefined) {
-      nodes.push(<Text key={key} bold italic>{match[4].slice(3, -3)}</Text>);
+      nodes.push(<Text key={key} color={ctx.palette.info}>{match[4]}</Text>);
     } else if (match[5] !== undefined) {
-      nodes.push(<Text key={key} bold>{match[5].slice(2, -2)}</Text>);
+      nodes.push(match[5].slice(1));
     } else if (match[6] !== undefined) {
-      nodes.push(<Text key={key} strikethrough dimColor>{match[6].slice(2, -2)}</Text>);
+      nodes.push(<Text key={key} bold italic>{renderNestedInline(match[6].slice(3, -3), key, ctx)}</Text>);
     } else if (match[7] !== undefined) {
-      nodes.push(<Text key={key} italic>{match[7].slice(1, -1)}</Text>);
+      nodes.push(<Text key={key} bold>{renderNestedInline(match[7].slice(2, -2), key, ctx)}</Text>);
+    } else if (match[8] !== undefined) {
+      nodes.push(<Text key={key} strikethrough dimColor>{renderNestedInline(match[8].slice(2, -2), key, ctx)}</Text>);
+    } else if (match[9] !== undefined) {
+      nodes.push(<Text key={key} italic>{renderNestedInline(match[9].slice(1, -1), key, ctx)}</Text>);
+    } else if (match[10] !== undefined) {
+      nodes.push(<Text key={key} bold>{renderNestedInline(match[10].slice(2, -2), key, ctx)}</Text>);
+    } else if (match[11] !== undefined) {
+      nodes.push(<Text key={key} italic>{renderNestedInline(match[11].slice(1, -1), key, ctx)}</Text>);
     }
     last = INLINE_PATTERN.lastIndex;
   }
@@ -455,7 +475,42 @@ export function displayWidth(text: string): number {
   return width;
 }
 
-
+/**
+ * Insert word-boundary line breaks into plain prose so it wraps at the
+ * terminal width even when a parent <Text> is truncating. Explicit newlines
+ * and blank lines are preserved; wide CJK/emoji count as two columns.
+ */
+export function wrapPlainText(text: string, columns: number): string {
+  if (!Number.isFinite(columns) || columns <= 0) return text;
+  const width = Math.max(1, Math.floor(columns));
+  return text.split('\n').map((line) => {
+    if (displayWidth(line) <= width) return line;
+    const out: string[] = [];
+    let current = '';
+    let currentWidth = 0;
+    for (const word of line.split(/(\s+)/)) {
+      if (!word) continue;
+      const wordWidth = displayWidth(word);
+      if (/^\s+$/.test(word)) {
+        // Whitespace belongs to the line it follows, never to the next one.
+        if (currentWidth + wordWidth <= width) {
+          current += word;
+          currentWidth += wordWidth;
+        }
+        continue;
+      }
+      if (currentWidth + wordWidth > width && current.trim()) {
+        out.push(current.trimEnd());
+        current = '';
+        currentWidth = 0;
+      }
+      current += word;
+      currentWidth += wordWidth;
+    }
+    if (current.trim() || out.length === 0) out.push(current.trimEnd());
+    return out.join('\n');
+  }).join('\n');
+}
 
 /**
  * The text a cell actually paints, with inline markers resolved.
@@ -736,8 +791,10 @@ export function renderFormattedText(text: string, columns = 0, palette: Theme = 
       // Even plain text respects the row budget: a wall of prose should not
       // grow the frame without bound.
       const plainLines = capped.split('\n');
-      if (plainLines.length <= MAX_OUTPUT_ROWS) return capped;
-      return `${plainLines.slice(0, MAX_OUTPUT_ROWS).join('\n')}\n  … ${plainLines.length - MAX_OUTPUT_ROWS} more rows`;
+      const plain = plainLines.length <= MAX_OUTPUT_ROWS
+        ? capped
+        : `${plainLines.slice(0, MAX_OUTPUT_ROWS).join('\n')}\n  … ${plainLines.length - MAX_OUTPUT_ROWS} more rows`;
+      return wrapPlainText(plain, columns);
     }
     const lines = capped.split('\n');
     const rows: React.ReactNode[] = [];

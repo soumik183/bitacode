@@ -1,14 +1,17 @@
 import { createTwoFilesPatch } from 'diff';
 
-/** Keep tool-result diffs small enough for the model and the terminal. */
-export const MAX_TOOL_DIFF_LINES = 80;
+/**
+ * Safety ceiling for a single tool-result diff. A whole-file rewrite stays
+ * intact; only an extreme diff is cut, with an explicit marker.
+ */
+export const MAX_TOOL_DIFF_LINES = 2000;
 
 /** Unified diff with the `Index:`/separator noise normalised away. */
 export function computeUnifiedDiff(
   oldContent: string,
   newContent: string,
   filePath: string,
-  context = 3
+  context = 10
 ): string {
   const patch = createTwoFilesPatch(
     `a/${filePath}`,

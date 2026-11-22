@@ -4,8 +4,10 @@ import { useTheme } from '../theme.js';
 import { LeftBar } from './LeftBar.js';
 import { parseWebSearchResult, } from '../utils/web-search-result.js';
 const MAX_RESOURCE_CHARS = 170;
-function contentWidth() {
-    return Math.max(40, (process.stdout.columns ?? 80) - 8);
+// The bar, its margin and the card padding take 4 columns; reserve a little
+// more slack so a zoomed-in frame never wraps a URL onto the next row.
+function contentWidth(columns) {
+    return Math.max(1, (columns ?? 80) - 8);
 }
 function shorten(url, width) {
     if (url.length <= width)
@@ -18,9 +20,9 @@ function snippet(text) {
     return one.length <= MAX_RESOURCE_CHARS ? one : `${one.slice(0, MAX_RESOURCE_CHARS - 1)}…`;
 }
 const ResourceRow = ({ resource, width, color }) => (_jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: color, wrap: "truncate-end", children: `↗ ${shorten(resource.url, width)}` }), resource.text ? (_jsx(Text, { color: "muted", wrap: "wrap", children: `   ${snippet(resource.text)}` })) : null] }));
-export const WebSearchView = ({ payload, maxResources = 24 }) => {
+export const WebSearchView = ({ payload, maxResources = 24, columns }) => {
     const theme = useTheme();
-    const width = contentWidth();
+    const width = contentWidth(columns);
     const resources = payload.blocks.flatMap((block) => block.resources).slice(0, maxResources);
     const queryLabel = payload.queries.length === 1 ? payload.queries[0] : `${payload.queries.length} queries`;
     return (_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Text, { bold: true, wrap: "truncate-end", children: [_jsx(Text, { color: theme.accent, children: '⌕ Web search' }), _jsx(Text, { color: theme.dim, children: `  ${queryLabel}` }), _jsx(Text, { color: theme.dim, children: ` · ${resources.length} resource${resources.length === 1 ? '' : 's'}` })] }), resources.map((resource, index) => (_jsx(ResourceRow, { resource: resource, width: width, color: theme.info }, `${resource.url}-${index}`))), payload.blocks.some((block) => block.error) ? (_jsx(Box, { flexDirection: "column", children: payload.blocks
@@ -33,8 +35,10 @@ export const WebSearchErrorView = ({ message }) => {
     return (_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(LeftBar, { color: theme.error, children: _jsxs(Box, { flexDirection: "column", children: [_jsx(Text, { color: theme.error, bold: true, wrap: "truncate-end", children: '✗ Web search' }), _jsx(Text, { color: theme.muted, wrap: "truncate-end", children: message.replace(/^Error:\s*/i, '') })] }) }) }));
 };
 /** Convenience for callers that only have the raw tool result string. */
-export const WebSearchResultView = ({ raw }) => {
+export const WebSearchResultView = ({ raw, columns }) => {
     const payload = parseWebSearchResult(raw);
-    return payload ? _jsx(WebSearchView, { payload: payload }) : _jsx(WebSearchErrorView, { message: raw });
+    return payload
+        ? _jsx(WebSearchView, { payload: payload, columns: columns })
+        : _jsx(WebSearchErrorView, { message: raw, columns: columns });
 };
 export default WebSearchView;

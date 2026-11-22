@@ -19,7 +19,7 @@
 import { setMaxListeners } from 'node:events';
 import { getAllTools, TOOL_NAME_ALIASES } from './tools/index.js';
 import { generateSystemPrompt } from './system-prompt.js';
-import { subAgentTool } from './sub-agent.js';
+import { subAgentTool, subagentControlTool } from './sub-agent.js';
 import { getContextInfo, } from './utils/cost-tracker.js';
 import { compactIfNeeded, getCompactThreshold } from './utils/compactor.js';
 import { logger } from './utils/logger.js';
@@ -75,7 +75,7 @@ export function ensureUsableHistory(messages, userInput, systemPrompt, notify) {
  * canonical tool, so advertising them would only confuse the model.
  */
 export function getValidToolNames() {
-    const names = new Set([...getAllTools(), subAgentTool]
+    const names = new Set([...getAllTools(), subAgentTool, subagentControlTool]
         .map((tool) => tool.function?.name)
         .filter((name) => Boolean(name)));
     // Aliases the dispatcher understands (grep, shell, list, …) are valid calls.
@@ -239,7 +239,7 @@ export async function runAgenticLoop(client, model, messages, userInput, onEvent
         let assistantMessage;
         try {
             // Build tools list: core tools + sub-agent tool + dynamic (MCP) tools
-            const allTools = [...getAllTools(), subAgentTool];
+            const allTools = [...getAllTools(), subAgentTool, subagentControlTool];
             logger.info('Making API request', {
                 model,
                 toolsCount: allTools.length,

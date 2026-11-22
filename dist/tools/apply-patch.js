@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import { applyPatch as applyPatchToText, parsePatch } from 'diff';
 import { validatePath } from '../utils/path-validation.js';
 import { requestApproval } from '../utils/approval.js';
+import { computeUnifiedDiff } from '../utils/unified-diff.js';
 export const applyPatchTool = {
     type: 'function',
     function: {
@@ -107,7 +108,7 @@ export async function applyPatch(patch, sessionId) {
             added += changes.added;
             removed += changes.removed;
         }
-        writes.push({ targetPath, validated, newContent: result, isDelete, added, removed });
+        writes.push({ targetPath, validated, originalContent: current, newContent: result, isDelete, added, removed });
     }
     // Phase 2 — one file_edit approval per touched file.
     for (const write of writes) {
@@ -135,8 +136,10 @@ export async function applyPatch(patch, sessionId) {
     catch (err) {
         return `Error: failed to write patch result: ${err.message}`;
     }
-    const summary = writes
-        .map((write) => `  ${write.targetPath}: +${write.added}/-${write.removed}${write.isDelete ? ' (deleted)' : ''}`)
-        .join('\n');
-    return `Applied patch to ${writes.length} file(s):\n${summary}`;
+    const summaries = writes.map((write) => {
+        const meta = `+${write.added}/-${write.removed}${write.isDelete ? ' (deleted)' : ''}`;
+        const diff = computeUnifiedDiff(write.originalContent, write.newContent, write.targetPath);
+        return `--- ${write.targetPath} (${meta})${diff ? `\n${diff}` : ''}`;
+    });
+    return `Applied patch to ${writes.length} file(s):\n${summaries.join('\n\n')}`;
 }

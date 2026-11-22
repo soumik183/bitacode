@@ -17,6 +17,21 @@ const memoryCache = new Map();
 /** Shared promise per provider so concurrent callers make one request. */
 const inflight = new Map();
 const CACHE_TTL_MS = 5 * 60_000;
+/**
+ * Synchronous context-window lookup from the already-fetched model catalogs.
+ * Used by the footer so a remote-only model gets its real limit without a
+ * network call at render time. Returns undefined when nothing was fetched yet.
+ */
+export function getCachedContextWindow(providerId, modelId) {
+    for (const [key, entry] of memoryCache) {
+        if (!key.startsWith(`${providerId}::`))
+            continue;
+        const model = entry.items.find((item) => item.id === modelId);
+        if (model?.contextWindow && model.contextWindow > 0)
+            return model.contextWindow;
+    }
+    return undefined;
+}
 export function formatContextWindow(contextWindow) {
     if (!contextWindow || contextWindow <= 0)
         return undefined;

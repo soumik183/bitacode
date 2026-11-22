@@ -7,6 +7,7 @@
  * The agent can resume a previous session or start a new one.
  */
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { chmodSync } from 'node:fs';
@@ -280,28 +281,76 @@ export function createSession(model, provider) {
         completionMessages: [],
     };
 }
+/** Serialize writes per session so two saves cannot race over one temp file. */
+const saveQueues = new Map();
+function isMissing(err) {
+    return Boolean(err) && err.code === 'ENOENT';
+}
 /**
- * Save a session to disk.
- *
- * Written to a sibling temp file and renamed into place: `writeFile` truncates
- * first, so a kill mid-write used to leave an unparseable session behind.
+ * One atomic save: unique temp file -> rename, with a single retry if the temp
+ * file vanished (another writer won the race, the temp was cleaned, or the
+ * directory was recreated). `writeFile` truncates, so a kill mid-write used to
+ * leave an unparseable session behind.
+ */
+async function writeSessionAtomic(filePath, session) {
+    const payload = JSON.stringify(session, null, 2);
+    const attempt = async () => {
+        const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        try {
+            await fs.writeFile(tempPath, payload, { encoding: 'utf8', mode: SESSION_FILE_MODE });
+            await fs.rename(tempPath, filePath);
+        }
+        catch (err) {
+            await fs.rm(tempPath, { force: true }).catch(() => undefined);
+            throw err;
+        }
+    };
+    try {
+        try {
+            await attempt();
+        }
+        catch (err) {
+            if (!isMissing(err))
+                throw err;
+            // The destination is allowed to exist (a concurrent writer finished).
+            // Otherwise recreate the directory and try once with a fresh temp name.
+            const existing = await fs.readFile(filePath, 'utf8').catch(() => null);
+            if (existing !== null)
+                return;
+            await fs.mkdir(path.dirname(filePath), { recursive: true, mode: SESSION_DIR_MODE });
+            await attempt();
+        }
+        try {
+            hardenPermissions(filePath, SESSION_FILE_MODE);
+        }
+        catch (err) {
+            // A permission change is hygiene, not the save itself.
+            logger.warn(`Could not tighten session permissions: ${err}`);
+        }
+    }
+    catch (err) {
+        logger.error(`Failed to save session ${session.id}: ${err}`);
+        throw err;
+    }
+}
+/**
+ * Save a session to disk. Concurrent saves of the same session are queued, so
+ * the autosave timer and an explicit save can never both rename the same file.
  */
 export async function saveSession(session) {
     await ensureSessionsDir();
     session.updatedAt = new Date().toISOString();
     const filePath = sessionPath(session.id);
-    const tempPath = `${filePath}.${process.pid}.tmp`;
-    const payload = JSON.stringify(session, null, 2);
+    const previous = saveQueues.get(session.id) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(() => writeSessionAtomic(filePath, session));
+    saveQueues.set(session.id, current);
     try {
-        await fs.writeFile(tempPath, payload, { encoding: 'utf8', mode: SESSION_FILE_MODE });
-        await fs.rename(tempPath, filePath);
+        await current;
     }
-    catch (err) {
-        await fs.rm(tempPath, { force: true }).catch(() => undefined);
-        logger.error(`Failed to save session ${session.id}: ${err}`);
-        throw err;
+    finally {
+        if (saveQueues.get(session.id) === current)
+            saveQueues.delete(session.id);
     }
-    hardenPermissions(filePath, SESSION_FILE_MODE);
     logger.debug(`Session saved: ${session.id}`);
 }
 /** Load a session by ID. Returns null if not found. */

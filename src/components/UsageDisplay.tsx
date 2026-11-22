@@ -1,6 +1,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
+import { formatTokenCount } from '../utils/cost-tracker.js';
 import { STATUS_LINE_ITEMS, type StatusLineItem } from '../settings.js';
 
 export interface UsageDisplayProps {
@@ -10,6 +11,12 @@ export interface UsageDisplayProps {
   variantLabel: string;
   variantColor: string;
   folder: string;
+  /** Current git branch, appended as `~/folder:branch` when available. */
+  branch?: string | null;
+  /** Estimated conversation tokens against the active context window. */
+  contextTokens?: number;
+  /** Real context window of the active provider/model. */
+  contextWindow?: number;
   busy: boolean;
   tool: string | null;
   frame: number;
@@ -76,6 +83,9 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   variantLabel,
   variantColor,
   folder,
+  branch,
+  contextTokens,
+  contextWindow,
   busy,
   tool,
   frame,
@@ -86,7 +96,15 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   tps = null,
 }) => {
   const theme = useTheme();
-  const context = usage ? `${usage.contextPercent.toFixed(0)}%` : '0%';
+  // Prefer the real window + token count so the number and percentage always
+  // agree; older events only carry a precomputed percentage, so fall back to it.
+  const windowSize = contextWindow ?? 0;
+  const usedTokens = contextTokens ?? 0;
+  const context = windowSize > 0 && usage
+    ? `${formatTokenCount(usedTokens)} (${Math.min(100, (usedTokens / windowSize) * 100).toFixed(0)}%)`
+    : usage
+      ? `${usage.contextPercent.toFixed(0)}%`
+      : '0%';
   const show = (segment: StatusLineItem) => segments.includes(segment);
   // One combined row per side keeps the footer a single line; a segment is
   // joined only when it is enabled so hidden items leave no stray separators.
@@ -98,7 +116,7 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   }
   if (show('context')) {
     if (rightParts.length > 0) rightParts.push(<Text key="ctx-sep" color={theme.dim}> · </Text>);
-    rightParts.push(<Text key="ctx" color={theme.dim}>{`ctx ${context}`}</Text>);
+    rightParts.push(<Text key="ctx" color={theme.dim}>{context}</Text>);
   }
   if (!compact && show('cost') && totalCost > 0) {
     rightParts.push(<Text key="cost" color={theme.dim}>{` · $${totalCost.toFixed(2)}`}</Text>);
@@ -138,8 +156,10 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
             )}
           </>
         ) : show('folder') ? (
-          <Text color={theme.dim} wrap="truncate-end">
-            {`📁 ${folder}`}
+          <Text wrap="truncate-end">
+            <Text color={theme.info}>{'~/'}</Text>
+            <Text color={theme.muted}>{folder}</Text>
+            {branch ? <Text color={theme.accent}>{`:${branch}`}</Text> : null}
           </Text>
         ) : null}
       </Box>
