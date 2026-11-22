@@ -67,14 +67,14 @@ test('desktop candidates use the platform opener', () => {
 
 test('openInBrowser stops at the first successful candidate', async () => {
   const { calls, spawnFn } = stubSpawn([0, 0, 0]);
-  const message = await openInBrowser(REPO_URL, spawnFn);
+  const message = await openInBrowser(REPO_URL, spawnFn, 'android');
   assert.match(message, /^Opened in browser:/);
   assert.equal(calls.length, 1, 'Chrome attempt succeeded; no fallback was used');
 });
 
 test('openInBrowser falls through when Chrome fails', async () => {
   const { calls, spawnFn } = stubSpawn([1, 0, 0]);
-  const message = await openInBrowser(BUG_REPORT_URL, spawnFn);
+  const message = await openInBrowser(BUG_REPORT_URL, spawnFn, 'android');
   assert.match(message, /^Opened in browser:/);
   assert.equal(calls.length, 2, 'second candidate was used');
   assert.ok(calls[0].args.includes('com.android.chrome'));
@@ -82,7 +82,7 @@ test('openInBrowser falls through when Chrome fails', async () => {
 
 test('openInBrowser never throws and reports the URL when all candidates fail', async () => {
   const { calls, spawnFn } = stubSpawn([1, 1, 1]);
-  const message = await openInBrowser(REPO_URL, spawnFn);
+  const message = await openInBrowser(REPO_URL, spawnFn, 'android');
   assert.equal(message, `Open manually: ${REPO_URL}`);
   assert.equal(calls.length, 3);
   assert.match(await openInBrowser('javascript:alert(1)', spawnFn), /^Error: invalid URL/);
@@ -97,7 +97,7 @@ test('a spawn error falls through to the next candidate', async () => {
     setImmediate(() => (child as unknown as FakeChild).emit('close', 0));
     return child;
   });
-  const message = await openInBrowser(REPO_URL, spawnFn);
+  const message = await openInBrowser(REPO_URL, spawnFn, 'android');
   assert.match(message, /^Opened in browser:/);
   assert.deepEqual(calls.slice(0, 2), ['am', 'termux-open-url']);
 });

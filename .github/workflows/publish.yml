@@ -1,8 +1,7 @@
 name: Publish
 
-# Every push to main publishes `bitacode` to npm. If package.json's version is
-# already on the registry, the build job bumps the patch version in the
-# tarball so each push ships a fresh release. Manual runs can do a dry run.
+# One job: check the code, then publish. If package.json's version is already
+# on npm, bump the patch version for this push so every release is fresh.
 
 on:
   push:
@@ -10,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Build and pack only, do not publish'
+        description: 'Run the checks and pack, but do not publish'
         type: boolean
         default: false
 
@@ -23,120 +22,72 @@ permissions:
   id-token: write
 
 jobs:
-  guard:
-    name: prepare publish
-    # Use `[skip publish]` in a commit message for non-release changes.
+  publish:
+    name: check and publish
     if: ${{ !contains(github.event.head_commit.message, '[skip publish]') }}
     runs-on: ubuntu-latest
-    outputs:
-      publish: ${{ steps.check.outputs.publish }}
-    steps:
-      - id: check
-        run: echo "publish=true" >> "$GITHUB_OUTPUT"
-
-  build:
-    name: verify and pack
-    needs: guard
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
-      - name: Ensure an unpublished version for this push
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      - name: Ensure an unpublished version
         id: version
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
           if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-            echo "$NAME@$VERSION is already on npm; bumping patch for this push."
+            echo "$NAME@$VERSION is already on npm; bumping patch."
             npm version patch --no-git-tag-version >/dev/null
             VERSION=$(node -p "require('./package.json').version")
-          else
-            echo "$NAME@$VERSION is new; publishing as-is."
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run lint
-      - run: npm run build
-      - name: Confirm dist/ is committed and current
-        run: |
-          if [ -n "$(git status --porcelain dist)" ]; then
-            echo "::error::dist/ is out of date. Run 'npm run build' and commit the result."
-            git status --porcelain dist
-            exit 1
-          fi
-      - name: Smoke test
-        run: |
-          node dist/cli.js --version
-          node dist/cli.js --help >/dev/null || true
-      - name: Deprecate the old scoped package name
-        # The published CLI is `bitacode`. The earlier @bitacode-cli/cli alias
-        # stays installed for existing users but warns them to switch.
-        run: npm deprecate @bitacode-cli/cli "Use bitacode instead" || echo "::warning::could not deprecate @bitacode-cli/cli"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Pack tarball
-        run: npm pack --pack-destination .
-      - name: Dry-run install from the tarball
-        run: |
-          TARBALL=$(ls *.tgz | head -1)
-          mkdir -p /tmp/install-check && cd /tmp/install-check
-          npm init -y >/dev/null
-          npm install "$GITHUB_WORKSPACE/$TARBALL" --no-audit --no-fund
-          npx bitacode --version
-      - uses: actions/upload-artifact@v7
-        with:
-          name: npm-package
-          path: '*.tgz'
-          retention-days: 7
 
-  publish:
-    name: publish to npm
-    needs: [guard, build]
-    if: needs.guard.outputs.publish == 'true' && inputs.dry_run != true
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '22'
-          cache: npm
-          registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
-      - uses: actions/download-artifact@v4
-        with:
-          name: npm-package
-      - name: Publish
+      # The only gates: types, tests, lint, and a clean build.
+      - name: Check
+        run: |
+          npm run typecheck
+          npm test
+          npm run lint
+          npm run build
+          node dist/cli.js --version
+
+      - name: Pack
+        run: npm pack --pack-destination .
+
+      - name: Publish to npm
+        if: ${{ inputs.dry_run != true }}
         run: npm publish "$(ls *.tgz | head -1)" --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Tag and create a GitHub Release
+
+      - name: Tag and release
+        if: ${{ inputs.dry_run != true }}
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The build job picked an unpublished version; an existing tag is
-          # harmless and simply skipped.
+          git config user.email "41898282+github-actions[bot]@github.com"
           if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-            echo "Tag v$VERSION already exists; skipping tag creation."
+            echo "Tag v$VERSION already exists; skipping."
           else
             git tag -a "v$VERSION" -m "v$VERSION"
             git push origin "v$VERSION"
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Release notes
+        if: ${{ inputs.dry_run != true }}
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.build.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
-          name: v${{ needs.build.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

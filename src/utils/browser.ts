@@ -89,13 +89,17 @@ function attempt(candidate: Candidate, spawnFn: Spawn): Promise<string | null> {
 }
 
 /** Try every candidate in order; return a toast message with the URL on failure. */
-export async function openInBrowser(rawUrl: string, spawnFn: Spawn = spawn): Promise<string> {
+export async function openInBrowser(
+  rawUrl: string,
+  spawnFn: Spawn = spawn,
+  platform = process.platform
+): Promise<string> {
   const url = validHttpUrl(rawUrl);
   if (!url) return `Error: invalid URL: ${String(rawUrl)}`;
   const fallback = `Open manually: ${url}`;
   let candidates: Candidate[];
   try {
-    candidates = browserCandidates(url);
+    candidates = browserCandidates(url, platform);
   } catch (err) {
     return `Error: could not resolve browser: ${err instanceof Error ? err.message : String(err)}`;
   }
