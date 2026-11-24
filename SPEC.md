@@ -567,15 +567,21 @@ Logs are written under the user's Bitacode data directory rather than printed di
 
 ## 18. Known Omissions and Intentional Limits
 
-Bitacode intentionally does not currently implement:
+Implemented since this specification was first written (see `NEW-FEATURES.md`):
 
-- sandboxing
-- git-based undo/snapshots
-- advanced edit fallback strategies
-- skill dependency resolution or enforced allowed-tool constraints
-- built-in web search APIs
-- session branching
-- MCP OAuth
-- non-interactive RPC/server modes
+- tool groups / deferred tool discovery, named agents, session steering and queueing
+- git worktree sandboxes and opt-in git-native snapshots
+- background-job completion notifications, structured `form` questions
+- event-sourced session log with recovery claims, session search/import, draft stash
+- multi-account credentials, local provider presets, provider policy, shell-aware rules
+- config watching, custom themes, keybinding overrides, goal mode, scheduling
+
+Still intentionally out of scope:
+
+- OS-level sandboxing (seccomp/seatbelt) — path/command gates are the current model
+- MCP OAuth (stdio env is allowlisted; OAuth flows are not implemented)
+- non-interactive RPC/server/desktop modes — `-p/--json` is the automation boundary
+- image/video generation and voice
+- advanced edit fallback strategies and skill dependency resolution
 
 Those are reasonable extension points, but they are outside the current scope of the code in `src/`.
