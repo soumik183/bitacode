@@ -19,7 +19,11 @@
 
 import type OpenAI from 'openai';
 import { setMaxListeners } from 'node:events';
-import { getAllTools, TOOL_NAME_ALIASES } from './tools/index.js';
+import { getAllTools, getVisibleTools, isGroupVisible, TOOL_NAME_ALIASES } from './tools/index.js';
+import { getRuntimeConfig } from './runtime-config.js';
+import { checkModelPolicy, parseProviderPolicy } from './utils/provider-policy.js';
+import { createGoal, goalContextBlock, recordRound, renderGoalPrompt, type GoalState } from './utils/goal.js';
+import { loadSettings } from './settings.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { subAgentTool, subagentControlTool, type SubAgentUsage } from './sub-agent.js';
 import {
@@ -260,8 +264,38 @@ export async function runAgenticLoop(
     }
   }
 
+  // Project policy can forbid expensive/unapproved models before any request
+  // is sent. parse/check never throw, so a malformed config fails closed only
+  // for the offending model instead of breaking the whole CLI.
+  try {
+    const policy = parseProviderPolicy((getRuntimeConfig() as { providerPolicy?: unknown }).providerPolicy);
+    const verdict = checkModelPolicy(model, policy);
+    if (!verdict.allowed) {
+      emit({ type: 'error', error: verdict.reason });
+      emit({ type: 'done' });
+      return updatedMessages;
+    }
+  } catch (error) {
+    logger.error('Model policy check failed; refusing the request (fail closed)', { error: String(error) });
+    emit({ type: 'error', error: 'Model policy check failed. Fix providerPolicy in bitacode.jsonc.' });
+    emit({ type: 'done' });
+    return updatedMessages;
+  }
+
   // Refresh system prompt to pick up any new skills or project changes
-  const newSystemPrompt = await generateSystemPrompt();
+  let newSystemPrompt = await generateSystemPrompt();
+
+  // Goal mode is opt-in: a bounded supervisor keeps working until the model
+  // reports VERDICT: PASS or the round budget is exhausted.
+  let goalState: GoalState | undefined;
+  const configuredGoal = loadSettings().goalMode ? process.env.BITACODE_GOAL?.trim() : undefined;
+  if (configuredGoal) {
+    goalState = createGoal(configuredGoal, {
+      maxRounds: Number(process.env.BITACODE_GOAL_ROUNDS) || undefined,
+    });
+    const block = goalContextBlock(goalState);
+    if (block) newSystemPrompt += `\n\n${block}`;
+  }
   const systemMsgIndex = updatedMessages.findIndex((m) => m.role === 'system');
   if (systemMsgIndex !== -1) {
     updatedMessages[systemMsgIndex] = { role: 'system', content: newSystemPrompt } as Message;
@@ -352,7 +386,8 @@ export async function runAgenticLoop(
 
     try {
       // Build tools list: core tools + sub-agent tool + dynamic (MCP) tools
-      const allTools = [...getAllTools(), subAgentTool, subagentControlTool];
+      const loopTools = isGroupVisible('agents') ? [subAgentTool, subagentControlTool] : [];
+      const allTools = [...getVisibleTools(), ...loopTools];
 
       logger.info('Making API request', {
         model,
@@ -513,6 +548,16 @@ export async function runAgenticLoop(
           content: 'Please continue.',
         } as Message);
         continue;
+      }
+
+      // Goal mode: feed the model's own verdict back as a bounded continuation.
+      if (goalState && assistantMessage.content && goalState.verdict === 'working') {
+        goalState = recordRound(goalState, assistantMessage.content, assistantMessage.content);
+        if (goalState.verdict === 'working') {
+          updatedMessages.push({ role: 'user', content: renderGoalPrompt(goalState) } as Message);
+          continue;
+        }
+        emit({ type: 'error', error: `Goal ${goalState.verdict} after ${goalState.rounds} round(s).` , transient: true });
       }
 
       // Reset retry counts on successful completion. The transient budget is

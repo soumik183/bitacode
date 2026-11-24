@@ -78,6 +78,22 @@ export interface UiSettings {
   guardUnreadEdits?: boolean;
   /** Inline large tool output instead of spilling it to disk. */
   spillToolResults?: boolean;
+  /**
+   * Tool groups advertised to the model. Empty means the safe default
+   * (`core` + `files`). `all` restores the old behaviour of sending every
+   * schema on every turn. Values are normalised in `loadSettings()`.
+   */
+  toolGroups?: string[];
+  /** User overrides for single-key shortcuts, e.g. `{ "search": "ctrl+f" }`. */
+  keybindings?: Record<string, string>;
+  /** Optional path to a user-authored theme JSON file. */
+  themePath?: string;
+  /** Opt-in: keep working until the goal verdict passes (bounded by max rounds). */
+  goalMode?: boolean;
+  /** Opt-in: use git-native per-turn snapshots in addition to byte checkpoints. */
+  vcsSnapshots?: boolean;
+  /** Opt-in: write an append-only event log and recovery claims for sessions. */
+  sessionEventLog?: boolean;
 }
 
 export const DEFAULT_SETTINGS: UiSettings = {
@@ -92,6 +108,12 @@ export const DEFAULT_SETTINGS: UiSettings = {
   autoverify: false,
   guardUnreadEdits: true,
   spillToolResults: true,
+  toolGroups: [],
+  keybindings: {},
+  themePath: '',
+  goalMode: false,
+  vcsSnapshots: false,
+  sessionEventLog: false,
 };
 
 function getSettingsPath(): string {
@@ -106,6 +128,34 @@ function getSettingsPath(): string {
 function normalizeStringList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0);
+}
+
+const VALID_TOOL_GROUPS = new Set(['core', 'files', 'web', 'process', 'agents', 'all']);
+const VALID_KEY_ACTIONS = new Set([
+  'newSession', 'sessions', 'model', 'provider', 'help', 'settings', 'subagents',
+  'clearInput', 'clearTranscript', 'thinking', 'retry', 'copyLast', 'editLast', 'search',
+]);
+const KEY_PATTERN = /^(?:(?:ctrl|alt|shift)\+[a-z0-9]+|[a-z0-9]+|tab|esc|enter|space|up|down|left|right|pageup|pagedown|home|end)$/;
+
+function normalizeToolGroups(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((entry): entry is string => typeof entry === 'string' && VALID_TOOL_GROUPS.has(entry.toLowerCase()))
+    .map((entry) => entry.toLowerCase());
+}
+
+function normalizeKeybindings(value: unknown): Record<string, string> {
+  const input = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const result: Record<string, string> = {};
+  const used = new Set<string>();
+  for (const [action, key] of Object.entries(input)) {
+    if (!VALID_KEY_ACTIONS.has(action) || typeof key !== 'string') continue;
+    const normalized = key.toLowerCase().trim().slice(0, 24);
+    if (!KEY_PATTERN.test(normalized) || used.has(normalized)) continue;
+    used.add(normalized);
+    result[action] = normalized;
+  }
+  return result;
 }
 
 function normalizePermissions(value: unknown): UiSettings['permissions'] {
@@ -138,6 +188,12 @@ export function loadSettings(): UiSettings {
       autoverify: parsed.autoverify === true,
       guardUnreadEdits: parsed.guardUnreadEdits !== false,
       spillToolResults: parsed.spillToolResults !== false,
+      toolGroups: normalizeToolGroups(parsed.toolGroups),
+      keybindings: normalizeKeybindings(parsed.keybindings),
+      themePath: typeof parsed.themePath === 'string' && parsed.themePath.length <= 512 ? parsed.themePath : '',
+      goalMode: parsed.goalMode === true,
+      vcsSnapshots: parsed.vcsSnapshots === true,
+      sessionEventLog: parsed.sessionEventLog === true,
     };
   } catch {
     return { ...DEFAULT_SETTINGS, statusLine: [...STATUS_LINE_ITEMS] };

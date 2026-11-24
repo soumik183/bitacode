@@ -11,7 +11,8 @@
 
 import type OpenAI from 'openai';
 import crypto from 'node:crypto';
-import { handleToolCall, getAllTools } from './tools/index.js';
+import { handleToolCall, getVisibleTools } from './tools/index.js';
+import { BUILTIN_AGENTS, discoverAgents, resolveAgentSelection, applyAgentTools, type AgentDefinition } from './agents.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { logger } from './utils/logger.js';
 import { clearTodos } from './tools/todo.js';
@@ -81,8 +82,10 @@ export const subAgentTool = {
         },
         agent_type: {
           type: 'string',
-          enum: ['Explore', 'Plan', 'Bash', 'Review', 'general-purpose'],
-          description: 'Specialization for the sub-agent. Defaults to general-purpose.',
+          // Keep the advertised enum aligned with the agents users can actually
+          // define in .bitacode/agents/ (and the built-in set).
+          enum: BUILTIN_AGENTS.map((agent) => agent.name),
+          description: 'Specialization for the sub-agent. Defaults to general.',
         },
         thoroughness: {
           type: 'string',
@@ -289,7 +292,9 @@ async function runSubAgentOnce(
     : 500;
 
   // These are advisory only: validate, log unknowns, and apply just the quick budget.
-  const validTypes = ['Explore', 'Plan', 'Bash', 'Review', 'general-purpose'];
+  const knownAgentsResult = discoverAgents();
+  const registry = knownAgentsResult.ok ? knownAgentsResult.value : BUILTIN_AGENTS;
+  const validTypes = registry.map((agent) => agent.name);
   if (agentType != null && !validTypes.includes(agentType)) {
     logger.warn('Sub-agent ignoring unknown agent_type', { agentType });
   }
@@ -314,7 +319,24 @@ async function runSubAgentOnce(
   abortSignal?.addEventListener('abort', forwardAbort, { once: true });
 
   const systemPrompt = await generateSystemPrompt();
-  const subSystemPrompt = buildSubAgentSystemPrompt(systemPrompt, agentType);
+  let subSystemPrompt = buildSubAgentSystemPrompt(systemPrompt, agentType);
+
+  // Named agents (`.bitacode/agents/*.md`) layer their instructions and tool
+  // policy onto the child. Discovery is fail-safe: one bad file is logged by
+  // the loader and never prevents the child from running.
+  const agentRegistry: readonly AgentDefinition[] = knownAgentsResult.ok ? knownAgentsResult.value : BUILTIN_AGENTS;
+  const selectedAgent = resolveAgentSelection(agentType, agentRegistry);
+  if (selectedAgent.prompt) {
+    subSystemPrompt += `\n\n## Agent: ${selectedAgent.name}\n${selectedAgent.prompt}`;
+  }
+  const visibleTools = getVisibleTools();
+  const allowedNames = new Set(applyAgentTools(selectedAgent, visibleTools.map((tool) => tool.function.name)));
+  const childTools = visibleTools.filter((tool) => allowedNames.has(tool.function.name));
+  if (selectedAgent.model && selectedAgent.model !== model) {
+    // Model overrides are advisory: the child inherits the parent's provider
+    // credentials, so silently switching models could use the wrong account.
+    logger.debug('Sub-agent ignored agent model override', { agent: selectedAgent.name, model: selectedAgent.model });
+  }
 
   // A follow-up run starts from the saved transcript, then appends the new task
   // as a fresh user turn. The original record stays untouched; this one links
@@ -360,7 +382,7 @@ async function runSubAgentOnce(
           ...requestDefaults,
           model,
           messages: sanitizeMessagesForProvider(messages),
-          tools: getAllTools(),
+          tools: childTools,
           tool_choice: 'auto',
           stream: true,
           stream_options: { include_usage: true },

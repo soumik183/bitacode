@@ -46,14 +46,18 @@ export const ThinkingArchive: React.FC<ThinkingArchiveProps> = ({
   const lineCap = archivePreviewChars(columns);
   const shownLines = expanded ? lines : lines.slice(0, PREVIEW_LINE_BUDGET);
   const hiddenLines = lines.length - shownLines.length;
+  const meta = [
+    elapsedMs > 0 ? formatDuration(elapsedMs) : '',
+    `${reasoning.length} char${reasoning.length === 1 ? '' : 's'}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
   return (
     <Box flexDirection="column" paddingX={2} marginBottom={1}>
       <Text wrap="truncate-end">
         <Text color={theme.muted}>{expanded ? '▾ ' : '▸ '}</Text>
         <Text color={theme.muted}>Thought</Text>
-        <Text color={theme.dim}>
-          {`  ${formatDuration(elapsedMs)} · ${reasoning.length} char${reasoning.length === 1 ? '' : 's'}`}
-        </Text>
+        <Text color={theme.dim}>{meta ? `  ${meta}` : ''}</Text>
       </Text>
       {shownLines.map((line, index) => {
         // Bound each collapsed line to one row so the card can't grow the frame.

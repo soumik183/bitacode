@@ -27,6 +27,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { name: '/new', description: 'Start a fresh session', category: 'Session', keywords: 'reset clear' },
   { name: '/session', description: 'Open a saved session', category: 'Session', keywords: 'resume history' },
   { name: '/find', description: 'Search the transcript', category: 'Session', keywords: 'grep lookup' },
+  { name: '/search', description: 'Search every saved session', category: 'Session', keywords: 'all history grep' },
+  { name: '/stash', description: 'Save and restore prompt drafts', category: 'Session', keywords: 'draft note restore' },
+  { name: '/agent', description: 'List available agents', category: 'Tools', keywords: 'subagent persona role' },
   { name: '/subagents', description: 'Browse and inspect child agents', category: 'Session', keywords: 'agents children transcripts' },
   { name: '/review', description: 'Delegate a code review to a sub-agent', category: 'Tools', keywords: 'audit findings review' },
   { name: '/github', description: 'Open the Bitacode repository in your browser', category: 'App', keywords: 'repo source code' },
@@ -64,6 +67,12 @@ export interface PaletteItem {
   section?: string;
   /** Right-aligned hint for this row. */
   meta?: string;
+  /**
+   * Character indices of a fuzzy match inside `label`. When present these take
+   * precedence over query-based highlighting; an empty list means the match
+   * came from an alias/keyword and nothing in the label is emphasised.
+   */
+  matchIndices?: readonly number[];
 }
 
 export interface PaletteProps {
@@ -74,6 +83,11 @@ export interface PaletteProps {
   maxVisible?: number;
   /** The typed filter, used to highlight the matched part of each label. */
   query?: string;
+  /**
+   * Dim label shown in the header row when the query is empty. Reuses the
+   * existing row, so an empty query never makes the card taller.
+   */
+  emptyLabel?: string;
   /** Terminal columns; very narrow screens drop descriptions to keep names whole. */
   columns?: number;
 }
@@ -93,6 +107,36 @@ export function highlightMatch(label: string, query?: string): Array<{ text: str
   if (before) parts.push({ text: before, match: false });
   parts.push({ text: hit, match: true });
   if (after) parts.push({ text: after, match: false });
+  return parts;
+}
+
+/**
+ * Turn fuzzy-match indices into contiguous matched / unmatched runs. Invalid
+ * indices are ignored so a stale index set can never throw or drop a label.
+ */
+function labelSegments(
+  label: string,
+  indices: readonly number[] | undefined
+): Array<{ text: string; match: boolean }> | null {
+  if (!indices) return null;
+  const matched = new Set<number>();
+  for (const index of indices) {
+    if (Number.isInteger(index) && index >= 0 && index < label.length) matched.add(index);
+  }
+  if (matched.size === 0) return [{ text: label, match: false }];
+  const parts: Array<{ text: string; match: boolean }> = [];
+  let text = '';
+  let current = matched.has(0);
+  for (let i = 0; i < label.length; i++) {
+    const isMatch = matched.has(i);
+    if (isMatch !== current) {
+      if (text) parts.push({ text, match: current });
+      text = '';
+      current = isMatch;
+    }
+    text += label[i];
+  }
+  if (text) parts.push({ text, match: current });
   return parts;
 }
 
@@ -136,6 +180,7 @@ export const Palette: React.FC<PaletteProps> = ({
   hint,
   maxVisible,
   query,
+  emptyLabel = 'All commands',
   columns,
 }) => {
   const theme = useTheme();
@@ -149,6 +194,13 @@ export const Palette: React.FC<PaletteProps> = ({
   const visible = items.slice(start, start + window);
   const hiddenAbove = start;
   const hiddenBelow = Math.max(0, items.length - start - visible.length);
+  const needle = (query ?? '').trim();
+  // One compact dim row while filtering; the empty query reuses the header
+  // row below, so the palette keeps exactly the height it always had.
+  const matchLine = needle
+    ? `${items.length} ${items.length === 1 ? 'match' : 'matches'} for "${needle}"`
+    : '';
+  const hasHeader = Boolean(title || items.length > window);
 
   return (
     <Box
@@ -162,11 +214,16 @@ export const Palette: React.FC<PaletteProps> = ({
       marginBottom={1}
       overflow="hidden"
     >
-      {(title || items.length > window) && (
+      {hasHeader && (
         <Box flexDirection="row" justifyContent="space-between">
-          <Text color={theme.dim} wrap="truncate-end">{title ?? 'Matches'}</Text>
+          <Text color={theme.dim} wrap="truncate-end">
+            {title ?? (!needle && emptyLabel ? emptyLabel : 'Matches')}
+          </Text>
           <Text color={theme.dim}>{`${selected + 1}/${items.length}`}</Text>
         </Box>
+      )}
+      {matchLine && (
+        <Text color={theme.dim} wrap="truncate-end">{matchLine}</Text>
       )}
       {hiddenAbove > 0 && (
         <Text color={theme.dim} wrap="truncate-end">{`  ↑ ${hiddenAbove} more`}</Text>
@@ -190,15 +247,16 @@ export const Palette: React.FC<PaletteProps> = ({
                 {/* The command name must stay whole: the description gives way first. */}
                 <Box flexShrink={0}>
                   <Text color={labelColor} bold={active || item.bold} wrap="truncate-end">
-                    {highlightMatch(item.label, query).map((part, partIndex) => (
-                      <Text
-                        key={partIndex}
-                        color={part.match ? theme.accent : labelColor}
-                        bold={part.match || active || item.bold}
-                      >
-                        {part.text}
-                      </Text>
-                    ))}
+                    {(labelSegments(item.label, item.matchIndices) ?? highlightMatch(item.label, query))
+                      .map((part, partIndex) => (
+                        <Text
+                          key={partIndex}
+                          color={part.match ? theme.accent : labelColor}
+                          bold={part.match || active || item.bold}
+                        >
+                          {part.text}
+                        </Text>
+                      ))}
                   </Text>
                 </Box>
                 {item.description && showDescriptions && (

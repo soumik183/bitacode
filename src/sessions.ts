@@ -16,6 +16,8 @@ import type OpenAI from 'openai';
 import { clearTodos, type TodoItem } from './tools/todo.js';
 import { logger } from './utils/logger.js';
 import { isUiOnlyMessageField } from './utils/message-sanitize.js';
+import { loadSettings } from './settings.js';
+import { appendEvent, writeSnapshot } from './utils/session-events.js';
 
 const SESSION_DIR_MODE = 0o700;
 const SESSION_FILE_MODE = 0o600;
@@ -426,6 +428,19 @@ export async function saveSession(session: Session): Promise<void> {
     if (saveQueues.get(session.id) === current) saveQueues.delete(session.id);
   }
   logger.debug(`Session saved: ${session.id}`);
+
+  // Opt-in append-only event log. A failure here is diagnostic only — the
+  // authoritative JSON session has already been written successfully.
+  if (loadSettings().sessionEventLog) {
+    void Promise.all([
+      writeSnapshot(session.id, session),
+      appendEvent({
+        sessionId: session.id,
+        type: 'note',
+        data: { title: session.title, messages: session.completionMessages.length },
+      }),
+    ]).catch((error) => logger.warn('Session event log write failed', { error: String(error) }));
+  }
 }
 
 /** Load a session by ID. Returns null if not found. */

@@ -12,9 +12,10 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { getAllTools } from './tools/index.js';
+import { getVisibleTools } from './tools/index.js';
 import { buildSkillsCatalogSection, initializeSkillsSupport } from './skills.js';
 import { getActiveRuntimeConfigPath } from './runtime-config.js';
+import { discoverAgents, renderAgentCatalog } from './agents.js';
 
 /**
  * Load AGENTS.md content from cwd and parent directories.
@@ -86,7 +87,7 @@ async function buildDirectoryTree(dirPath = '.', depth = 0, maxDepth = 3): Promi
 
 /** Compact tool list — the API already receives the full JSON schemas. */
 function generateToolDescriptions(): string {
-  return getAllTools()
+  return getVisibleTools()
     .map((tool) => {
       const fn = tool.function;
       // One short line per tool: parameters live in the function schema, so
@@ -107,6 +108,10 @@ export async function generateSystemPrompt(): Promise<string> {
   const skillsSection = buildSkillsCatalogSection(skills);
   const configPath = getActiveRuntimeConfigPath();
   const agentsMd = await loadAgentsMd();
+  const discoveredAgents = discoverAgents();
+  const agentsSection = discoveredAgents.ok && discoveredAgents.value.length > 0
+    ? `\nAVAILABLE AGENTS\n\nPass the agent name as \`agent_type\` to sub_agent.\n${renderAgentCatalog(discoveredAgents.value)}\n`
+    : '';
 
   const agentsMdSection = agentsMd
     ? `\nAGENTS.md INSTRUCTIONS\n\nThe following instructions are from the AGENTS.md file at: ${agentsMd.path}\n\n${agentsMd.content}\n`
@@ -161,7 +166,7 @@ Configuration Path: ${configPath || 'none (using defaults)'}
 
 PROJECT STRUCTURE:
 ${tree}
-${agentsMdSection}
+${agentsMdSection}${agentsSection}
 AVAILABLE TOOLS
 
 ${toolDescriptions}

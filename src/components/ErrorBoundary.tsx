@@ -11,7 +11,11 @@ const Fallback: React.FC<{ message: string }> = ({ message }) => {
       <Text color={theme.error} bold>
         Bitacode hit an unexpected UI error.
       </Text>
-      <Text color={theme.muted}>{message}</Text>
+      {/* Keep the raw error to one clipped row: stacks and multi-line messages
+          used to push the fallback card past the terminal. */}
+      <Text color={theme.muted} wrap="truncate-end">
+        {String(message ?? '').replace(/\s+/g, ' ').trim()}
+      </Text>
       <Text color={theme.dim}>
         Press ctrl+c to quit. Completed turns are already saved.
       </Text>

@@ -15,7 +15,8 @@ import { render } from 'ink';
 import { Command } from 'commander';
 import { App } from './App.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
-import { getTheme } from './theme.js';
+import { getTheme, registerCustomTheme } from './theme.js';
+import { discoverThemeFiles } from './theme/discovery.js';
 import { loadSettings } from './settings.js';
 import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
@@ -35,6 +36,18 @@ import { runSessionsCommand } from './commands/sessions.js';
 import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
 import { completionScript, isShellName } from './utils/completion.js';
 import { pruneSpillFiles } from './utils/tool-result-budget.js';
+import { createWorktree, listWorktrees, removeWorktree } from './utils/worktree.js';
+import { runMcpCommand } from './commands/mcp.js';
+import { getAllProviders } from './providers/index.js';
+import { getRuntimeConfig, loadRuntimeConfig } from './runtime-config.js';
+import {
+  activeAccount, addAccount, exportAccounts, importAccounts, loadAccounts,
+  redactAccount, switchAccount,
+} from './utils/accounts.js';
+import { addSchedule, dueTasks, loadSchedule, parseInterval, removeSchedule } from './utils/schedule.js';
+import {
+  createSnapshot, deleteSnapshot, isGitRepo, listSnapshots, restoreSnapshot,
+} from './utils/vcs-snapshot.js';
 
 // A rejected promise in a background fetch should be logged, not kill the TUI.
 process.on('unhandledRejection', (reason) => {
@@ -54,8 +67,6 @@ const packageJson: { version: string } = JSON.parse(
 // which flickers on slow terminals. Rewrite those repaints into a home +
 // overwrite so nothing is blanked before it is drawn. Other writes (alt-screen,
 // mouse, OSC, logs) pass through untouched.
-installStableRenderer(process.stdout);
-
 const program = new Command();
 
 program
@@ -95,6 +106,9 @@ program
       return;
     }
 
+    // Headless output must never be rewritten by the interactive renderer.
+    installStableRenderer(process.stdout);
+
     if (options.autoverify) process.env.BITACODE_AUTOVERIFY = '1';
     // Spill files are a cache, not data: prune old ones in the background.
     void pruneSpillFiles().catch(() => undefined);
@@ -105,9 +119,24 @@ program
     // Enter the alternate screen and clear BEFORE Ink's first render so the
     // terminal starts from a known state. Hide the cursor while we own it.
     process.stdout.write('\x1b[?1049h');
-    // App applies the saved palette after mount; the terminal canvas must use
-    // that same colour from the first frame, not the hard-coded dark default.
-    process.stdout.write(`\x1b]11;${getTheme(loadSettings().theme).bg}\x07`);
+    // Custom themes must be registered before the first frame, otherwise the
+    // terminal canvas and the UI disagree about the background colour.
+    const startupSettings = loadSettings();
+    if (startupSettings.theme === 'custom' || startupSettings.themePath) {
+      try {
+        const found = discoverThemeFiles({
+          extraDirs: startupSettings.themePath ? [path.dirname(startupSettings.themePath)] : [],
+        });
+        if (found.ok) {
+          for (const file of found.value) {
+            if (registerCustomTheme('custom', file.raw)) break;
+          }
+        }
+      } catch {
+        // A broken theme file must not prevent the app from starting.
+      }
+    }
+    process.stdout.write(`\x1b]11;${getTheme(startupSettings.theme).bg}\x07`);
     process.stdout.write('\x1b[2J\x1b[H\x1b[?25l');
 
     // Default action - start the main app
@@ -280,6 +309,28 @@ program
     // `export <id> md --out file.md` reach the command handler intact.
     const parts = [...(args ?? [])];
     if (options.out) parts.push('--out', String(options.out));
+    if (parts[0] === 'import') {
+      try {
+        if (!parts[1]) {
+          console.error('Usage: bitacode sessions import <path.json>');
+          process.exitCode = 1;
+          return;
+        }
+        const { importSessionFile } = await import('./utils/session-import.js');
+        const result = importSessionFile(parts[1]);
+        if (!result.ok) {
+          console.error(result.error);
+          process.exitCode = 1;
+          return;
+        }
+        console.log(`Imported session ${result.value.id}`);
+        process.exitCode = 0;
+      } catch (error) {
+        console.error(`Session import failed: ${error instanceof Error ? error.message : String(error)}`);
+        process.exitCode = 1;
+      }
+      return;
+    }
     process.exitCode = await runSessionsCommand(parts, { json: Boolean(options.json) });
   });
 
@@ -304,6 +355,261 @@ program
       return;
     }
     process.stdout.write(completionScript(shell));
+  });
+
+// Git worktree sandboxes — one isolated checkout per task.
+program
+  .command('worktree <action> [name]')
+  .description('Create, list or remove isolated git worktrees (create|list|remove)')
+  .option('--base <ref>', 'Base ref for create (default: HEAD)')
+  .option('--force', 'Force removal of a worktree with local changes')
+  .option('--json', 'Emit JSON')
+  .action(async (action: string, name: string | undefined, options) => {
+    const fail = (message: string): void => {
+      console.error(message);
+      process.exitCode = 1;
+    };
+    try {
+      if (action === 'list') {
+        const result = await listWorktrees();
+        if (!result.ok) return fail(result.error);
+        if (options.json) {
+          console.log(JSON.stringify(result.value, null, 2));
+        } else if (result.value.length === 0) {
+          console.log('No bitacode worktrees. Create one with: bitacode worktree create <name>');
+        } else {
+          for (const item of result.value) console.log(`${item.name}\t${item.branch}\t${item.path}`);
+        }
+        return;
+      }
+      if (!name) return fail(`Usage: bitacode worktree ${action} <name>`);
+      if (action === 'create') {
+        const result = await createWorktree(name, options.base ? { baseRef: options.base } : {});
+        if (!result.ok) return fail(result.error);
+        console.log(options.json ? JSON.stringify(result.value, null, 2) : `Created ${result.value.path} (${result.value.branch})`);
+        return;
+      }
+      if (action === 'remove') {
+        const result = await removeWorktree(name, { force: Boolean(options.force) });
+        if (!result.ok) return fail(result.error);
+        console.log(options.json ? JSON.stringify({ removed: name }) : `Removed worktree ${name}`);
+        return;
+      }
+      fail(`Unknown worktree action: ${action}. Use create, list or remove.`);
+    } catch (error) {
+      fail(`Worktree command failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
+// MCP server management without hand-editing JSONC.
+program
+  .command('mcp [args...]')
+  .description('Manage MCP servers (list, add, remove, test, show)')
+  .action(async (args: string[]) => {
+    try {
+      process.exitCode = await runMcpCommand(args ?? [], { cwd: process.cwd() });
+    } catch (error) {
+      console.error(`MCP command failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
+  });
+
+// Opt-in multi-account credentials; the main config is left untouched.
+program
+  .command('auth [action] [a] [b] [c]')
+  .description('Manage accounts: list|add|switch|active|export|import')
+  .option('--secrets', 'Include secret values when exporting')
+  .option('--file <path>', 'JSON file to import')
+  .action((action = 'list', a?: string, b?: string, c?: string, options?: { secrets?: boolean; file?: string }) => {
+    const fail = (message: string): void => {
+      console.error(message);
+      process.exitCode = 1;
+    };
+    try {
+      switch (action) {
+        case 'list': {
+          const result = loadAccounts();
+          if (!result.ok) return fail(result.error);
+          for (const account of result.value) {
+            const view = redactAccount(account);
+            console.log(`${account.id}\t${account.provider}\t${view.label}${account.id === activeAccount().value?.id ? '\t(active)' : ''}`);
+          }
+          return;
+        }
+        case 'add': {
+          if (!a || !b || !c) return fail('Usage: bitacode auth add <provider> <label> <apiKey>');
+          const result = addAccount({ provider: a, label: b, apiKey: c });
+          if (!result.ok) return fail(result.error);
+          console.log(`Added account ${result.value.id}`);
+          return;
+        }
+        case 'switch': {
+          if (!a) return fail('Usage: bitacode auth switch <id>');
+          const result = switchAccount(a);
+          if (!result.ok) return fail(result.error);
+          console.log(`Active account: ${result.value.id}`);
+          return;
+        }
+        case 'active': {
+          const result = activeAccount();
+          if (!result.ok) return fail(result.error);
+          console.log(result.value ? JSON.stringify(redactAccount(result.value), null, 2) : 'No active account');
+          return;
+        }
+        case 'export': {
+          const result = exportAccounts({ includeSecrets: Boolean(options?.secrets) });
+          if (!result.ok) return fail(result.error);
+          console.log(result.value);
+          return;
+        }
+        case 'import': {
+          if (!options?.file) return fail('Usage: bitacode auth import --file <path.json>');
+          const text = readFileSync(options.file, 'utf8');
+          const result = importAccounts(text);
+          if (!result.ok) return fail(result.error);
+          console.log(`Imported ${result.value} account(s)`);
+          return;
+        }
+        default:
+          fail(`Unknown auth action: ${action}`);
+      }
+    } catch (error) {
+      fail(`Auth command failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
+// Local recurring prompts. The store is managed here; running them is opt-in.
+program
+  .command('schedule [action] [value] [interval]')
+  .description('Manage scheduled prompts (list|add|due|rm)')
+  .action(async (action = 'list', value?: string, interval?: string) => {
+    const fail = (message: string): void => {
+      console.error(message);
+      process.exitCode = 1;
+    };
+    try {
+      if (action === 'list') {
+        const result = await loadSchedule();
+        if (!result.ok) return fail(result.error);
+        for (const task of result.value) {
+          console.log(`${task.id}\t${task.enabled ? 'on' : 'off'}\t${new Date(task.nextRunAt).toISOString()}\t${task.prompt}`);
+        }
+        return;
+      }
+      if (action === 'due') {
+        const result = await dueTasks();
+        if (!result.ok) return fail(result.error);
+        for (const task of result.value) console.log(`${task.id}\t${task.prompt}`);
+        return;
+      }
+      if (action === 'add') {
+        const ms = interval ? parseInterval(interval) : undefined;
+        if (!value || ms === undefined) return fail('Usage: bitacode schedule add "<prompt>" <15m|2h|1d>');
+        const result = await addSchedule(value, ms);
+        if (!result.ok) return fail(result.error);
+        console.log(`Scheduled ${result.value.id} for ${new Date(result.value.nextRunAt).toISOString()}`);
+        return;
+      }
+      if (action === 'rm') {
+        if (!value) return fail('Usage: bitacode schedule rm <id>');
+        const result = await removeSchedule(value);
+        if (!result.ok) return fail(result.error);
+        console.log(result.value ? `Removed ${value}` : `No schedule named ${value}`);
+        return;
+      }
+      fail(`Unknown schedule action: ${action}`);
+    } catch (error) {
+      fail(`Schedule command failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
+// Git-native snapshots, opt-in through settings.vcsSnapshots.
+program
+  .command('snapshot [action] [id]')
+  .description('Create/list/restore git-native snapshots (opt-in)')
+  .option('--apply', 'Actually restore (default is a dry run)')
+  .action(async (action = 'list', id?: string, options?: { apply?: boolean }) => {
+    const fail = (message: string): void => {
+      console.error(message);
+      process.exitCode = 1;
+    };
+    try {
+      if (!loadSettings().vcsSnapshots) {
+        return fail('Snapshots are disabled. Enable "vcsSnapshots" in settings.json first.');
+      }
+      if (!(await isGitRepo())) return fail('Not inside a git repository.');
+      if (action === 'list') {
+        const result = await listSnapshots();
+        if (!result.ok) return fail(result.error);
+        for (const item of result.value) console.log(`${item.id}\t${item.createdAt}\t${item.files.join(',')}`);
+        return;
+      }
+      if (action === 'create') {
+        const result = await createSnapshot(id ?? 'manual');
+        if (!result.ok) return fail(result.error);
+        console.log(`Snapshot ${result.value.id} (${result.value.ref})`);
+        return;
+      }
+      if (action === 'restore') {
+        if (!id) {
+          return fail('Usage: bitacode snapshot restore <id> [--apply]');
+        }
+        const result = await restoreSnapshot(id, { dryRun: options?.apply !== true });
+        if (result.ok) {
+          console.log(`Restored snapshot ${id}`);
+          return;
+        }
+        // The snapshot module reports a dry run's explanation through `error`
+        // by design. Real failures must go to stderr with a non-zero exit.
+        if (result.error.startsWith('dry-run:')) {
+          console.log(result.error);
+          return;
+        }
+        return fail(result.error);
+      }
+      if (action === 'delete') {
+        if (!id) return fail('Usage: bitacode snapshot delete <id>');
+        const result = await deleteSnapshot(id);
+        if (!result.ok) return fail(result.error);
+        console.log(`Deleted snapshot ${id}`);
+        return;
+      }
+      fail(`Unknown snapshot action: ${action}`);
+    } catch (error) {
+      fail(`Snapshot command failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
+// Resolved provider/model catalog, including config-only additions.
+program
+  .command('models [provider]')
+  .description('List resolved providers and models')
+  .option('--json', 'Emit JSON')
+  .action(async (provider: string | undefined, options: { json?: boolean }) => {
+    try {
+      await loadRuntimeConfig();
+      const catalog = getAllProviders()
+        .filter((item) => !provider || item.id === provider)
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          models: item.models.map((model) => ({ id: model.id, name: model.name, contextWindow: model.contextWindow })),
+        }));
+      if (options.json) {
+        console.log(JSON.stringify(catalog, null, 2));
+      } else {
+        const configured = getRuntimeConfig().provider;
+        for (const item of catalog) {
+          console.log(`${item.id}${item.id === configured ? ' (active)' : ''} — ${item.name}`);
+          for (const model of item.models) {
+            console.log(`  ${model.id}\t${model.name}\t${model.contextWindow ?? '?'} ctx`);
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Could not list models: ${error instanceof Error ? error.message : String(error)}`);
+      process.exitCode = 1;
+    }
   });
 
 program.parse(process.argv);

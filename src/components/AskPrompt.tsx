@@ -40,6 +40,29 @@ function clampText(text: string, width: number): string {
   return `${single.slice(0, width - 1)}…`;
 }
 
+export interface AskPromptHintArgs {
+  typing: boolean;
+  hasOptions: boolean;
+  canType: boolean;
+  multiple: boolean;
+}
+
+/**
+ * Contextual keyboard legend for an ask prompt. Exported so an embedding Dialog
+ * can show the same hint when AskPrompt itself runs with `embedded` and hides it.
+ */
+export function askPromptHint({ typing, hasOptions, canType, multiple }: AskPromptHintArgs): string {
+  if (typing) return 'enter send · esc skip';
+  return [
+    hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
+    hasOptions && canType ? 'tab type' : '',
+    multiple ? 'enter toggle/confirm' : 'enter send',
+    'esc skip',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
 /**
  * Interactive "the agent is asking you something" prompt.
  *
@@ -309,18 +332,12 @@ export const AskPrompt: React.FC<AskPromptProps> = ({ questions, columns, compac
           <Box marginTop={gap}>
             <HintLine
               compact={compact}
-              hint={
-                typing
-                  ? 'enter send · esc skip'
-                  : [
-                      hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
-                      hasOptions && canType ? 'tab type' : '',
-                      question.multiple ? 'enter toggle/confirm' : 'enter send',
-                      'esc skip',
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')
-              }
+              hint={askPromptHint({
+                typing,
+                hasOptions,
+                canType,
+                multiple: Boolean(question.multiple),
+              })}
             />
           </Box>
         )}

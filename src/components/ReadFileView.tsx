@@ -97,16 +97,18 @@ export const ReadFileView: React.FC<ReadFileViewProps> = ({
               </Text>
             );
           })}
-          {section.note && <Text color={theme.dim}>{`${' '.repeat(gutter)}  ${section.note}`}</Text>}
+          {section.note && (
+            <Text color={theme.dim} wrap="truncate-end">{`${' '.repeat(gutter)}  ${section.note}`}</Text>
+          )}
         </React.Fragment>
       ))}
       {hidden > 0 ? (
-        <Text color={theme.dim}>
+        <Text color={theme.dim} wrap="truncate-end">
           {`${' '.repeat(gutter)}  … ${hidden} more line${hidden === 1 ? '' : 's'}`}
-          {expanded ? ' (preview truncated)' : ' · click to expand'}
+          {expanded ? ' (preview truncated) · click to collapse' : ' · click to expand'}
         </Text>
       ) : expanded ? (
-        <Text color={theme.dim}>{'  click to collapse'}</Text>
+        <Text color={theme.dim} wrap="truncate-end">{'  click to collapse'}</Text>
       ) : null}
     </Box>
   );
