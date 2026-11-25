@@ -31,6 +31,8 @@ import {
 } from './git.js';
 import { webSearchTool, webSearch } from './web-search.js';
 import { readSubagentTool, readSubagent } from './subagent-session.js';
+import { formTool, form } from './form.js';
+import { parseToolGroups, resolveVisibleTools, type ToolGroup } from '../utils/tool-groups.js';
 import leven from 'leven';
 
 // File operations (one tool per file)
@@ -83,6 +85,7 @@ import {
 } from './memory-tools.js';
 
 export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
+export { setFormHandler, clearFormHandler, hasFormHandler } from './form.js';
 export type { ApprovalMode } from '../settings.js';
 export { recordSubAgentStatus } from './agent-status.js';
 export {
@@ -131,6 +134,7 @@ export const tools = [
   gitStashTool,
   webSearchTool,
   readSubagentTool,
+  formTool,
   // File operations
   multieditTool,
   deleteTool,
@@ -207,6 +211,34 @@ export function clearDynamicTools(): void {
 
 export function getAllTools() {
   return [...tools, ...dynamicTools];
+}
+
+/**
+ * Tool schemas advertised to the model. By default every tool is advertised,
+ * exactly as before. Setting BITACODE_TOOL_GROUPS (or calling setToolGroups)
+ * narrows the list to the named groups; hidden tools remain dispatchable so a
+ * model can still call one that was revealed by `list_tools` or remembered
+ * from an earlier turn.
+ */
+let toolGroupsOverride: ToolGroup[] | undefined;
+
+export function setToolGroups(groups: ToolGroup[] | undefined): void {
+  toolGroupsOverride = groups && groups.length > 0 ? [...groups] : undefined;
+}
+
+export function getVisibleTools() {
+  const configured = process.env.BITACODE_TOOL_GROUPS?.trim();
+  if (!toolGroupsOverride && !configured) return getAllTools();
+  const groups = toolGroupsOverride ?? parseToolGroups(configured);
+  return resolveVisibleTools(getAllTools(), { groups });
+}
+
+/** Whether a tool group is advertised, so loop-level tools can follow policy. */
+export function isGroupVisible(group: ToolGroup): boolean {
+  const configured = process.env.BITACODE_TOOL_GROUPS?.trim();
+  if (!toolGroupsOverride && !configured) return true;
+  const groups = toolGroupsOverride ?? parseToolGroups(configured);
+  return groups.includes('all') || groups.includes(group);
 }
 
 // Dynamic tool handlers (for MCP tools, etc.)
@@ -423,7 +455,7 @@ function suggestToolNames(toolName: string, candidates: string[], limit = 3): st
 let planMode = false;
 export function setPlanMode(value: boolean): void { planMode = value; }
 export function isPlanMode(): boolean { return planMode; }
-const MUTATING_TOOLS = new Set([
+export const MUTATING_TOOLS: ReadonlySet<string> = new Set([
   'write_file', 'edit_file', 'apply_patch', 'multiedit', 'delete', 'rename', 'move',
   'copy', 'mkdir', 'git_add', 'git_commit', 'git_stash', 'undo', 'bash', 'shell',
   'terminal', 'run', 'start_process', 'background', 'kill', 'stop_process', 'watch',
@@ -529,6 +561,8 @@ async function dispatchToolCall(toolName: string, rawArgs: any, context: ToolCal
       const request = normalizeAskRequest(args);
       return await askUser(request, context.sessionId);
     }
+    case 'form':
+      return await form(args, context);
     case 'sub_agent':
       return 'Error: sub_agent is executed by the agentic loop, not by handleToolCall. It is handled directly by the loop.';
     case 'apply_patch':

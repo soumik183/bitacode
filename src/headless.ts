@@ -22,6 +22,8 @@ import { createProviderClient } from './providers/client.js';
 import { getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { runAgenticLoop, type AgentEvent } from './agentic-loop.js';
+import { setToolGroups } from './tools/index.js';
+import { loadSettings } from './settings.js';
 import { setApprovalHandler, setApprovalMode, setDangerouslySkipPermissions } from './utils/approval.js';
 import { buildLayeredMessages } from './utils/context-layers.js';
 import { collectRepoContext, renderRepoContext } from './utils/repo-context.js';
@@ -73,6 +75,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const stdout = options.stdout ?? ((line: string) => process.stdout.write(`${line}\n`));
   const stderr = options.stderr ?? ((line: string) => process.stderr.write(`${line}\n`));
   const emitJson = (value: unknown) => stdout(JSON.stringify(value));
+
+  // Honour the same tool-group setting as the interactive UI.
+  setToolGroups(loadSettings().toolGroups as Parameters<typeof setToolGroups>[0]);
 
   if (options.cwd) {
     try {

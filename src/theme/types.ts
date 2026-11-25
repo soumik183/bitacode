@@ -7,6 +7,8 @@ export const THEME_NAMES = [
   'sand',
   'moss',
   'high-contrast',
+  /** Filled from a user theme file via registerCustomTheme(). */
+  'custom',
 ] as const;
 
 export type ThemeName = (typeof THEME_NAMES)[number];

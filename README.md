@@ -197,7 +197,7 @@ npm install
 npm run build        # compile to dist/ (tracked — commit after building)
 npm run dev          # run from source with tsx
 npm run typecheck    # tsc --noEmit
-npm test             # full suite (800+ tests)
+npm test             # full suite (current count is reported by CI)
 npm run lint         # eslint
 ```
 
@@ -220,7 +220,7 @@ git push && git push --tags
 
 ## Documentation & contributing
 
-Technical references live in the repo root: `SPEC.md` (behaviour) and `ARCHITECTURE.md` (module map).
+Technical references live in the repo root: `SPEC.md` (behaviour), `ARCHITECTURE.md` (module map), `NEW-FEATURES.md` (recent additions and settings), and `OPENCODE-GAP-ANALYSIS.md` (feature benchmark).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) to chip in. Security issues go to [SECURITY.md](SECURITY.md), not a public issue.
 

@@ -147,3 +147,21 @@ test('renders nothing for an empty item list', () => {
   const { text } = renderFrame({ items: [], selected: 0, columns: 80 });
   assert.equal(text, '');
 });
+
+test('a query shows a compact match-count line without growing the empty-query card', () => {
+  const items: PaletteItem[] = SLASH_COMMANDS.slice(0, 12).map((command) => ({
+    id: command.name,
+    label: command.name,
+    description: command.description,
+    section: command.category,
+  }));
+  const filtered = renderFrame({ items, selected: 0, columns: 80, query: 'cfg', emptyLabel: 'All commands' });
+  assert.match(filtered.text, /12 matches for "cfg"/, 'the count line reports the filtered total');
+  assert.ok(fitsWidth(filtered.text, filtered.columns), 'the count line respects the width helpers');
+
+  const plain = renderFrame({ items, selected: 0, columns: 80, emptyLabel: '' });
+  const empty = renderFrame({ items, selected: 0, columns: 80, emptyLabel: 'All commands' });
+  assert.match(empty.text, /All commands/, 'the empty-query label reuses the header row');
+  assert.equal(empty.text.split('\n').length, plain.text.split('\n').length, 'an empty query adds no row');
+  assert.doesNotMatch(empty.text, /matches for/, 'there is no count line without a query');
+});

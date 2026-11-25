@@ -86,19 +86,22 @@ const MIN_CHROME = 2.2;
 const MIN_ACCENT_DISTANCE = 60;
 
 /**
- * Audit one palette against the surfaces it is actually used on. Borders and
- * dim text are compared against both `bg` and `surface` because dialogs paint
- * `surface` behind most captions.
+ * Audit one palette against the surfaces it is actually used on. Body text is
+ * compared against `bg`, `surface` and `surfaceAlt` because code blocks and
+ * dialogs paint those surfaces behind the same roles; borders and dim text are
+ * compared against `bg` and `surface`.
  */
 export function auditTheme(theme: Theme): ThemeAudit {
   const issues: ThemeAuditIssue[] = [];
   let minTextRatio = Number.POSITIVE_INFINITY;
 
   for (const key of TEXT_KEYS) {
-    const ratio = contrastRatio(theme[key], theme.bg);
-    minTextRatio = Math.min(minTextRatio, ratio);
     const required = key === 'placeholder' ? MIN_CHROME + 0.8 : MIN_TEXT;
-    if (ratio < required) issues.push({ pair: `${key} on bg`, ratio, required });
+    for (const surface of ['bg', 'surface', 'surfaceAlt'] as const) {
+      const ratio = contrastRatio(theme[key], theme[surface]);
+      minTextRatio = Math.min(minTextRatio, ratio);
+      if (ratio < required) issues.push({ pair: `${key} on ${surface}`, ratio, required });
+    }
   }
 
   for (const key of ['border', 'dim'] as const) {

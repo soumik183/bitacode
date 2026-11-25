@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text } from 'ink';
-import { useTheme } from '../theme.js';
+import { useTheme, type Theme } from '../theme.js';
 import { formatTokenCount } from '../utils/cost-tracker.js';
 import { STATUS_LINE_ITEMS, type StatusLineItem } from '../settings.js';
 
@@ -35,17 +35,32 @@ export interface UsageDisplayProps {
 const WAVE = '▁▂▃▄▅▆▇█▇▆▅▄▃▂▁';
 const WAVE_WIDTH = 10;
 const LEVELS = '▁▂▃▄▅▆▇█';
-// Dark → bright blue, so taller bars glow more.
-const LEVEL_COLORS = [
-  '#1e3a8a',
-  '#1d4ed8',
-  '#2563eb',
-  '#3b82f6',
-  '#60a5fa',
-  '#93c5fd',
-  '#bfdbfe',
-  '#e0f2fe',
-];
+/** Blend two theme colours; falls back to the nearer slot for named colours. */
+function mixColor(from: string, to: string, t: number): string {
+  const parse = (color: string): [number, number, number] | null => {
+    const match = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(String(color ?? '').trim());
+    if (!match) return null;
+    const hex = match[1].length === 3
+      ? match[1].split('').map((ch) => ch + ch).join('')
+      : match[1];
+    return [
+      parseInt(hex.slice(0, 2), 16),
+      parseInt(hex.slice(2, 4), 16),
+      parseInt(hex.slice(4, 6), 16),
+    ];
+  };
+  const a = parse(from);
+  const b = parse(to);
+  if (!a || !b) return t < 0.5 ? from : to;
+  return `#${a.map((value, i) => Math.round(value + (b[i] - value) * t).toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Low → high bars ramp from the theme's info slot to its accent slot. */
+function levelColors(theme: Theme): string[] {
+  return Array.from({ length: LEVELS.length }, (_, index) =>
+    mixColor(theme.info, theme.accent, index / Math.max(1, LEVELS.length - 1))
+  );
+}
 
 function wave(frame: number): string {
   const start = frame % WAVE.length;
@@ -96,6 +111,7 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   tps = null,
 }) => {
   const theme = useTheme();
+  const bars = levelColors(theme);
   // Prefer the real window + token count so the number and percentage always
   // agree; older events only carry a precomputed percentage, so fall back to it.
   const windowSize = contextWindow ?? 0;
@@ -119,7 +135,11 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
     rightParts.push(<Text key="ctx" color={theme.dim}>{context}</Text>);
   }
   if (!compact && show('cost') && totalCost > 0) {
-    rightParts.push(<Text key="cost" color={theme.dim}>{` · $${totalCost.toFixed(2)}`}</Text>);
+    rightParts.push(
+      <Text key="cost" color={theme.dim}>
+        {rightParts.length > 0 ? ` · $${totalCost.toFixed(2)}` : `$${totalCost.toFixed(2)}`}
+      </Text>
+    );
   }
 
   return (
@@ -138,7 +158,7 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
             {wave(frame)
               .split('')
               .map((bar, index) => (
-                <Text key={index} color={LEVEL_COLORS[LEVELS.indexOf(bar)]} bold>
+                <Text key={index} color={bars[LEVELS.indexOf(bar)] ?? theme.accent} bold>
                   {bar}
                 </Text>
               ))}

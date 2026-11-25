@@ -14,6 +14,7 @@ import { isNotification } from '../tools/notify.js';
 import { parseProgress } from '../tools/progress.js';
 import { WebSearchView, WebSearchErrorView } from '../components/WebSearchView.js';
 import { parseWebSearchResult } from './web-search-result.js';
+import { displayWidth } from './format-message.js';
 
 function parseArgs(args: string | Record<string, unknown> | undefined): Record<string, unknown> | null {
   if (!args) return null;
@@ -35,6 +36,22 @@ function codeHint(args: string | Record<string, unknown> | undefined): string | 
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return undefined;
+}
+
+/** One-line generic result, cut by display columns with a visible ellipsis. */
+function compactResultText(raw: string, maxColumns = 180): string {
+  const one = String(raw ?? '').replace(/\s+/g, ' ').trim();
+  if (displayWidth(one) <= maxColumns) return one;
+  const limit = Math.max(1, maxColumns - 1);
+  let used = 0;
+  let out = '';
+  for (const ch of one) {
+    const width = displayWidth(ch);
+    if (used + width > limit) break;
+    used += width;
+    out += ch;
+  }
+  return `${out}…`;
 }
 
 /** Only multi-line, clearly code-like results get a full code box. */
@@ -99,7 +116,7 @@ export function addToolResultView(
     const payload = parseWebSearchResult(rawResult);
     addStatic(payload
       ? <WebSearchView payload={payload} columns={columns} />
-      : <WebSearchErrorView message={rawResult} />);
+      : <WebSearchErrorView message={rawResult} columns={columns} />);
     return;
   }
 
@@ -156,7 +173,7 @@ export function addToolResultView(
     return;
   }
 
-  const compactResult = rawResult.replace(/\s+/g, ' ').trim().slice(0, 180);
+  const compactResult = compactResultText(rawResult);
   const isError = /^(Error\b|File not found\b|Operation cancelled\b)/i.test(rawResult.trim());
 
   addStatic(

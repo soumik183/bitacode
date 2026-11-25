@@ -8,6 +8,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
+import { displayWidth } from '../utils/format-message.js';
 import { LeftBar } from './LeftBar.js';
 import {
   parseWebSearchResult,
@@ -23,35 +24,54 @@ export interface WebSearchViewProps {
   columns?: number;
 }
 
-const MAX_RESOURCE_CHARS = 170;
-
 // The bar, its margin and the card padding take 4 columns; reserve a little
 // more slack so a zoomed-in frame never wraps a URL onto the next row.
 function contentWidth(columns?: number): number {
   return Math.max(1, (columns ?? 80) - 8);
 }
 
+/** Cut to a display-column budget so wide CJK/emoji cannot wrap the card. */
+function clipToWidth(text: string, width: number): string {
+  const limit = Math.max(1, Math.floor(width));
+  if (displayWidth(text) <= limit) return text;
+  let used = 0;
+  let out = '';
+  for (const ch of text) {
+    const w = displayWidth(ch);
+    if (used + w > limit) break;
+    used += w;
+    out += ch;
+  }
+  return out;
+}
+
 function shorten(url: string, width: number): string {
-  if (url.length <= width) return url;
-  const keep = Math.max(12, width - 1);
-  return `${url.slice(0, keep)}…`;
+  if (displayWidth(url) <= width) return url;
+  const keep = Math.max(1, width - 1);
+  return `${clipToWidth(url, keep)}…`;
 }
 
-function snippet(text: string): string {
+/** Snippets follow the frame width instead of a fixed 170-character cut. */
+function snippet(text: string, width: number): string {
   const one = text.replace(/\s+/g, ' ').trim();
-  return one.length <= MAX_RESOURCE_CHARS ? one : `${one.slice(0, MAX_RESOURCE_CHARS - 1)}…`;
+  const budget = Math.max(1, Math.floor(width) - 3); // indent for the snippet
+  if (displayWidth(one) <= budget) return one;
+  return `${clipToWidth(one, Math.max(1, budget - 1))}…`;
 }
 
-const ResourceRow: React.FC<{ resource: WebSearchResource; width: number; color: string }> = ({ resource, width, color }) => (
-  <Box flexDirection="column">
-    <Text color={color} wrap="truncate-end">
-      {`↗ ${shorten(resource.url, width)}`}
-    </Text>
-    {resource.text ? (
-      <Text color="muted" wrap="wrap">{`   ${snippet(resource.text)}`}</Text>
-    ) : null}
-  </Box>
-);
+const ResourceRow: React.FC<{ resource: WebSearchResource; width: number; color: string }> = ({ resource, width, color }) => {
+  const theme = useTheme();
+  return (
+    <Box flexDirection="column">
+      <Text color={color} wrap="truncate-end">
+        {`↗ ${shorten(resource.url, width)}`}
+      </Text>
+      {resource.text ? (
+        <Text color={theme.muted} wrap="truncate-end">{`   ${snippet(resource.text, width)}`}</Text>
+      ) : null}
+    </Box>
+  );
+};
 
 export const WebSearchView: React.FC<WebSearchViewProps> = ({ payload, maxResources = 24, columns }) => {
   const theme = useTheme();
@@ -103,14 +123,16 @@ export const WebSearchView: React.FC<WebSearchViewProps> = ({ payload, maxResour
 };
 
 /** A short, tidy card for cases where the search never produced a payload. */
-export const WebSearchErrorView: React.FC<{ message: string; columns?: number }> = ({ message }) => {
+export const WebSearchErrorView: React.FC<{ message: string; columns?: number }> = ({ message, columns }) => {
   const theme = useTheme();
+  const width = contentWidth(columns);
+  const text = message.replace(/^Error:\s*/i, '');
   return (
     <Box paddingX={2} marginBottom={1}>
       <LeftBar color={theme.error}>
         <Box flexDirection="column">
           <Text color={theme.error} bold wrap="truncate-end">{'✗ Web search'}</Text>
-          <Text color={theme.muted} wrap="truncate-end">{message.replace(/^Error:\s*/i, '')}</Text>
+          <Text color={theme.muted} wrap="truncate-end">{clipToWidth(text, width)}</Text>
         </Box>
       </LeftBar>
     </Box>

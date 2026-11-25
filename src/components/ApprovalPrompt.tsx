@@ -54,11 +54,16 @@ export const ApprovalPrompt: React.FC<ApprovalPromptProps> = ({
   const showNumbers = cols >= 28;
   // LeftBar gutter (2) + Select pointer/padding (2) + the "1. " number prefix.
   const labelWidth = Math.max(1, cols - 4 - (showNumbers ? 3 : 0));
+  // On a very short terminal the three-option list cannot fit; fold it into a
+  // single numbered row so the command/path being approved stays visible.
+  const tinyOptions = height <= 4;
+  const optionRows = tinyOptions ? 1 : OPTIONS.length;
   const showHint = !embedded && height >= 5;
-  // Header + three options + hint are fixed; the remainder is the detail budget.
+  // Header + options + hint are fixed; the detail area always gets at least
+  // one row, otherwise short terminals hid the only line that matters.
   const detailRows = Math.max(
-    0,
-    Math.min(compact ? 1 : 2, height - 1 - OPTIONS.length - (showHint ? 1 : 0))
+    1,
+    Math.min(compact ? 1 : 2, height - 1 - optionRows - (showHint ? 1 : 0))
   );
   const detailWidth = Math.max(1, cols - 2);
   const description = request.description.replace(/\s+/g, ' ').trim();
@@ -103,13 +108,25 @@ export const ApprovalPrompt: React.FC<ApprovalPromptProps> = ({
             {line}
           </Text>
         ))}
-        <Select
-          options={OPTIONS.map((option, index) => ({
-            value: option.value,
-            label: `${showNumbers ? `${index + 1}. ` : ''}${fit(option.label, labelWidth)}`,
-          }))}
-          onChange={(value) => respond(value as ApprovalResponse)}
-        />
+        {tinyOptions ? (
+          <Text color={theme.muted} wrap="truncate-end">
+            {OPTIONS.map((option, index) => (
+              <React.Fragment key={option.value}>
+                {index > 0 ? <Text color={theme.dim}>{' · '}</Text> : null}
+                <Text color={theme.accent}>{`${index + 1}.`}</Text>
+                <Text>{` ${fit(option.label, Math.max(1, Math.floor(cols / 3) - 2))}`}</Text>
+              </React.Fragment>
+            ))}
+          </Text>
+        ) : (
+          <Select
+            options={OPTIONS.map((option, index) => ({
+              value: option.value,
+              label: `${showNumbers ? `${index + 1}. ` : ''}${fit(option.label, labelWidth)}`,
+            }))}
+            onChange={(value) => respond(value as ApprovalResponse)}
+          />
+        )}
         {showHint && (
           <Text color={theme.dim} wrap="truncate-end">{hint}</Text>
         )}

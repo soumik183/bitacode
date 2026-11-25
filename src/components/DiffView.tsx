@@ -3,6 +3,7 @@ import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
 import type { Theme } from '../theme.js';
 import { annotateDiff, displayFilePath, type DiffLine } from '../utils/file-diff.js';
+import { diffWords, type WordSegment } from '../utils/word-diff.js';
 
 export interface DiffViewProps {
   header: string;
@@ -17,6 +18,8 @@ export interface DiffViewProps {
   expanded?: boolean;
   /** Per-file diffs; when present these are rendered under their own headers. */
   entries?: Array<{ filePath?: string; header: string; diff: string }>;
+  /** Bold the words that actually changed inside paired remove/add rows. */
+  wordHighlight?: boolean;
 }
 
 /** Safety ceiling for a collapsed diff; kept as the public export for callers. */
@@ -45,9 +48,47 @@ const signFor = (kind: DiffLine['kind']): string =>
   kind === 'add' ? '+' : kind === 'remove' ? '-' : ' ';
 
 /**
+ * Pair each run of removed rows with the following run of added rows (by
+ * position in the run) and remember which words changed on each side. Rows
+ * that are not part of such a pair keep their plain, single-colour rendering.
+ */
+function highlightChangedWords(lines: DiffLine[]): Map<DiffLine, WordSegment[]> {
+  const highlights = new Map<DiffLine, WordSegment[]>();
+  let index = 0;
+  while (index < lines.length) {
+    if (lines[index]!.kind !== 'remove') {
+      index++;
+      continue;
+    }
+    const removeStart = index;
+    while (index < lines.length && lines[index]!.kind === 'remove') index++;
+    const removeEnd = index;
+    const addStart = index;
+    while (index < lines.length && lines[index]!.kind === 'add') index++;
+    const pairs = Math.min(removeEnd - removeStart, index - addStart);
+    for (let offset = 0; offset < pairs; offset++) {
+      const removed = lines[removeStart + offset]!;
+      const added = lines[addStart + offset]!;
+      const { old, new: next } = diffWords(removed.text, added.text);
+      if (old.length > 0) highlights.set(removed, old);
+      if (next.length > 0) highlights.set(added, next);
+    }
+  }
+  return highlights;
+}
+
+/** Nested Text nodes keep the row's colour; only changed words get bold. */
+function renderWordSegments(segments: WordSegment[]): React.ReactNode {
+  return segments.map((segment, index) => (
+    <Text key={index} bold={segment.changed}>{segment.text}</Text>
+  ));
+}
+
+/**
  * Professional unified-diff card: two line-number gutters, a continuous side
- * rule, and one flat colour per row (red removals, green additions). All lines
- * render by default; only a generous ceiling clips an unusually large patch.
+ * rule, and one flat colour per row (red removals, green additions) with bold
+ * on the words that changed between paired remove/add rows. All lines render
+ * by default; only a generous ceiling clips an unusually large patch.
  */
 export const DiffView: React.FC<DiffViewProps> = ({
   header,
@@ -57,6 +98,7 @@ export const DiffView: React.FC<DiffViewProps> = ({
   maxRows,
   expanded = false,
   entries,
+  wordHighlight = true,
 }) => {
   const theme = useTheme();
   const files = React.useMemo(() => {
@@ -87,7 +129,11 @@ export const DiffView: React.FC<DiffViewProps> = ({
   const renderedFiles = files.map((file) => {
     const visible = file.lines.slice(0, Math.max(0, remaining));
     remaining -= visible.length;
-    return { ...file, visible };
+    return {
+      ...file,
+      visible,
+      highlights: wordHighlight ? highlightChangedWords(visible) : new Map<DiffLine, WordSegment[]>(),
+    };
   });
   const shownCount = renderedFiles.reduce((total, file) => total + file.visible.length, 0);
   const hidden = Math.max(0, totalLines - shownCount);
@@ -150,13 +196,14 @@ export const DiffView: React.FC<DiffViewProps> = ({
           {files.length > 1 && row(`file-${fileIndex}`, blank, blank, ' ', theme.info, `▸ ${file.label}`)}
           {file.visible.map((diffLine) => {
             const numbers = gutterNumbers(diffLine.kind, diffLine.number, gutter);
+            const segments = file.highlights.get(diffLine);
             return row(
               `line-${key++}`,
               numbers.old,
               numbers.next,
               signFor(diffLine.kind),
               lineColor(diffLine.kind, theme),
-              diffLine.text
+              segments && segments.length > 0 ? renderWordSegments(segments) : diffLine.text
             );
           })}
         </React.Fragment>

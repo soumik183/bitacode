@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useMemo } from 'react';
 import type { Theme } from './types.js';
-import { getTheme } from './palettes.js';
+import { customThemeVersion, getTheme } from './palettes.js';
 
 const ThemeContext = createContext<Theme | null>(null);
 
@@ -16,7 +16,10 @@ export interface ThemeProviderProps {
  * mutating a module-level object during render.
  */
 export const ThemeProvider: React.FC<ThemeProviderProps> = ({ name, children }) => {
-  const palette = useMemo(() => getTheme(name), [name]);
+  // `customThemeVersion` is a live ESM binding: registering a theme after the
+  // first render changes the memo key, so the next provider render resolves the
+  // new palette instead of keeping the placeholder captured on mount.
+  const palette = useMemo(() => getTheme(name), [name, customThemeVersion]);
   return <ThemeContext.Provider value={palette}>{children}</ThemeContext.Provider>;
 };
 

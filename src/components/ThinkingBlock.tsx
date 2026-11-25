@@ -51,6 +51,40 @@ export function clipToPreview(
   return { shown, hiddenChars: preview.length - shown.length };
 }
 
+/** Character cap for a single expanded reasoning preview. */
+const THINKING_MAX_CHARS = 4000;
+
+/** Content rows (preview + optional hidden-chars footer) for a given terminal height. */
+export function thinkingContentRows(rows: number): number {
+  const value = Number.isFinite(rows) ? Math.floor(rows) : 24;
+  // header + marginTop + footer + marginBottom stay outside the content budget.
+  return Math.max(1, value - 4);
+}
+
+/**
+ * The exact clip both the renderer and the height estimator use. When anything
+ * is hidden, one row of the budget is reserved for the "more chars" footer.
+ */
+export function clipThinkingForRows(
+  text: string,
+  width: number,
+  rows: number
+): { shown: string; hiddenChars: number } {
+  const budget = thinkingContentRows(rows);
+  const full = clipToPreview(text, width, budget, THINKING_MAX_CHARS);
+  if (full.hiddenChars <= 0) return full;
+  const fit = clipToPreview(text, width, Math.max(1, budget - 1), THINKING_MAX_CHARS);
+  return { shown: fit.shown, hiddenChars: full.hiddenChars };
+}
+
+/** Wrapped rows the clipped preview actually paints (same rule as clipToPreview). */
+function clippedRows(shown: string, width: number): number {
+  return shown.split('\n').reduce(
+    (sum, line) => sum + Math.max(1, Math.ceil(Math.max(1, line.length) / Math.max(1, width))),
+    0
+  );
+}
+
 /**
  * Upper bound on the rows the thinking block occupies, including its bottom
  * margin. Used by App to size the live area and to hit-test clicks.
@@ -61,23 +95,17 @@ export function thinkingBlockHeight(
   text: string,
   expanded: boolean,
   columns: number,
-  _rows: number
+  rows: number
 ): number {
   const hasText = text.trim().length > 0;
   // The component renders nothing at all without reasoning text.
   if (!hasText) return 0;
   const width = Math.max(1, columns - 6);
-  // Collapsed: header + the first reasoning line + bottom margin.
-  if (!expanded) {
-    const first = text.trim().split('\n')[0] ?? '';
-    const firstRows = Math.max(1, Math.ceil(Math.max(1, first.length) / width));
-    return 1 + firstRows + 1;
-  }
-  // Expanded: every line is shown, so count all wrapped rows.
-  const contentRows = text.trim().split('\n').reduce(
-    (total, line) => total + Math.max(1, Math.ceil(Math.max(1, line.length) / width)),
-    0
-  );
+  // Collapsed: header + one truncated preview line + bottom margin.
+  if (!expanded) return 3;
+  // Expanded: count exactly what the clipped render paints (plus its footer).
+  const clip = clipThinkingForRows(text.trim(), width, rows);
+  const contentRows = Math.max(1, clippedRows(clip.shown, width)) + (clip.hiddenChars > 0 ? 1 : 0);
   // header + marginTop(1) + content + marginBottom(1)
   return 1 + 1 + contentRows + 1;
 }
@@ -97,7 +125,7 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   animate,
   frame,
   columns,
-  rows: _rows,
+  rows,
   elapsedMs = 0,
 }) => {
   const theme = useTheme();
@@ -114,6 +142,9 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
   const shownFirst = firstLine.length > contentWidth
     ? `${firstLine.slice(0, Math.max(1, contentWidth - 1))}…`
     : firstLine;
+  // Expanded reasoning must fit the same budget the host reserves via
+  // thinkingBlockHeight; the old full-text render silently overflowed it.
+  const clipped = expanded ? clipThinkingForRows(text.trim(), contentWidth, rows) : null;
 
   const hint = hasText
     ? `${expanded ? 'click to collapse' : 'click to expand'} · ctrl+t`
@@ -137,10 +168,15 @@ export const ThinkingBlock: React.FC<ThinkingBlockProps> = ({
         </Box>
       )}
 
-      {expanded && hasText && (
+      {expanded && hasText && clipped && (
         <Box paddingLeft={2} marginTop={1}>
-          <Text color={theme.muted} wrap="wrap">{text.trim()}</Text>
+          <Text color={theme.muted} wrap="wrap">{clipped.shown}</Text>
         </Box>
+      )}
+      {expanded && hasText && clipped && clipped.hiddenChars > 0 && (
+        <Text color={theme.dim} wrap="truncate-end">
+          {`  … ${clipped.hiddenChars} more chars`}
+        </Text>
       )}
     </Box>
   );

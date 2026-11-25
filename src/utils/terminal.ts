@@ -34,6 +34,12 @@ export interface ProfileInputs {
   env?: NodeJS.ProcessEnv;
   /** From settings; false wins over detection. */
   animationsEnabled?: boolean;
+  /**
+   * Whether stdout is an interactive TTY. Defaults to `process.stdout.isTTY`
+   * so existing callers keep their behaviour. CI only degrades the profile
+   * when output is piped; CI with an interactive TTY must not force dumb mode.
+   */
+  isTTY?: boolean;
 }
 
 const ALWAYS_UNSTABLE = new Set(['Apple_Terminal', 'Terminal.app']);
@@ -43,7 +49,9 @@ export function detectTerminalProfile(inputs: ProfileInputs = {}): TerminalProfi
   const term = (env.TERM ?? '').toLowerCase();
   const program = env.TERM_PROGRAM ?? '';
   const tmux = Boolean(env.TMUX) || (env.TERM ?? '').toLowerCase().startsWith('screen');
-  const dumb = term === 'dumb' || term === '' || Boolean(env.CI && env.CI !== 'false');
+  const isTTY = inputs.isTTY ?? Boolean(process.stdout?.isTTY);
+  const ci = Boolean(env.CI && env.CI !== 'false');
+  const dumb = term === 'dumb' || term === '' || (ci && !isTTY);
 
   let colorDepth = 16;
   if (term.includes('truecolor') || term.includes('24bit') || /truecolor|24bit/i.test(env.COLORTERM ?? '')) colorDepth = 16_777_216;

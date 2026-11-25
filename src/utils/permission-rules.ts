@@ -21,6 +21,7 @@
  */
 
 import path from 'node:path';
+import { scanShell } from './shell-scan.js';
 
 export type PermissionDecision = 'allow' | 'ask' | 'deny';
 
@@ -331,6 +332,20 @@ export function evaluatePermission(set: PermissionRuleSet | undefined, call: Per
   }
   for (const rule of set.allow) {
     if (ruleMatches(rule, call, candidates)) {
+      // A text match on `git status` must never silently approve
+      // `git status && rm -rf .` or `git status $(payload)`. Shell structure is
+      // checked before an allow rule can grant access.
+      for (const command of candidates.commands) {
+        const scan = scanShell(command);
+        if (scan.risk === 'high' || scan.hasSubstitution) {
+          return {
+            decision: 'ask',
+            source: 'ask',
+            rule: rule.raw,
+            warning: `shell allow-rule blocked by command structure: ${scan.reasons.join('; ') || 'high risk'}`,
+          };
+        }
+      }
       return { decision: 'allow', source: 'allow', rule: rule.raw, warning: rule.error };
     }
   }

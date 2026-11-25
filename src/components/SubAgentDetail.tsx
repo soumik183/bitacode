@@ -9,7 +9,7 @@ import React from 'react';
 import { Box, Text, useInput } from 'ink';
 import { useTheme, type Theme } from '../theme.js';
 import type { SubAgentMessage, SubAgentRunRecord } from '../utils/subagent-store.js';
-import { renderFormattedText } from '../utils/format-message.js';
+import { displayWidth, renderFormattedText } from '../utils/format-message.js';
 import { dialogWidth, dialogInnerWidth, HintLine } from './Dialog.js';
 import { scrollbarGeometry, scrollbarLines, SCROLLBAR_THUMB } from '../utils/scrollbar.js';
 
@@ -41,13 +41,19 @@ const MAX_ARG_CHARS = 120;
 const MAX_PATH_ARG_CHARS = 240;
 const GAP = 1;
 const HINT = '↑↓ scroll · pgup/pgdn page · s system · r results · esc back';
+const SHORT_HINT = '↑↓ · pgup/pgdn · s · r · esc';
+
+/** Keep the legend on one row inside narrow dialogs. */
+function hintForWidth(width: number): string {
+  return width >= 56 ? HINT : SHORT_HINT;
+}
 
 /** Rough row count for plain text at a given width (used to budget the window). */
 function estimateRows(text: string, width: number): number {
   const w = Math.max(1, Math.floor(width));
   return String(text ?? '')
     .split('\n')
-    .reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / w)), 0);
+    .reduce((sum, line) => sum + Math.max(1, Math.ceil(displayWidth(line) / w)), 0);
 }
 
 /** Fenced code and tables paint a couple of extra chrome rows per block. */
@@ -401,7 +407,11 @@ export const SubAgentDetail: React.FC<SubAgentDetailProps> = ({ record, columns,
             <Text color={theme.text} wrap="truncate-end">{` ${record.task}`}</Text>
           </Box>
           <Box flexShrink={0} marginLeft={1}><Text color={theme.dim}>{idShort}</Text></Box>
-          <Box flexShrink={0} marginLeft={1}><Text color={theme.muted}>{`${record.messageCount} msgs`}</Text></Box>
+          <Box flexShrink={0} marginLeft={1}>
+            <Text color={theme.muted}>
+              {`${record.messageCount} msg${record.messageCount === 1 ? '' : 's'}`}
+            </Text>
+          </Box>
         </Box>
         {!compact ? (
           <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
@@ -450,7 +460,7 @@ export const SubAgentDetail: React.FC<SubAgentDetailProps> = ({ record, columns,
       {!compact ? <Text color={theme.border} wrap="truncate-end">{rule}</Text> : null}
 
       <Box flexShrink={0}>
-        <HintLine hint={HINT} compact={compact} />
+        <HintLine hint={hintForWidth(innerWidth)} compact={compact} />
       </Box>
     </Box>
   );

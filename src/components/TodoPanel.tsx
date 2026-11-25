@@ -129,7 +129,7 @@ export const TodoPanel: React.FC<TodoPanelProps> = ({ todos, columns, maxVisible
         const running = todo.status === 'in_progress';
         const chip = PRIORITY_CHIP[todo.priority] ?? PRIORITY_CHIP.low;
         return (
-          <Box key={`${todo.id}-${start + index}`} flexDirection="row">
+          <Box key={todo.id} flexDirection="row">
             <Text color={running ? theme.accent : theme.border}>{running ? '▌' : ' '}</Text>
             <Text color={theme[chip.key]}>{`${chip.label} `}</Text>
             <Text color={theme[STATUS_COLOR_KEY[todo.status]]}>{`${STATUS_ICON[todo.status]} `}</Text>

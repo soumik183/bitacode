@@ -42,33 +42,31 @@ export const MAX_HIGHLIGHT_CHARS = 200_000;
 
 /**
  * Syntax colour slots. The cached tokenizer stores slot names rather than
- * resolved hex, so one compiled regex can serve every palette; slots are mapped
- * to the caller's palette at tokenize time. Three legacy syntax colours stay
- * fixed because they are not part of the 15-key Theme type.
+ * resolved hex, so one compiled regex can serve every palette; every slot is
+ * mapped to the caller's palette at tokenize time. No fixed dark-theme hex is
+ * kept — keys, numbers and calls now use the same theme slots as other tokens,
+ * which keeps light palettes readable.
  */
 type ColorSlot =
   | 'comment' | 'string' | 'key' | 'keyword' | 'literal'
   | 'number' | 'fn' | 'heading' | 'add' | 'remove' | 'hunk';
 
-const PALETTE_SLOT: Record<Exclude<ColorSlot, 'key' | 'number' | 'fn'>, keyof Theme> = {
+const PALETTE_SLOT: Record<ColorSlot, keyof Theme> = {
   comment: 'dim',
   string: 'success',
+  key: 'info',
   keyword: 'accent',
   literal: 'info',
+  number: 'success',
+  fn: 'accent',
   heading: 'info',
   add: 'success',
   remove: 'error',
   hunk: 'info',
 };
 
-const FIXED_SLOT: Partial<Record<ColorSlot, string>> = {
-  key: '#9cdcfe',
-  number: '#b5cea8',
-  fn: '#dcdcaa',
-};
-
 function colorsFor(palette: Theme): Record<ColorSlot, string> {
-  const colors = { ...FIXED_SLOT } as Record<ColorSlot, string>;
+  const colors = {} as Record<ColorSlot, string>;
   for (const [slot, key] of Object.entries(PALETTE_SLOT)) {
     colors[slot as ColorSlot] = palette[key];
   }

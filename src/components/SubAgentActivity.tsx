@@ -5,6 +5,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { useTheme, type Theme } from '../theme.js';
+import { displayWidth } from '../utils/format-message.js';
 import { LeftBar } from './LeftBar.js';
 
 /** Persisted shape (mirrors SubAgentActivity in sessions.ts). */
@@ -116,6 +117,22 @@ function truncate(text: string, max: number): string {
   return `${one.slice(0, max - 1)}…`;
 }
 
+/** Cut the status tail to an exact display-column budget. */
+function fitTail(text: string, max: number): string {
+  if (max <= 0) return '';
+  if (displayWidth(text) <= max) return text;
+  const limit = Math.max(1, Math.floor(max) - 1);
+  let used = 0;
+  let out = '';
+  for (const ch of text) {
+    const width = displayWidth(ch);
+    if (used + width > limit) break;
+    used += width;
+    out += ch;
+  }
+  return `${out}…`;
+}
+
 function shortId(id: string): string {
   return id.length > 10 ? `${id.slice(0, 8)}…` : id;
 }
@@ -137,9 +154,11 @@ export const SubAgentActivity: React.FC<SubAgentActivityProps> = ({ activities, 
   if (activities.length === 0) return null;
   const visible = activities.slice(-SUB_AGENT_MAX_VISIBLE);
   const nowMs = now ?? Date.now();
-  const labelWidth = 10;
-  const tailWidth = 18; // "  N tools · 1.2s"
-  const taskWidth = Math.max(1, columns - 6 - labelWidth - tailWidth);
+  const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+  // Exact fixed costs per item row: outer padding (4), LeftBar bar + gap (2),
+  // status icon + space, id + space, optional badge, and the status tail.
+  const fixedOverhead = 6;
+  const minTaskWidth = 8;
 
   return (
     <Box paddingX={2}>
@@ -155,15 +174,24 @@ export const SubAgentActivity: React.FC<SubAgentActivityProps> = ({ activities, 
             </Box>
           </Box>
           {visible.map((item) => {
-            const badge = item.agentType ? `[${item.agentType}]` : '';
-            const rowTaskWidth = Math.max(1, taskWidth - (badge ? badge.length + 1 : 0));
+            const badge = item.agentType ? `[${item.agentType}] ` : '';
+            const icon = `${STATUS_ICON[item.status]} `;
+            const id = `${shortId(item.id)} `;
+            const usedWithoutTail = fixedOverhead + displayWidth(icon) + displayWidth(id) + displayWidth(badge);
+            const tail = fitTail(
+              `  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}`,
+              Math.max(0, cols - usedWithoutTail - minTaskWidth)
+            );
+            // Derive the task field from what was actually painted, not from a
+            // guessed 34-column reservation that overflowed narrow screens.
+            const rowTaskWidth = Math.max(1, cols - usedWithoutTail - displayWidth(tail));
             return (
               <Box key={item.id} flexDirection="row">
-                <Text color={theme[STATUS_COLOR_KEY[item.status]]}>{`${STATUS_ICON[item.status]} `}</Text>
-                <Text color={theme.dim} wrap="truncate-end">{`${shortId(item.id)} `}</Text>
-                {badge ? <Text color={theme.accent} wrap="truncate-end">{`${badge} `}</Text> : null}
+                <Text color={theme[STATUS_COLOR_KEY[item.status]]}>{icon}</Text>
+                <Text color={theme.dim} wrap="truncate-end">{id}</Text>
+                {badge ? <Text color={theme.accent} wrap="truncate-end">{badge}</Text> : null}
                 <Text color={theme.text} wrap="truncate-end">{truncate(item.task, rowTaskWidth)}</Text>
-                <Text color={theme.dim} wrap="truncate-end">{`  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}`}</Text>
+                <Text color={theme.dim} wrap="truncate-end">{tail}</Text>
               </Box>
             );
           })}

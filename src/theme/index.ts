@@ -3,7 +3,7 @@ import type { Theme } from './types.js';
 
 export { THEME_NAMES } from './types.js';
 export type { Theme, ThemeName } from './types.js';
-export { themes, getTheme } from './palettes.js';
+export { themes, getTheme, registerCustomTheme, customThemes } from './palettes.js';
 export { ThemeProvider, useTheme } from './context.js';
 export type { ThemeProviderProps } from './context.js';
 

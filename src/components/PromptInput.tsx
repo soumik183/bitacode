@@ -571,7 +571,10 @@ export const PromptInput: React.FC<PromptInputProps> = ({
     onRowsChange?.(totalRows);
   }, [totalRows, onRowsChange]);
 
-  const popupWidth = Math.max(24, Math.min(displayWidth > 1000 ? 64 : displayWidth, 64));
+  // Never force a 24-column popup onto a narrower screen; use the space there
+  // is and shorten the legend when it cannot fit.
+  const popupWidth = Math.max(1, Math.min(displayWidth, 64));
+  const shortPopupHints = popupWidth < 32;
   const rule = '─'.repeat(Math.max(1, popupWidth - 4));
   const kindIcon: Record<MentionCandidate['kind'], string> = {
     file: '▤', directory: '▸', skill: '◈',
@@ -618,7 +621,10 @@ export const PromptInput: React.FC<PromptInputProps> = ({
   };
 
   const fieldNode = !value ? (
-    <Text color={theme.placeholder} wrap="truncate-end">{placeholder}</Text>
+    <Text color={theme.placeholder} wrap="truncate-end">
+      {placeholder}
+      <Text inverse>{'▏'}</Text>
+    </Text>
   ) : (
     <Text color={theme.text} wrap="truncate-end">
       {windowLines.map((line, index) => {
@@ -651,7 +657,9 @@ export const PromptInput: React.FC<PromptInputProps> = ({
       <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
         <Text color={theme.accent} bold wrap="truncate-end">{'◈ Reference'}</Text>
         <Text color={theme.dim} wrap="truncate-end">
-          {`${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ move · end skills · enter · esc`}
+          {shortPopupHints
+            ? `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ · ↵ · esc`
+            : `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ move · end skills · enter · esc`}
         </Text>
       </Box>
       <Text color={theme.border} wrap="truncate-end">{rule}</Text>
