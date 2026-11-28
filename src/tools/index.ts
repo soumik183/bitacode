@@ -83,6 +83,7 @@ import {
   memoryForgetTool, memoryForget,
   verifyProjectTool, verifyProject,
 } from './memory-tools.js';
+import { secretScanTool, secretScan } from './secret-scan.js';
 
 export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
 export { setFormHandler, clearFormHandler, hasFormHandler } from './form.js';
@@ -181,6 +182,7 @@ export const tools = [
   memoryListTool,
   memoryForgetTool,
   verifyProjectTool,
+  secretScanTool,
 ];
 
 export type DynamicTool = {
@@ -210,7 +212,43 @@ export function clearDynamicTools(): void {
 }
 
 export function getAllTools() {
-  return [...tools, ...dynamicTools];
+  const all = [...tools, ...dynamicTools];
+  return toolFilter ? all.filter((tool) => isToolAllowed(tool.function.name)) : all;
+}
+
+/**
+ * Optional per-process tool filter. Headless CI runs use it to expose only an
+ * allowlist (or hide a denylist) without changing the agent loop.
+ */
+export interface ToolFilter {
+  allow?: string[];
+  deny?: string[];
+}
+
+let toolFilter: ToolFilter | null = null;
+
+export function setToolFilter(filter: ToolFilter | null): void {
+  if (!filter) {
+    toolFilter = null;
+    return;
+  }
+  const allow = (filter.allow ?? []).map((name) => name.trim()).filter(Boolean);
+  const deny = (filter.deny ?? []).map((name) => name.trim()).filter(Boolean);
+  toolFilter = allow.length === 0 && deny.length === 0
+    ? null
+    : { ...(allow.length > 0 ? { allow } : {}), ...(deny.length > 0 ? { deny } : {}) };
+}
+
+export function clearToolFilter(): void {
+  toolFilter = null;
+}
+
+/** Exported for tests and for the loop's sub_agent special case. */
+export function isToolAllowed(name: string): boolean {
+  if (!toolFilter) return true;
+  if (toolFilter.deny?.includes(name)) return false;
+  if (toolFilter.allow && toolFilter.allow.length > 0) return toolFilter.allow.includes(name);
+  return true;
 }
 
 /**
@@ -385,6 +423,10 @@ const TOOL_ARGS: Record<string, ArgSpec[]> = {
   update_working_checkpoint: [{ canonical: 'content', aliases: [], required: true }],
   memory_add: [{ canonical: 'text', aliases: [], required: true }],
   memory_forget: [{ canonical: 'target', aliases: [], required: true }],
+  secret_scan: [
+    { canonical: 'path', aliases: ['file_path', 'directory', 'dir'] },
+    { canonical: 'text', aliases: ['content'] },
+  ],
   // Aliases — same specs as the canonical tool they delegate to.
   grep: [S.searchTerm, S.directory],
   search_text: [S.searchTerm, S.directory],
@@ -500,6 +542,9 @@ export const TOOL_NAME_ALIASES: ReadonlySet<string> = new Set([
 ]);
 
 export async function handleToolCall(toolName: string, args: any, context: ToolCallContext = {}): Promise<string> {
+  if (!isToolAllowed(toolName)) {
+    return `Error: tool "${toolName}" is disabled for this run (tool filter).`;
+  }
   if (planMode && MUTATING_TOOLS.has(toolName)) {
     return `Error: ${toolName} is blocked in plan mode. Press Tab to switch to build mode.`;
   }
@@ -690,6 +735,8 @@ async function dispatchToolCall(toolName: string, rawArgs: any, context: ToolCal
       return await memoryForget(args);
     case 'verify_project':
       return await verifyProject(args);
+    case 'secret_scan':
+      return await secretScan(args);
 
     // ── Aliases for common tool names (same implementation, friendly names) ──
     // Args are normalized above, so alias-style keys arrive under canonical names.

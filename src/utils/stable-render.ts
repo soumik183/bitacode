@@ -150,7 +150,6 @@ export function installTerminalRestore(
     const byEmitter = activeTerminalRestore.get(stdout);
     if (byEmitter?.get(emitter) === dispose) {
       byEmitter.delete(emitter);
-      if (byEmitter.size === 0) activeTerminalRestore.delete(stdout);
     }
   };
   let byEmitter = activeTerminalRestore.get(stdout);

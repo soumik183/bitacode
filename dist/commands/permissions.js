@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { loadSettings } from '../settings.js';
-import { describeRuleSet, mergeRuleSets, parseRuleSet, } from '../utils/permission-rules.js';
+import { describeRuleSet, evaluatePermission, matchRules, mergeRuleSets, parseRuleSet, } from '../utils/permission-rules.js';
 import { canonicalProjectPath, isProjectTrusted, listTrustedProjects, trustProject, untrustProject, } from '../utils/project-trust.js';
 function projectRulesPath(cwd) {
     return path.join(cwd, '.bitacode', 'permissions.json');
@@ -40,11 +40,70 @@ export function loadEffectiveRules(cwd) {
         };
     }
 }
+function buildTestCall(tool, argument, cwd) {
+    const args = {};
+    if (argument) {
+        if (/^(bash|shell|terminal|run|start_process|background|watch)$/i.test(tool))
+            args.command = argument;
+        else if (/^(webfetch|fetch_url|open_url|web_search|websearch)$/i.test(tool))
+            args.url = argument;
+        else
+            args.file_path = argument;
+    }
+    return { tool, args, cwd };
+}
 export function runPermissionsCommand(args, options = {}) {
     const cwd = options.cwd ?? process.cwd();
     const write = options.write ?? ((line) => process.stdout.write(`${line}\n`));
     const sub = (args[0] ?? 'show').toLowerCase();
     switch (sub) {
+        case 'test': {
+            const tool = args[1]?.trim();
+            if (!tool) {
+                write('Usage: bitacode permissions test <tool> [argument]');
+                return 1;
+            }
+            const argument = args.slice(2).join(' ').trim();
+            const { rules, projectLoaded, projectError } = loadEffectiveRules(cwd);
+            const call = buildTestCall(tool, argument, cwd);
+            const evaluation = evaluatePermission(rules, call);
+            const matches = matchRules(rules, call);
+            if (options.json) {
+                write(JSON.stringify({
+                    tool,
+                    argument: argument || null,
+                    decision: evaluation.decision,
+                    source: evaluation.source ?? null,
+                    rule: evaluation.rule ?? null,
+                    warning: evaluation.warning ?? null,
+                    matches: {
+                        deny: matches.deny.map((rule) => rule.raw),
+                        ask: matches.ask.map((rule) => rule.raw),
+                        allow: matches.allow.map((rule) => rule.raw),
+                    },
+                    projectRulesLoaded: projectLoaded,
+                    projectError: projectError ?? null,
+                }));
+                return 0;
+            }
+            write(`tool: ${tool}${argument ? ` (${argument})` : ''}`);
+            write(`decision: ${evaluation.decision}${evaluation.rule ? `  [matched: ${evaluation.rule}]` : ''}`);
+            if (evaluation.warning)
+                write(`warning: ${evaluation.warning}`);
+            const bucket = (label, entries) => {
+                if (entries.length === 0)
+                    return;
+                write(`${label}:`);
+                for (const entry of entries)
+                    write(`  ${entry.raw}`);
+            };
+            bucket('matched deny', matches.deny);
+            bucket('matched ask', matches.ask);
+            bucket('matched allow', matches.allow);
+            if (projectError)
+                write(`! ${projectError}`);
+            return 0;
+        }
         case 'trust': {
             const target = args[1] ?? cwd;
             const canonical = trustProject(target);

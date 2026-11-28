@@ -13,6 +13,7 @@ import { isNotification } from '../tools/notify.js';
 import { parseProgress } from '../tools/progress.js';
 import { WebSearchView, WebSearchErrorView } from '../components/WebSearchView.js';
 import { parseWebSearchResult } from './web-search-result.js';
+import { displayWidth } from './format-message.js';
 function parseArgs(args) {
     if (!args)
         return null;
@@ -37,6 +38,23 @@ function codeHint(args) {
             return value.trim();
     }
     return undefined;
+}
+/** One-line generic result, cut by display columns with a visible ellipsis. */
+function compactResultText(raw, maxColumns = 180) {
+    const one = String(raw ?? '').replace(/\s+/g, ' ').trim();
+    if (displayWidth(one) <= maxColumns)
+        return one;
+    const limit = Math.max(1, maxColumns - 1);
+    let used = 0;
+    let out = '';
+    for (const ch of one) {
+        const width = displayWidth(ch);
+        if (used + width > limit)
+            break;
+        used += width;
+        out += ch;
+    }
+    return `${out}…`;
 }
 /** Only multi-line, clearly code-like results get a full code box. */
 function looksLikeCode(text) {
@@ -80,7 +98,7 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
         const payload = parseWebSearchResult(rawResult);
         addStatic(payload
             ? _jsx(WebSearchView, { payload: payload, columns: columns })
-            : _jsx(WebSearchErrorView, { message: rawResult }));
+            : _jsx(WebSearchErrorView, { message: rawResult, columns: columns }));
         return;
     }
     const fileDiff = parseFileMutationDiff(toolName, toolArgs, rawResult);
@@ -118,7 +136,7 @@ export function addToolResultView(addStatic, toolName, toolArgs, rawResult, pale
         addStatic(_jsx(CodeBlock, { code: rawResult, language: code.language, filename: code.hint ? displayFilePath(code.hint) : undefined, showHeader: true, showLineNumbers: true, maxRows: 8 }));
         return;
     }
-    const compactResult = rawResult.replace(/\s+/g, ' ').trim().slice(0, 180);
+    const compactResult = compactResultText(rawResult);
     const isError = /^(Error\b|File not found\b|Operation cancelled\b)/i.test(rawResult.trim());
-    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? palette.error : undefined, dimColor: !isError, children: ['▶ ', _jsx(Text, { bold: true, children: formatToolLabel(toolName, toolArgs) }), ': ', compactResult] }) }));
+    addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsxs(Text, { color: isError ? palette.error : palette.dim, children: ['▶ ', _jsx(Text, { bold: true, color: isError ? palette.error : palette.accent, children: formatToolLabel(toolName, toolArgs) }), ': ', compactResult] }) }));
 }

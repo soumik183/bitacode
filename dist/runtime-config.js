@@ -5,6 +5,7 @@ import path from 'node:path';
 import { parse, printParseErrorCode } from 'jsonc-parser';
 import { z } from 'zod';
 import { logger } from './utils/logger.js';
+import { mergeLocalPresets } from './providers/local-presets.js';
 // ─── Zod Schemas for Runtime Validation ───
 export const RuntimeModelConfigSchema = z.object({
     name: z.string().optional(),
@@ -46,6 +47,8 @@ export const RuntimeConfigFileSchema = z.object({
     provider: z.string().optional(),
     model: z.string().optional(),
     providers: z.record(z.string(), z.any()).optional(),
+    /** Optional provider/model policy: { allowedModels, deniedModels, maxRetries }. */
+    providerPolicy: z.unknown().optional(),
     mcp: z.object({
         servers: z.record(z.string(), z.any()).optional(),
     }).optional(),
@@ -214,8 +217,15 @@ export async function loadRuntimeConfig(forceReload = false) {
             loaded = fileConfig;
         }
     }
-    runtimeConfigCache = loaded;
-    return loaded;
+    // Local servers are config-only presets: user/project definitions always win.
+    // mergeLocalPresets never throws, so a bad preset cannot break startup.
+    const providersWithPresets = mergeLocalPresets(loaded.providers ?? {});
+    const resolved = {
+        ...loaded,
+        providers: providersWithPresets,
+    };
+    runtimeConfigCache = resolved;
+    return resolved;
 }
 export function getRuntimeConfig() {
     return runtimeConfigCache || DEFAULT_RUNTIME_CONFIG;

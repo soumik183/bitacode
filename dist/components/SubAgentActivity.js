@@ -1,6 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
+import { displayWidth } from '../utils/format-message.js';
 import { LeftBar } from './LeftBar.js';
 export const SUB_AGENT_MAX_VISIBLE = 3;
 const STATUS_ICON = {
@@ -78,6 +79,24 @@ function truncate(text, max) {
         return '…';
     return `${one.slice(0, max - 1)}…`;
 }
+/** Cut the status tail to an exact display-column budget. */
+function fitTail(text, max) {
+    if (max <= 0)
+        return '';
+    if (displayWidth(text) <= max)
+        return text;
+    const limit = Math.max(1, Math.floor(max) - 1);
+    let used = 0;
+    let out = '';
+    for (const ch of text) {
+        const width = displayWidth(ch);
+        if (used + width > limit)
+            break;
+        used += width;
+        out += ch;
+    }
+    return `${out}…`;
+}
 function shortId(id) {
     return id.length > 10 ? `${id.slice(0, 8)}…` : id;
 }
@@ -91,12 +110,20 @@ export const SubAgentActivity = ({ activities, columns, now }) => {
         return null;
     const visible = activities.slice(-SUB_AGENT_MAX_VISIBLE);
     const nowMs = now ?? Date.now();
-    const labelWidth = 10;
-    const tailWidth = 18; // "  N tools · 1.2s"
-    const taskWidth = Math.max(1, columns - 6 - labelWidth - tailWidth);
+    const cols = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+    // Exact fixed costs per item row: outer padding (4), LeftBar bar + gap (2),
+    // status icon + space, id + space, optional badge, and the status tail.
+    const fixedOverhead = 6;
+    const minTaskWidth = 8;
     return (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.info, children: _jsxs(Box, { flexDirection: "column", children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexDirection: "row", flexShrink: 1, minWidth: 1, children: [_jsx(Text, { color: theme.muted, bold: true, children: "Sub-agents" }), _jsx(Text, { color: theme.accent, backgroundColor: theme.surface, children: ` ${activities.length} ` })] }), _jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "^g all" }) })] }), visible.map((item) => {
-                        const badge = item.agentType ? `[${item.agentType}]` : '';
-                        const rowTaskWidth = Math.max(1, taskWidth - (badge ? badge.length + 1 : 0));
-                        return (_jsxs(Box, { flexDirection: "row", children: [_jsx(Text, { color: theme[STATUS_COLOR_KEY[item.status]], children: `${STATUS_ICON[item.status]} ` }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${shortId(item.id)} ` }), badge ? _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${badge} ` }) : null, _jsx(Text, { color: theme.text, wrap: "truncate-end", children: truncate(item.task, rowTaskWidth) }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}` })] }, item.id));
+                        const badge = item.agentType ? `[${item.agentType}] ` : '';
+                        const icon = `${STATUS_ICON[item.status]} `;
+                        const id = `${shortId(item.id)} `;
+                        const usedWithoutTail = fixedOverhead + displayWidth(icon) + displayWidth(id) + displayWidth(badge);
+                        const tail = fitTail(`  ${item.toolCalls ?? 0} tools · ${elapsed(item, nowMs)}`, Math.max(0, cols - usedWithoutTail - minTaskWidth));
+                        // Derive the task field from what was actually painted, not from a
+                        // guessed 34-column reservation that overflowed narrow screens.
+                        const rowTaskWidth = Math.max(1, cols - usedWithoutTail - displayWidth(tail));
+                        return (_jsxs(Box, { flexDirection: "row", children: [_jsx(Text, { color: theme[STATUS_COLOR_KEY[item.status]], children: icon }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: id }), badge ? _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: badge }) : null, _jsx(Text, { color: theme.text, wrap: "truncate-end", children: truncate(item.task, rowTaskWidth) }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: tail })] }, item.id));
                     })] }) }) }));
 };

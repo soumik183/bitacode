@@ -13,20 +13,18 @@ export const MAX_HIGHLIGHT_CHARS = 200_000;
 const PALETTE_SLOT = {
     comment: 'dim',
     string: 'success',
+    key: 'info',
     keyword: 'accent',
     literal: 'info',
+    number: 'success',
+    fn: 'accent',
     heading: 'info',
     add: 'success',
     remove: 'error',
     hunk: 'info',
 };
-const FIXED_SLOT = {
-    key: '#9cdcfe',
-    number: '#b5cea8',
-    fn: '#dcdcaa',
-};
 function colorsFor(palette) {
-    const colors = { ...FIXED_SLOT };
+    const colors = {};
     for (const [slot, key] of Object.entries(PALETTE_SLOT)) {
         colors[slot] = palette[key];
     }

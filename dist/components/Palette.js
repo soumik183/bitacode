@@ -14,6 +14,9 @@ export const SLASH_COMMANDS = [
     { name: '/new', description: 'Start a fresh session', category: 'Session', keywords: 'reset clear' },
     { name: '/session', description: 'Open a saved session', category: 'Session', keywords: 'resume history' },
     { name: '/find', description: 'Search the transcript', category: 'Session', keywords: 'grep lookup' },
+    { name: '/search', description: 'Search every saved session', category: 'Session', keywords: 'all history grep' },
+    { name: '/stash', description: 'Save and restore prompt drafts', category: 'Session', keywords: 'draft note restore' },
+    { name: '/agent', description: 'List available agents', category: 'Tools', keywords: 'subagent persona role' },
     { name: '/subagents', description: 'Browse and inspect child agents', category: 'Session', keywords: 'agents children transcripts' },
     { name: '/review', description: 'Delegate a code review to a sub-agent', category: 'Tools', keywords: 'audit findings review' },
     { name: '/github', description: 'Open the Bitacode repository in your browser', category: 'App', keywords: 'repo source code' },
@@ -55,6 +58,37 @@ export function highlightMatch(label, query) {
         parts.push({ text: after, match: false });
     return parts;
 }
+/**
+ * Turn fuzzy-match indices into contiguous matched / unmatched runs. Invalid
+ * indices are ignored so a stale index set can never throw or drop a label.
+ */
+function labelSegments(label, indices) {
+    if (!indices)
+        return null;
+    const matched = new Set();
+    for (const index of indices) {
+        if (Number.isInteger(index) && index >= 0 && index < label.length)
+            matched.add(index);
+    }
+    if (matched.size === 0)
+        return [{ text: label, match: false }];
+    const parts = [];
+    let text = '';
+    let current = matched.has(0);
+    for (let i = 0; i < label.length; i++) {
+        const isMatch = matched.has(i);
+        if (isMatch !== current) {
+            if (text)
+                parts.push({ text, match: current });
+            text = '';
+            current = isMatch;
+        }
+        text += label[i];
+    }
+    if (text)
+        parts.push({ text, match: current });
+    return parts;
+}
 /** `↑↓ move · enter run · esc close` with keys in the accent colour. */
 export const PaletteHint = ({ hint }) => {
     const theme = useTheme();
@@ -77,7 +111,7 @@ export const PaletteHint = ({ hint }) => {
  * key stays smooth on a phone. Sections, a right-aligned hint column and a
  * windowed "N more" marker keep long lists legible.
  */
-export const Palette = ({ title, items, selected, hint, maxVisible, query, columns, }) => {
+export const Palette = ({ title, items, selected, hint, maxVisible, query, emptyLabel = 'All commands', columns, }) => {
     const theme = useTheme();
     if (items.length === 0)
         return null;
@@ -89,12 +123,20 @@ export const Palette = ({ title, items, selected, hint, maxVisible, query, colum
     const visible = items.slice(start, start + window);
     const hiddenAbove = start;
     const hiddenBelow = Math.max(0, items.length - start - visible.length);
-    return (_jsxs(Box, { flexDirection: "column", width: "100%", flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, overflow: "hidden", children: [(title || items.length > window) && (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", children: [_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: title ?? 'Matches' }), _jsx(Text, { color: theme.dim, children: `${selected + 1}/${items.length}` })] })), hiddenAbove > 0 && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ↑ ${hiddenAbove} more` })), visible.map((item, i) => {
+    const needle = (query ?? '').trim();
+    // One compact dim row while filtering; the empty query reuses the header
+    // row below, so the palette keeps exactly the height it always had.
+    const matchLine = needle
+        ? `${items.length} ${items.length === 1 ? 'match' : 'matches'} for "${needle}"`
+        : '';
+    const hasHeader = Boolean(title || items.length > window);
+    return (_jsxs(Box, { flexDirection: "column", width: "100%", flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, overflow: "hidden", children: [hasHeader && (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", children: [_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: title ?? (!needle && emptyLabel ? emptyLabel : 'Matches') }), _jsx(Text, { color: theme.dim, children: `${selected + 1}/${items.length}` })] })), matchLine && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: matchLine })), hiddenAbove > 0 && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ↑ ${hiddenAbove} more` })), visible.map((item, i) => {
                 const index = start + i;
                 const active = index === selected;
                 const previous = index > 0 ? items[index - 1] : undefined;
                 const showSection = Boolean(item.section) && item.section !== previous?.section;
                 const labelColor = item.color ?? (active ? theme.text : theme.muted);
-                return (_jsxs(Box, { flexDirection: "column", children: [showSection ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.section}` })) : null, _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexDirection: "row", flexShrink: 1, minWidth: 1, children: [_jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }) }), _jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: labelColor, bold: active || item.bold, wrap: "truncate-end", children: highlightMatch(item.label, query).map((part, partIndex) => (_jsx(Text, { color: part.match ? theme.accent : labelColor, bold: part.match || active || item.bold, children: part.text }, partIndex))) }) }), item.description && showDescriptions && (_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.description}` }) }))] }), item.meta ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: active ? theme.muted : theme.dim, wrap: "truncate-end", children: item.meta }) })) : null] })] }, item.id));
+                return (_jsxs(Box, { flexDirection: "column", children: [showSection ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.section}` })) : null, _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", width: "100%", backgroundColor: active ? theme.surfaceAlt : undefined, overflow: "hidden", children: [_jsxs(Box, { flexDirection: "row", flexShrink: 1, minWidth: 1, children: [_jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }) }), _jsx(Box, { flexShrink: 0, children: _jsx(Text, { color: labelColor, bold: active || item.bold, wrap: "truncate-end", children: (labelSegments(item.label, item.matchIndices) ?? highlightMatch(item.label, query))
+                                                    .map((part, partIndex) => (_jsx(Text, { color: part.match ? theme.accent : labelColor, bold: part.match || active || item.bold, children: part.text }, partIndex))) }) }), item.description && showDescriptions && (_jsx(Box, { flexShrink: 1, minWidth: 0, overflow: "hidden", children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ${item.description}` }) }))] }), item.meta ? (_jsx(Box, { flexShrink: 0, marginLeft: 1, children: _jsx(Text, { color: active ? theme.muted : theme.dim, wrap: "truncate-end", children: item.meta }) })) : null] })] }, item.id));
             }), hiddenBelow > 0 && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `  ↓ ${hiddenBelow} more` })), _jsx(PaletteHint, { hint: hint })] }));
 };

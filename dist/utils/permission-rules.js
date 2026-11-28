@@ -20,6 +20,7 @@
  * kept as a literal matcher, so a typo can never silently widen a deny rule.
  */
 import path from 'node:path';
+import { scanShell } from './shell-scan.js';
 const SHELL_CONTROL = /[;&|<>$`\n]/;
 function escapeRegExp(text) {
     return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -285,10 +286,44 @@ export function evaluatePermission(set, call) {
     }
     for (const rule of set.allow) {
         if (ruleMatches(rule, call, candidates)) {
+            // A text match on `git status` must never silently approve
+            // `git status && rm -rf .` or `git status $(payload)`. Shell structure is
+            // checked before an allow rule can grant access.
+            for (const command of candidates.commands) {
+                const scan = scanShell(command);
+                if (scan.risk === 'high' || scan.hasSubstitution) {
+                    return {
+                        decision: 'ask',
+                        source: 'ask',
+                        rule: rule.raw,
+                        warning: `shell allow-rule blocked by command structure: ${scan.reasons.join('; ') || 'high risk'}`,
+                    };
+                }
+            }
             return { decision: 'allow', source: 'allow', rule: rule.raw, warning: rule.error };
         }
     }
     return { decision: 'ask' };
+}
+/**
+ * Every rule that matches a call, bucketed. Used by `bitacode permissions test`
+ * to explain a verdict, including rules that lost to higher precedence.
+ */
+export function matchRules(set, call) {
+    const buckets = { deny: [], ask: [], allow: [] };
+    if (!set || !call.tool || !call.tool.trim())
+        return buckets;
+    const candidates = argumentCandidates(call);
+    for (const rule of set.deny)
+        if (ruleMatches(rule, call, candidates))
+            buckets.deny.push(rule);
+    for (const rule of set.ask)
+        if (ruleMatches(rule, call, candidates))
+            buckets.ask.push(rule);
+    for (const rule of set.allow)
+        if (ruleMatches(rule, call, candidates))
+            buckets.allow.push(rule);
+    return buckets;
 }
 /** Human-readable listing for `bitacode permissions show`. */
 export function describeRuleSet(set) {

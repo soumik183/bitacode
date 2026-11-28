@@ -178,9 +178,9 @@ export function addToolResultView(
 
   addStatic(
     <Box paddingX={2} marginBottom={1}>
-      <Text color={isError ? palette.error : undefined} dimColor={!isError}>
+      <Text color={isError ? palette.error : palette.dim}>
         {'▶ '}
-        <Text bold>{formatToolLabel(toolName, toolArgs)}</Text>
+        <Text bold color={isError ? palette.error : palette.accent}>{formatToolLabel(toolName, toolArgs)}</Text>
         {': '}
         {compactResult}
       </Text>

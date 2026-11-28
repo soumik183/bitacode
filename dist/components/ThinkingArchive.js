@@ -29,7 +29,13 @@ export const ThinkingArchive = ({ text, elapsedMs, columns, expanded = false, })
     const lineCap = archivePreviewChars(columns);
     const shownLines = expanded ? lines : lines.slice(0, PREVIEW_LINE_BUDGET);
     const hiddenLines = lines.length - shownLines.length;
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: theme.muted, children: "Thought" }), _jsx(Text, { color: theme.dim, children: `  ${formatDuration(elapsedMs)} · ${reasoning.length} char${reasoning.length === 1 ? '' : 's'}` })] }), shownLines.map((line, index) => {
+    const meta = [
+        elapsedMs > 0 ? formatDuration(elapsedMs) : '',
+        `${reasoning.length} char${reasoning.length === 1 ? '' : 's'}`,
+    ]
+        .filter(Boolean)
+        .join(' · ');
+    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, marginBottom: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.muted, children: expanded ? '▾ ' : '▸ ' }), _jsx(Text, { color: theme.muted, children: "Thought" }), _jsx(Text, { color: theme.dim, children: meta ? `  ${meta}` : '' })] }), shownLines.map((line, index) => {
                 // Bound each collapsed line to one row so the card can't grow the frame.
                 // Expanded keeps every line verbatim; only the collapsed preview clips.
                 const clipped = !expanded && line.length > lineCap

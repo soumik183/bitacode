@@ -18,6 +18,17 @@ export function normalizeTranscriptText(text) {
     // paragraph and break tables, so only runs of three or more collapse to one.
     return text.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
+/** One predicate for both the streaming splitter and the renderer: any line
+ * starting with a matching fence marker closes the block, with or without a
+ * trailing language tag (` ``` ` and ` ```js ` both count). */
+function fenceMarker(line) {
+    const trimmed = String(line ?? '').trim();
+    if (trimmed.startsWith('```'))
+        return '```';
+    if (trimmed.startsWith('~~~'))
+        return '~~~';
+    return null;
+}
 /**
  * Split streamed markdown into completed blocks plus the still-growing tail.
  *
@@ -39,8 +50,8 @@ export function splitMarkdownBlocks(text) {
         const line = lines[i];
         const trimmed = line.trim();
         // Fence tracking: an opened fence swallows blank lines until it closes.
-        if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
-            const marker = trimmed.startsWith('```') ? '```' : '~~~';
+        const marker = fenceMarker(line);
+        if (marker) {
             if (!fence)
                 fence = marker;
             else if (fence === marker)
@@ -84,25 +95,20 @@ const MAX_TABLE_BODY_ROWS = 40;
 const MAX_TABLE_COLS = 8;
 const MAX_TABLE_CELL_CHARS = 120;
 const MAX_TABLE_OUTPUT_ROWS = 20;
-/**
- * Two legacy syntax colours are intentionally theme-independent (they are not
- * part of the 15-key Theme type): yellow for list markers/tasks and orange for
- * warnings. Everything else is derived from the active palette below.
- */
-const MARKER = '#facc15';
-const WARNING = '#fb923c';
 function ctxFor(palette) {
+    // Marker/warning colours come from the active theme so light palettes stay
+    // readable; no fixed VS Code dark values leak into the transcript.
     return {
         palette,
-        marker: MARKER,
+        marker: palette.accent,
         heading: [palette.accent, palette.info, palette.success, palette.muted, palette.muted, palette.muted],
         callout: {
             ERROR: palette.error,
-            WARNING,
-            WARN: WARNING,
+            WARNING: palette.info,
+            WARN: palette.info,
             TIP: palette.success,
             NOTE: palette.info,
-            TODO: MARKER,
+            TODO: palette.accent,
             FIXME: palette.error,
         },
     };
@@ -111,7 +117,6 @@ function ctxFor(palette) {
 // Escapes come before every marker so `\*` stays literal.
 const INLINE_PATTERN = /(`[^`\n]+`)|(\[[^\]\n]+\]\([^)\n]+\))|(!\[[^\]\n]*\]\([^)\n]+\))|(https?:\/\/[^\s)]+)|(\\[*_~`[\]])|(\*\*\*[\s\S]+?\*\*\*)|(\*\*[\s\S]+?\*\*)|(~~[^~\n]+?~~)|(\*[^\s*][^*]*?\*)|(__[^_\n]+?__)|(_[^\s_][^_]*?_)/g;
 const FENCE_OPEN = /^\s*(?:```|~~~)\s*([\w.+-]*)\s*$/;
-const FENCE_CLOSE = /^\s*(?:```|~~~)\s*$/;
 const HR = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const QUOTE = /^(\s*)((?:>\s?)+)(.*)$/;
@@ -409,6 +414,32 @@ export function wrapPlainText(text, columns) {
                 }
                 continue;
             }
+            if (wordWidth > width) {
+                // A single long token (URL/path) overflows on its own. Hard-cut it into
+                // width-sized pieces with an ellipsis, exactly as table cells do, so a
+                // prose reply cannot add unbudgeted rows or paint past the screen edge.
+                if (current.trim()) {
+                    out.push(current.trimEnd());
+                    current = '';
+                    currentWidth = 0;
+                }
+                let rest = word;
+                while (displayWidth(rest) > width) {
+                    if (width <= 1) {
+                        out.push(truncateToWidth(rest, 1));
+                        rest = rest.slice(Array.from(rest)[0]?.length ?? 1);
+                        continue;
+                    }
+                    const piece = truncateToWidth(rest, width - 1);
+                    if (!piece)
+                        break; // defensive: never loop forever on a wide glyph
+                    out.push(`${piece}…`);
+                    rest = rest.slice(piece.length);
+                }
+                current = rest;
+                currentWidth = displayWidth(rest);
+                continue;
+            }
             if (currentWidth + wordWidth > width && current.trim()) {
                 out.push(current.trimEnd());
                 current = '';
@@ -610,7 +641,16 @@ export function tableColumnWidths(naturalWidths, columns) {
     return widths;
 }
 function renderTable(table, keyPrefix, columns = 0, ctx) {
-    const colCount = Math.min(MAX_TABLE_COLS, Math.max(1, table.header.length, ...table.body.map((row) => row.length)));
+    const requested = Math.min(MAX_TABLE_COLS, Math.max(1, table.header.length, ...table.body.map((row) => row.length)));
+    // Each painted column costs at least three cells ("│ " + " │ "), so a tight
+    // width can never host all of them. Drop the tail columns instead of painting
+    // a wall of single-cell columns that overruns the frame.
+    const knownWidth = Number.isFinite(columns) && columns > 0;
+    const affordable = knownWidth
+        ? Math.max(1, Math.floor((Math.floor(columns) - 1) / 3))
+        : MAX_TABLE_COLS;
+    const colCount = Math.max(1, Math.min(requested, affordable));
+    const omitted = requested - colCount;
     const cellAt = (row, ci) => (row[ci] ?? '').slice(0, MAX_TABLE_CELL_CHARS);
     // Natural width = widest printed cell in the column (markers resolved).
     const naturalWidths = [];
@@ -632,10 +672,16 @@ function renderTable(table, keyPrefix, columns = 0, ctx) {
         if (usedRows + physical.length > MAX_TABLE_OUTPUT_ROWS - 2) {
             const hidden = table.body.length - i;
             rows.push(_jsx(Text, { color: ctx.palette.dim, children: `  … ${hidden} more row${hidden === 1 ? '' : 's'}` }, `${keyPrefix}-more`));
-            return rows;
+            break;
         }
         rows.push(...physical);
         usedRows += physical.length;
+    }
+    if (omitted > 0) {
+        // Keep the note inside the same hard row budget as the table body.
+        if (rows.length >= MAX_TABLE_OUTPUT_ROWS)
+            rows.length = MAX_TABLE_OUTPUT_ROWS - 1;
+        rows.push(_jsx(Text, { color: ctx.palette.dim, children: `  … ${omitted} more column${omitted === 1 ? '' : 's'} omitted` }, `${keyPrefix}-cols`));
     }
     return rows;
 }
@@ -670,8 +716,11 @@ export function renderFormattedText(text, columns = 0, palette = getTheme()) {
             const line = lines[index];
             const fence = FENCE_OPEN.exec(line);
             if (fence) {
+                // Same close rule as splitMarkdownBlocks: the first line with the
+                // matching marker ends the code block, even if it has a language tag.
+                const marker = fenceMarker(line);
                 let end = index + 1;
-                while (end < lines.length && !FENCE_CLOSE.test(lines[end])) {
+                while (end < lines.length && fenceMarker(lines[end]) !== marker) {
                     end++;
                 }
                 const language = fence[1] || 'text';
@@ -697,7 +746,16 @@ export function renderFormattedText(text, columns = 0, palette = getTheme()) {
                 table = null;
             }
             if (table) {
-                rows.push(...renderTable(table, `t${index}`, columns, ctx));
+                if (Number.isFinite(columns) && columns > 0 && Math.floor(columns) < 6) {
+                    // A one-column table still costs four chrome cells; below six columns
+                    // it cannot fit, so keep the source lines as plain text.
+                    for (let i = index; i < table.endIndex; i++) {
+                        rows.push(renderLine(lines[i], `t${index}-p${i}`, ctx));
+                    }
+                }
+                else {
+                    rows.push(...renderTable(table, `t${index}`, columns, ctx));
+                }
                 index = table.endIndex;
                 continue;
             }
@@ -707,8 +765,9 @@ export function renderFormattedText(text, columns = 0, palette = getTheme()) {
         // Global safety net: many bounded constructs in one message still cannot
         // grow the frame past a fixed number of rows.
         if (rows.length > MAX_OUTPUT_ROWS) {
+            const hidden = rows.length - MAX_OUTPUT_ROWS;
             rows.length = MAX_OUTPUT_ROWS;
-            rows.push(_jsx(Text, { color: ctx.palette.dim, children: `  … ${rows.length} more rows` }, "rowcap"));
+            rows.push(_jsx(Text, { color: ctx.palette.dim, children: `  … ${hidden} more rows` }, "rowcap"));
         }
         // Re-join rows with the same newline structure as the input.
         const output = [];

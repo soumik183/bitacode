@@ -33,6 +33,7 @@ import { evaluatePermission } from '../utils/permission-rules.js';
 import { runWithApprovalOverride } from '../utils/approval.js';
 import { appendJournal } from '../utils/session-journal.js';
 import { recordTurnCheckpoint } from '../utils/turn-snapshots.js';
+import { shouldBlockRepetition } from '../utils/tool-repetition.js';
 /** Max independent tool calls launched at once within a parallel batch. */
 const CONCURRENCY = 4;
 /** Tools whose effects should be snapshotted before they run. */
@@ -139,6 +140,9 @@ export async function executeToolCalls(toolCalls, messages, onEvent, context) {
     // This set is used to inject stub responses on abort, preventing
     // orphaned tool_call_ids from permanently bricking the session.
     const pendingToolCallIds = new Set(toolCalls.map((tc) => tc.id));
+    // Doom-loop guard: identical calls within this turn are counted and the call
+    // after the threshold is refused with an actionable error.
+    const repetitionCounts = new Map();
     const injectStubsForPendingToolCalls = () => {
         for (const id of pendingToolCallIds) {
             messages.push({
@@ -179,6 +183,18 @@ export async function executeToolCalls(toolCalls, messages, onEvent, context) {
                 };
             }
             // 2. PreToolUse hooks: a blocking hook stops the call before any effect.
+            if (shouldBlockRepetition(name, args, repetitionCounts)) {
+                return {
+                    id,
+                    name,
+                    args: argsStr,
+                    status: 'error',
+                    content: truncateToolResult(`Error: blocked a repeated ${name} call with identical arguments (doom-loop guard). ` +
+                        'Change the arguments or act on the results you already have.'),
+                    result: 'repeated call blocked',
+                };
+            }
+            // 3. PreToolUse hooks: a blocking hook stops the call before any effect.
             if (hooks.length > 0) {
                 const hookResult = await runHooks({
                     event: 'PreToolUse',

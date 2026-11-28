@@ -148,6 +148,8 @@ import { itemAtViewportRow, type AddStaticFn } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
 import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import { formatSessionExit } from './utils/session-exit-format.js';
+import { formatUpdateExit } from './utils/update-exit-format.js';
+import { formatInstallFailure } from './utils/cli-update-format.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import {
   clampScroll,
@@ -253,9 +255,16 @@ const Splash: React.FC = () => {
   const theme = useTheme();
   return (
     <Box flexDirection="column" alignItems="center">
-      <Text color={theme.text} bold>
-        {SPLASH_LINES.join('\n')}
+      <Text color={theme.accent} bold>
+        {SPLASH_LINES[0]}
       </Text>
+      <Text color={theme.accent} bold>
+        {SPLASH_LINES[1]}
+      </Text>
+      <Box height={1} />
+      <Text color={theme.muted}>a small, readable agent</Text>
+      <Box height={1} />
+      <Text color={theme.dim}>type a request · / commands</Text>
     </Box>
   );
 };
@@ -654,7 +663,7 @@ type AppContentProps = AppProps & {
 // ─── Help text derived from slash commands ───
 // Shortcuts accept ctrl OR alt (Ink reports Alt via `key.meta`). Text-editing
 // keys a/e/u/w belong to PromptInput, so they are deliberately absent here.
-const APPROVAL_MODES: ApprovalMode[] = ['manual', 'auto', 'yolo'];
+const APPROVAL_MODES: ApprovalMode[] = ['manual', 'acceptEdits', 'auto', 'yolo'];
 
 function buildHelpText(approvalMode: ApprovalMode): string {
   // Keep the panel compact: the live area is height-capped so the composer and
@@ -1147,6 +1156,11 @@ const AppContent: React.FC<AppContentProps> = ({
   // Session to advertise on exit, and a guard against saving twice on a fast
   // ctrl+c / /quit burst.
   const exitSessionIdRef = useRef<string | null>(null);
+  // Set after a successful in-app update so the post-exit screen can explain
+  // that the installed build only takes effect on the next launch.
+  const exitUpdateRef = useRef<{ from: string; to: string; scope: 'global' | 'local' } | null>(null);
+  // Guards against a second `/update` while npm is still installing.
+  const updatingRef = useRef(false);
   const exitingRef = useRef(false);
   const assistantMessageRef = useRef<AssistantMessageRef | null>(null);
   // Latest reasoning for the current turn; refs survive stale loop closures.
@@ -1585,6 +1599,10 @@ const AppContent: React.FC<AppContentProps> = ({
     return () => {
       stdout.write('\x1b[?1006l\x1b[?1000l');
       stdout.write('\x1b[?1049l');
+      // After an update, tell the user to relaunch before the usual resume card:
+      // the just-installed version is not what this process is running.
+      const updateExit = exitUpdateRef.current;
+      if (updateExit) stdout.write(`${formatUpdateExit(updateExit, themeRef.current)}\n`);
       // The card is painted while the themed terminal background is still set;
       // reset it afterwards so the user's own colours come back.
       const exitId = exitSessionIdRef.current;
@@ -1796,7 +1814,9 @@ const AppContent: React.FC<AppContentProps> = ({
     return {
       id: provider.id,
       label: provider.name,
-      description: `${provider.id} · ${modelCount} model${modelCount === 1 ? '' : 's'}${keyReady ? '' : ' · key needed'}`,
+      description: `${provider.id}${keyReady ? '' : ' · key needed'}`,
+      meta: `${modelCount} model${modelCount === 1 ? '' : 's'}`,
+      active: config?.provider === provider.id,
     };
   });
   const modelProviderId = pendingProviderId ?? config?.provider;
@@ -1811,13 +1831,26 @@ const AppContent: React.FC<AppContentProps> = ({
   const allModelItems: PaletteItem[] =
     cachedModelItems && cachedModelItems.length > 0 ? cachedModelItems : staticModelItems;
   const modelSearchTerm = modelSearch.trim().toLowerCase();
-  const modelItems: PaletteItem[] = modelSearchTerm
+  const modelItems: PaletteItem[] = (modelSearchTerm
     ? allModelItems.filter(
         (item) =>
           item.label.toLowerCase().includes(modelSearchTerm) ||
           item.id.toLowerCase().includes(modelSearchTerm)
       )
-    : allModelItems;
+    : allModelItems
+  ).map((item) => ({
+    ...item,
+    // Right-align the context window so names form a clean column, and mark the
+    // model that is currently active (only when browsing its own provider).
+    description: undefined,
+    meta: item.description,
+    active: Boolean(
+      config &&
+      !pendingProviderId &&
+      config.provider === modelProviderId &&
+      config.model === item.id,
+    ),
+  }));
   const selectedModelIndex = clampIndex(pickerIndex, modelItems.length);
 
   const variantItems = VARIANTS.map((variant) => ({
@@ -2508,26 +2541,47 @@ const AppContent: React.FC<AppContentProps> = ({
       });
   }, [session, completionMessages, variantId, subAgentActivities, exit]);
 
-  /** Check npm and install the newest release without leaving the chat. */
+  /** Check npm, install the newest release, then close so it can take effect. */
   const handleUpdate = useCallback(async (local = false) => {
+    if (updatingRef.current) {
+      showToast('An update is already running…');
+      return;
+    }
+    updatingRef.current = true;
     setError(null);
-    const info = await checkForUpdate(version ?? '', { force: true });
-    if (!info) {
-      setError('Could not reach npm for an update check. Try again later.');
-      return;
+    let exiting = false;
+    try {
+      const scope: 'global' | 'local' = local ? 'local' : 'global';
+      const info = await checkForUpdate(version ?? '', { force: true });
+      if (!info) {
+        setError('Could not check npm for updates. Check your connection and try again.');
+        return;
+      }
+      if (!info.updateAvailable) {
+        showToast(`Already up to date (v${info.current})`);
+        return;
+      }
+
+      showToast(`Installing v${info.latest} (${scope})…`, 0);
+      const result = await installUpdate({ version: info.latest, global: !local });
+      if (!result.success) {
+        setError(formatInstallFailure(info.latest, scope, result.message));
+        return;
+      }
+
+      // npm has replaced the package on disk, but this process keeps running the
+      // old code. Save the conversation, close the TUI, and print a card telling
+      // the user to reopen for the new version.
+      exitUpdateRef.current = { from: info.current, to: info.latest, scope };
+      showToast(`Updated to v${info.latest} — closing…`, 0);
+      exiting = true;
+      setTimeout(() => exitWithSave(), 450);
+    } finally {
+      // Keep the guard closed once we are about to exit; otherwise let the user
+      // retry after an early return or a failed install.
+      if (!exiting) updatingRef.current = false;
     }
-    if (!info.updateAvailable) {
-      showToast(`Already up to date (v${info.current})`);
-      return;
-    }
-    showToast(`Installing v${info.latest} from npm…`, 0);
-    const result = await installUpdate({ version: info.latest, global: !local });
-    if (result.success) {
-      showToast(`Updated to v${info.latest} — restart Bitacode to use it`, 0);
-    } else {
-      setError(result.message);
-    }
-  }, [version, showToast]);
+  }, [version, showToast, exitWithSave]);
 
   const handleSlashCommand = useCallback(async (cmd: string, raw = cmd): Promise<boolean> => {
     const parts = raw.trim().split(/\s+/);
@@ -3103,7 +3157,7 @@ const AppContent: React.FC<AppContentProps> = ({
       );
       const highlighted = commandItemsRef.current[
         clampIndex(commandIndexRef.current, commandItemsRef.current.length)
-      ]?.name;
+      ]?.label;
       const selected = highlighted
         ?? matches.find((cmd) => cmd.name.toLowerCase() === typed.toLowerCase())?.name
         ?? matches[0]?.name
@@ -4474,6 +4528,7 @@ const AppContent: React.FC<AppContentProps> = ({
   ) : picker === 'model' ? (
     <Dialog
       title="Select model"
+      accentGlyph="◇"
       badge={modelProvider ? modelProvider.name : undefined}
       hint="type to search · ↑↓ move · enter use · esc cancel"
       columns={columns}
@@ -4507,6 +4562,7 @@ const AppContent: React.FC<AppContentProps> = ({
   ) : picker === 'provider' ? (
     <Dialog
       title="Select provider"
+      accentGlyph="◇"
       badge={`${providerItems.length} available`}
       hint="↑↓ move · enter use · esc cancel"
       columns={columns}

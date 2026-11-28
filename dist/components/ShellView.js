@@ -22,8 +22,10 @@ export const SHELL_EXPANDED_MAX_LINES = 120;
  */
 export const ShellView = ({ command, output, isError, status, expanded = false, }) => {
     const theme = useTheme();
-    const lines = output.replace(/\n+$/, '').split('\n');
     const hasOutput = output.trim().length > 0;
+    // An empty result is zero lines, not one blank line: the header used to claim
+    // "1 line" directly above "(no output)".
+    const lines = hasOutput ? output.replace(/\n+$/, '').split('\n') : [];
     const limit = expanded ? SHELL_EXPANDED_MAX_LINES : SHELL_PREVIEW_LINES;
     const shown = hasOutput ? lines.slice(0, Math.min(lines.length, limit)) : [];
     const hidden = hasOutput ? Math.max(0, lines.length - shown.length) : 0;

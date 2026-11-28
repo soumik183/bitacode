@@ -110,7 +110,8 @@ export function liveStatusCandidates(props) {
     const elapsedMs = Math.max(0, props.elapsedMs ?? 0);
     const label = activityLabel({ activity: props.activity, tool: props.tool, elapsedMs });
     const elapsed = elapsedMs >= 1000 ? ` · ${formatElapsed(elapsedMs)}` : '';
-    const tps = props.tps ? ` · ${props.tps}` : '';
+    // Throughput belongs to decode phases only; a tool phase shows the clock.
+    const tps = props.activity !== 'tool' && props.tps ? ` · ${props.tps}` : '';
     const hint = props.hint ? ` · ${props.hint}` : '';
     const candidates = [
         `${label}${tps}${elapsed}${hint}`,
@@ -137,9 +138,16 @@ export const LiveStatus = ({ activity, tool, elapsedMs = 0, tps, frame = 0, anim
     const width = Math.max(1, (Number.isFinite(columns) ? Math.floor(columns) : 80) - gutter * 2 - 2);
     // The label and the live metrics matter; the key hint is the first thing to
     // go when the row is tight, instead of chopping the word "interrupt".
+    // Fit against the text budget itself: slicing again after fitting used to
+    // chop perfectly valid candidates.
+    const budget = Math.max(1, width - 2);
     const candidates = liveStatusCandidates({ activity, tool, elapsedMs, tps, hint });
-    const fitted = candidates.find((entry) => entry.length <= width) ?? candidates[candidates.length - 1];
-    const text = fitted.length <= width ? fitted : `${fitted.slice(0, Math.max(1, width - 1))}…`;
-    return (_jsx(Box, { height: 1, flexShrink: 0, paddingX: gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsxs(Text, { color: color, children: [spinnerGlyph(frame, animate), " "] }), _jsx(Text, { color: activity === 'tool' ? theme.muted : theme.muted, wrap: "truncate-end", children: text.slice(0, Math.max(1, width - 2)) })] }) }));
+    const fitted = candidates.find((entry) => entry.length <= budget) ?? candidates[candidates.length - 1];
+    const text = fitted.length <= budget ? fitted : `${fitted.slice(0, Math.max(1, budget - 1))}…`;
+    // Split the label from its metrics so the phase reads first and the numbers
+    // recede, rather than one flat grey line.
+    const [label, ...trailing] = text.split(' · ');
+    const tail = trailing.length > 0 ? ` · ${trailing.join(' · ')}` : '';
+    return (_jsx(Box, { height: 1, flexShrink: 0, paddingX: gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsxs(Text, { color: color, children: [spinnerGlyph(frame, animate), " "] }), _jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: label }), tail ? (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: tail })) : null] }) }));
 };
 export default LiveStatus;

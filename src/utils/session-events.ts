@@ -135,8 +135,8 @@ function resolveDataDir(options?: ModuleOptions | null): string {
 }
 
 /** Directory holding the events, snapshots and claims files. */
-export function eventsDir(options?: ModuleOptions): string {
-  return path.join(resolveDataDir(options), 'events');
+export function eventsDir(options?: ModuleOptions | null): string {
+  return path.join(resolveDataDir(options ?? undefined), 'events');
 }
 
 function eventFile(sessionId: string, options?: ModuleOptions | null): string {

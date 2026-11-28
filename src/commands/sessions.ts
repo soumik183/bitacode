@@ -9,11 +9,16 @@ import fs from 'node:fs/promises';
 import process from 'node:process';
 import {
   countConversationMessages,
+  deleteSession,
+  describePrune,
   exportSession,
   forkSession,
   listSessions,
   loadSession,
+  pruneSession,
   renameSession,
+  saveSession,
+  setSessionArchived,
   setSessionPinned,
 } from '../sessions.js';
 import {
@@ -35,6 +40,14 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Read `--flag <number>`; returns undefined when absent or not a number. */
+function flagNumber(args: string[], name: string): number | undefined {
+  const at = args.indexOf(name);
+  if (at === -1) return undefined;
+  const value = Number(args[at + 1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 export async function runSessionsCommand(args: string[], options: SessionsCommandOptions = {}): Promise<number> {
   const write = options.write ?? ((line: string) => process.stdout.write(`${line}\n`));
   const sub = (args[0] ?? 'list').toLowerCase();
@@ -43,19 +56,22 @@ export async function runSessionsCommand(args: string[], options: SessionsComman
   switch (sub) {
     case 'list': {
       const sessions = await listSessions();
+      const includeArchived = args.includes('--all') || args.includes('--archived');
+      const visible = includeArchived ? sessions : sessions.filter((session) => session.archived !== true);
       if (options.json) {
-        write(JSON.stringify({ sessions }));
+        write(JSON.stringify({ sessions: visible }));
         return 0;
       }
-      if (sessions.length === 0) {
+      if (visible.length === 0) {
         write('No saved sessions.');
         return 0;
       }
-      for (const session of sessions.slice(0, options.limit ?? 20)) {
+      for (const session of visible.slice(0, options.limit ?? 20)) {
         const stamp = new Date(session.updatedAt ?? session.createdAt ?? Date.now()).toISOString().slice(0, 16).replace('T', ' ');
         const count = session.messageCount ?? 0;
         const pin = session.pinned ? '📌 ' : '';
-        write(`${session.id}  ${stamp}  ${count} msg${count === 1 ? '' : 's'}  ${pin}${session.title ?? '(untitled)'}`);
+        const archive = session.archived ? '[archived] ' : '';
+        write(`${session.id}  ${stamp}  ${count} msg${count === 1 ? '' : 's'}  ${archive}${pin}${session.title ?? '(untitled)'}`);
       }
       return 0;
     }
@@ -193,6 +209,68 @@ export async function runSessionsCommand(args: string[], options: SessionsComman
       else write(`Session ${id} ${pinned ? 'pinned' : 'unpinned'}`);
       return 0;
     }
+    case 'archive':
+    case 'unarchive': {
+      if (!id) {
+        write(`Usage: bitacode sessions ${sub} <id>`);
+        return 1;
+      }
+      const archived = sub === 'archive';
+      if (!(await setSessionArchived(id, archived))) {
+        write(`Session not found: ${id}`);
+        return 1;
+      }
+      if (options.json) write(JSON.stringify({ id, archived }));
+      else write(`Session ${id} ${archived ? 'archived' : 'unarchived'}`);
+      return 0;
+    }
+    case 'delete':
+    case 'rm': {
+      if (!id) {
+        write('Usage: bitacode sessions delete <id>');
+        return 1;
+      }
+      const removed = await deleteSession(id);
+      if (!removed) {
+        write(`Session not found: ${id}`);
+        return 1;
+      }
+      if (options.json) write(JSON.stringify({ id, deleted: true }));
+      else write(`Deleted session ${id}`);
+      return 0;
+    }
+    case 'prune': {
+      if (!id) {
+        write('Usage: bitacode sessions prune <id> [--keep-turns N] [--max-bytes N]');
+        return 1;
+      }
+      const session = await loadSession(id);
+      if (!session) {
+        write(`Session not found: ${id}`);
+        return 1;
+      }
+      const keepTurns = flagNumber(args, '--keep-turns');
+      const maxBytes = flagNumber(args, '--max-bytes');
+      if (keepTurns === undefined && maxBytes === undefined) {
+        write('Usage: bitacode sessions prune <id> [--keep-turns N] [--max-bytes N]');
+        return 1;
+      }
+      const pruned = pruneSession(session, {
+        ...(keepTurns !== undefined ? { keepTurns } : {}),
+        ...(maxBytes !== undefined ? { maxBytes } : {}),
+      });
+      await saveSession(pruned);
+      if (options.json) {
+        write(JSON.stringify({
+          id,
+          before: session.completionMessages.length,
+          after: pruned.completionMessages.length,
+        }));
+      } else {
+        write(describePrune(session, pruned));
+      }
+      return 0;
+    }
     case 'export': {
       if (!id) {
         write('Usage: bitacode sessions export <id> [md|txt|json] [--out <file>]');
@@ -246,7 +324,7 @@ export async function runSessionsCommand(args: string[], options: SessionsComman
     }
     default:
       write(`Unknown sessions subcommand: ${sub}`);
-      write('Usage: bitacode sessions [list|show <id>|replay <id>|stats [id]|journal|fork <id> [title]|rename <id> <title...>|pin <id> [on|off]|export <id> [md|txt|json] [--out <file>]]');
+      write('Usage: bitacode sessions [list [--all]|show <id>|replay <id>|stats [id]|journal|fork <id> [title]|rename <id> <title...>|pin <id> [on|off]|archive <id>|unarchive <id>|delete <id>|prune <id> [--keep-turns N] [--max-bytes N]|export <id> [md|txt|json] [--out <file>]]');
       return 1;
   }
 }

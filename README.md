@@ -33,6 +33,10 @@ It is written in TypeScript and short enough to read in an afternoon. Everything
 - **Sessions that survive** — conversations and todos save themselves; resume with `--session`.
 - **Sub-agents you can inspect** — delegate, run in parallel, and browse every child transcript.
 - **Honest usage numbers** — live tokens, context window, and estimated cost in the footer.
+- **Output styles** — pick a voice (`concise`, `explanatory`, `learning`, …) or drop a custom `.md` preset; `bitacode styles`.
+- **Repo-aware prompts** — merges `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `.clinerules` and `.bitacode/rules/*.md` up the tree, expands `@imports`, and adds a bounded symbol outline of the workspace.
+- **Safer writes** — `.git`, `.bitacode`, `.ssh`, `.aws` and other control-plane paths are refused by `write_file`, `edit_file`, `multiedit` and `apply_patch` even in `yolo`; `write_file` and `edit_file` also refuse stale, externally-modified files.
+- **Debuggable permissions** — `bitacode permissions test <tool> [arg]` explains which rule decided a call.
 
 ## Install
 
@@ -99,6 +103,8 @@ bitacode update --local     # current project
 bitacode update --check     # check only
 ```
 
+The in-app `/update` installs the newest release and then closes the UI, printing a card with the old → new versions and a "reopen bitacode" instruction: the running process still has the old code until you relaunch. A failed install prints the target, scope and a one-line summary of npm's error instead of closing.
+
 ## Headless / CI
 
 One prompt, no TUI, optional JSON events. Exit code is `0` on success, so scripts and GitHub Actions just work.
@@ -108,21 +114,27 @@ bitacode -p "fix the failing test"
 bitacode -p "review the diff" --json
 bitacode -p "summarise the repo" --approval auto --provider openai --model gpt-4o-mini
 bitacode -p "commit the change" --max-iterations 8 --save-session
+bitacode -p "only read files" --allowed-tools read_file,glob,search_files
+bitacode -p "plan first, no writes" --exclude-tools write_file,edit_file,bash --output-last-message plan.txt
 ```
 
-`--cwd` sets the working directory; `--session <id>` resumes a saved one.
+`--cwd` sets the working directory; `--session <id>` resumes a saved one. `--allowed-tools` / `--exclude-tools` restrict which tools the model can see and call; `--output-last-message <file>` writes the final answer to a file; `-q` silences streamed text; `--timeout-ms` caps a single request.
 
 ## Configuration, trust & automation
 
-- `bitacode permissions show|trust|untrust|allow|deny|ask` — per-tool, per-command, per-path rules. Project rules need a trusted directory.
+- `bitacode permissions show|trust|untrust|allow|deny|ask|test` — per-tool, per-command, per-path rules. Project rules need a trusted directory. `permissions test <tool> [arg]` dry-runs the verdict.
 - `bitacode hooks` — `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` in `~/.config/bitacode/hooks.json` or `<repo>/.bitacode/hooks.json`.
 - **Custom commands** — Markdown files in `~/.config/bitacode/commands/` or `<repo>/.bitacode/commands/`.
 - **Plugins** — discovered from `~/.config/bitacode/plugins/`; manage with `bitacode plugins list|enable|disable|info`.
-- `bitacode sessions list|show|replay|stats|journal|fork|rename|pin|export [id]` — your saved conversations.
+- `bitacode sessions list|show|replay|stats|journal|fork|rename|pin|archive|unarchive|delete|prune|export [id]` — your saved conversations. `list` hides archived sessions; `list --all` shows them; `prune <id> --keep-turns N` trims a long transcript.
+- `bitacode styles [list|set <id>]` — choose an output style, or list built-in and custom presets.
+- `bitacode permissions test <tool> [arg]` — dry-run the rule engine and print the verdict plus every matching rule.
 - `bitacode doctor` — config, permissions, hooks, storage, terminal support.
 - `bitacode completion bash|zsh|fish` — shell completion.
 
 Bitacode also keeps a small durable memory (`fact`, `preference`, `decision`, `constraint`) and folds stable repo context into prompts to keep the provider cache warm.
+
+Instruction files are merged the way the ecosystem expects: every `AGENTS.md` / `CLAUDE.md` from the filesystem root down to the working directory applies (nearest last), with `@path` imports expanded, plus `.cursorrules`, `.windsurfrules`, `.clinerules` and `.bitacode/rules/*.md` / `.claude/rules/*.md`. A bounded symbol outline of the workspace is added to the prompt, and `bitacode styles` switches the assistant's voice.
 
 ## Commands
 
@@ -152,7 +164,7 @@ Slash commands work from the composer. Type `/` to see the full list with descri
 | `/verify` | Run typecheck, lint, and tests |
 | `/doctor` | Diagnose configuration |
 | `/image <path>` | Attach a screenshot for the agent to inspect |
-| `/update` | Check npm and install the newest release (`--local` for this project) |
+| `/update` | Install the newest release, then close and tell you to reopen (`--local` for this project) |
 | `/quit`, `/exit` | Save and exit |
 
 ### Keyboard shortcuts

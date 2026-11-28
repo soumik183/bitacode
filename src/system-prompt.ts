@@ -6,7 +6,8 @@
  *  - Working directory and project structure
  *  - Tool descriptions (auto-generated from tool schemas)
  *  - Skills catalog (loaded progressively from skill directories)
- *  - AGENTS.md content (custom instructions for the agent)
+ *  - Repository instruction files (AGENTS.md / CLAUDE.md / rules dirs)
+ *  - A bounded symbol outline and the selected output style
  *  - Guidelines for file operations, TODO tracking, etc.
  */
 
@@ -16,39 +17,10 @@ import { getVisibleTools } from './tools/index.js';
 import { buildSkillsCatalogSection, initializeSkillsSupport } from './skills.js';
 import { getActiveRuntimeConfigPath } from './runtime-config.js';
 import { discoverAgents, renderAgentCatalog } from './agents.js';
-
-/**
- * Load AGENTS.md content from cwd and parent directories.
- *
- * AGENTS.md (https://agents.md/) is a simple, open format for guiding coding agents.
- * It's like a README for agents — a dedicated place to give AI coding tools the
- * context they need to work on a project.
- *
- * The lookup is hierarchical:
- *  - Checks cwd, then parent directories up to the filesystem root
- *  - First AGENTS.md found wins
- *  - Returns null if no AGENTS.md is found
- */
-async function loadAgentsMd(): Promise<{ content: string; path: string } | null> {
-  let currentDir = path.resolve('.');
-
-  while (true) {
-    const agentsPath = path.join(currentDir, 'AGENTS.md');
-    try {
-      await fs.access(agentsPath);
-      const content = await fs.readFile(agentsPath, 'utf-8');
-      return { content, path: agentsPath };
-    } catch {
-      // File doesn't exist here — check parent
-    }
-
-    const parentDir = path.dirname(currentDir);
-    if (parentDir === currentDir) break; // Reached filesystem root
-    currentDir = parentDir;
-  }
-
-  return null;
-}
+import { loadSettings } from './settings.js';
+import { loadInstructionContext, renderInstructionContext } from './utils/rules.js';
+import { buildRepoOutline } from './utils/repo-outline.js';
+import { outputStyleSection } from './utils/output-styles.js';
 
 /** Build a filtered directory tree (depth 3, excludes noise). */
 async function buildDirectoryTree(dirPath = '.', depth = 0, maxDepth = 3): Promise<string> {
@@ -107,14 +79,15 @@ export async function generateSystemPrompt(): Promise<string> {
   const toolDescriptions = generateToolDescriptions();
   const skillsSection = buildSkillsCatalogSection(skills);
   const configPath = getActiveRuntimeConfigPath();
-  const agentsMd = await loadAgentsMd();
+  const settings = loadSettings();
+  const instructionContext = await loadInstructionContext();
+  const instructionsSection = renderInstructionContext(instructionContext);
+  const outline = await buildRepoOutline(cwd);
+  const outlineSection = outline ? `\nREPO OUTLINE (declarations by file):\n${outline}\n` : '';
+  const styleSection = outputStyleSection(settings.outputStyle);
   const discoveredAgents = discoverAgents();
   const agentsSection = discoveredAgents.ok && discoveredAgents.value.length > 0
     ? `\nAVAILABLE AGENTS\n\nPass the agent name as \`agent_type\` to sub_agent.\n${renderAgentCatalog(discoveredAgents.value)}\n`
-    : '';
-
-  const agentsMdSection = agentsMd
-    ? `\nAGENTS.md INSTRUCTIONS\n\nThe following instructions are from the AGENTS.md file at: ${agentsMd.path}\n\n${agentsMd.content}\n`
     : '';
 
   return `You are Bitacode, an AI coding agent in the user's terminal. Help with software engineering by taking action: use tools to make real changes, then verify them. Answer directly when no action is needed.
@@ -166,9 +139,9 @@ Configuration Path: ${configPath || 'none (using defaults)'}
 
 PROJECT STRUCTURE:
 ${tree}
-${agentsMdSection}${agentsSection}
+${agentsSection}${instructionsSection}${outlineSection}
 AVAILABLE TOOLS
 
 ${toolDescriptions}
-${skillsSection ? `\n${skillsSection}\n` : ''}`;
+${skillsSection ? `\n${skillsSection}\n` : ''}${styleSection}`;
 }

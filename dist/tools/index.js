@@ -24,6 +24,8 @@ import { startProcessTool, pollProcessTool, writeProcessStdinTool, stopProcessTo
 import { gitStatusTool, gitDiffTool, gitAddTool, gitCommitTool, gitStashTool, gitStatus, gitDiff, gitAdd, gitCommit, gitStash, } from './git.js';
 import { webSearchTool, webSearch } from './web-search.js';
 import { readSubagentTool, readSubagent } from './subagent-session.js';
+import { formTool, form } from './form.js';
+import { parseToolGroups, resolveVisibleTools } from '../utils/tool-groups.js';
 import leven from 'leven';
 // File operations (one tool per file)
 import { multieditTool, multiedit } from './multiedit.js';
@@ -60,7 +62,9 @@ import { undoTool, undo } from './undo.js';
 import { readImageTool, readImage } from './image-input.js';
 import { goToDefinitionTool, goToDefinition, findReferencesTool, findReferences, diagnosticsTool, diagnostics, } from './lsp.js';
 import { updateWorkingCheckpointTool, updateWorkingCheckpoint, memoryAddTool, memoryAdd, memoryListTool, memoryList, memoryForgetTool, memoryForget, verifyProjectTool, verifyProject, } from './memory-tools.js';
+import { secretScanTool, secretScan } from './secret-scan.js';
 export { setDangerouslySkipPermissions, setApprovalHandler, clearApprovalHandler, setApprovalMode, getApprovalMode } from '../utils/approval.js';
+export { setFormHandler, clearFormHandler, hasFormHandler } from './form.js';
 export { recordSubAgentStatus } from './agent-status.js';
 export { DEFAULT_TEAM, TEAM_CHANNEL, postMessage, readMessages, listTeams, clearTeam, teamRoster, defineAgent, getAgent, listAgents, clearAgents, recordSpawnIntent, listSpawnIntents, clearSpawnIntents, } from '../utils/team.js';
 export { isNotification } from './notify.js';
@@ -94,6 +98,7 @@ export const tools = [
     gitStashTool,
     webSearchTool,
     readSubagentTool,
+    formTool,
     // File operations
     multieditTool,
     deleteTool,
@@ -140,6 +145,7 @@ export const tools = [
     memoryListTool,
     memoryForgetTool,
     verifyProjectTool,
+    secretScanTool,
 ];
 // Mutable tools list — MCP and sub-agent tools get appended at runtime
 let dynamicTools = [];
@@ -155,7 +161,59 @@ export function clearDynamicTools() {
     dynamicTools = [];
 }
 export function getAllTools() {
-    return [...tools, ...dynamicTools];
+    const all = [...tools, ...dynamicTools];
+    return toolFilter ? all.filter((tool) => isToolAllowed(tool.function.name)) : all;
+}
+let toolFilter = null;
+export function setToolFilter(filter) {
+    if (!filter) {
+        toolFilter = null;
+        return;
+    }
+    const allow = (filter.allow ?? []).map((name) => name.trim()).filter(Boolean);
+    const deny = (filter.deny ?? []).map((name) => name.trim()).filter(Boolean);
+    toolFilter = allow.length === 0 && deny.length === 0
+        ? null
+        : { ...(allow.length > 0 ? { allow } : {}), ...(deny.length > 0 ? { deny } : {}) };
+}
+export function clearToolFilter() {
+    toolFilter = null;
+}
+/** Exported for tests and for the loop's sub_agent special case. */
+export function isToolAllowed(name) {
+    if (!toolFilter)
+        return true;
+    if (toolFilter.deny?.includes(name))
+        return false;
+    if (toolFilter.allow && toolFilter.allow.length > 0)
+        return toolFilter.allow.includes(name);
+    return true;
+}
+/**
+ * Tool schemas advertised to the model. By default every tool is advertised,
+ * exactly as before. Setting BITACODE_TOOL_GROUPS (or calling setToolGroups)
+ * narrows the list to the named groups; hidden tools remain dispatchable so a
+ * model can still call one that was revealed by `list_tools` or remembered
+ * from an earlier turn.
+ */
+let toolGroupsOverride;
+export function setToolGroups(groups) {
+    toolGroupsOverride = groups && groups.length > 0 ? [...groups] : undefined;
+}
+export function getVisibleTools() {
+    const configured = process.env.BITACODE_TOOL_GROUPS?.trim();
+    if (!toolGroupsOverride && !configured)
+        return getAllTools();
+    const groups = toolGroupsOverride ?? parseToolGroups(configured);
+    return resolveVisibleTools(getAllTools(), { groups });
+}
+/** Whether a tool group is advertised, so loop-level tools can follow policy. */
+export function isGroupVisible(group) {
+    const configured = process.env.BITACODE_TOOL_GROUPS?.trim();
+    if (!toolGroupsOverride && !configured)
+        return true;
+    const groups = toolGroupsOverride ?? parseToolGroups(configured);
+    return groups.includes('all') || groups.includes(group);
 }
 // Dynamic tool handlers (for MCP tools, etc.)
 const dynamicHandlers = new Map();
@@ -287,6 +345,10 @@ const TOOL_ARGS = {
     update_working_checkpoint: [{ canonical: 'content', aliases: [], required: true }],
     memory_add: [{ canonical: 'text', aliases: [], required: true }],
     memory_forget: [{ canonical: 'target', aliases: [], required: true }],
+    secret_scan: [
+        { canonical: 'path', aliases: ['file_path', 'directory', 'dir'] },
+        { canonical: 'text', aliases: ['content'] },
+    ],
     // Aliases — same specs as the canonical tool they delegate to.
     grep: [S.searchTerm, S.directory],
     search_text: [S.searchTerm, S.directory],
@@ -355,7 +417,7 @@ function suggestToolNames(toolName, candidates, limit = 3) {
 let planMode = false;
 export function setPlanMode(value) { planMode = value; }
 export function isPlanMode() { return planMode; }
-const MUTATING_TOOLS = new Set([
+export const MUTATING_TOOLS = new Set([
     'write_file', 'edit_file', 'apply_patch', 'multiedit', 'delete', 'rename', 'move',
     'copy', 'mkdir', 'git_add', 'git_commit', 'git_stash', 'undo', 'bash', 'shell',
     'terminal', 'run', 'start_process', 'background', 'kill', 'stop_process', 'watch',
@@ -398,6 +460,9 @@ export const TOOL_NAME_ALIASES = new Set([
     'command_exists',
 ]);
 export async function handleToolCall(toolName, args, context = {}) {
+    if (!isToolAllowed(toolName)) {
+        return `Error: tool "${toolName}" is disabled for this run (tool filter).`;
+    }
     if (planMode && MUTATING_TOOLS.has(toolName)) {
         return `Error: ${toolName} is blocked in plan mode. Press Tab to switch to build mode.`;
     }
@@ -459,6 +524,8 @@ async function dispatchToolCall(toolName, rawArgs, context) {
             const request = normalizeAskRequest(args);
             return await askUser(request, context.sessionId);
         }
+        case 'form':
+            return await form(args, context);
         case 'sub_agent':
             return 'Error: sub_agent is executed by the agentic loop, not by handleToolCall. It is handled directly by the loop.';
         case 'apply_patch':
@@ -576,6 +643,8 @@ async function dispatchToolCall(toolName, rawArgs, context) {
             return await memoryForget(args);
         case 'verify_project':
             return await verifyProject(args);
+        case 'secret_scan':
+            return await secretScan(args);
         // ── Aliases for common tool names (same implementation, friendly names) ──
         // Args are normalized above, so alias-style keys arrive under canonical names.
         case 'grep':

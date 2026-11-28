@@ -18,7 +18,9 @@ export function extractToolDetail(tool, args) {
             return parts.slice(0, 3).join(' ') + (parts.length > 3 ? '...' : '');
         }
         case 'todo_write':
-            return Array.isArray(args.todos) ? `${args.todos.length} task(s)` : '';
+            if (!Array.isArray(args.todos))
+                return '';
+            return `${args.todos.length} task${args.todos.length === 1 ? '' : 's'}`;
         case 'todo_read':
             return 'read';
         case 'webfetch': {
@@ -262,7 +264,7 @@ function todoLabel(args) {
         title = 'Todo update';
     else
         title = 'Todo add';
-    return { title, hint: title === 'Todo complete' ? `${completed} done` : `${n} items` };
+    return { title, hint: title === 'Todo complete' ? `${completed} done` : `${n} item${n === 1 ? '' : 's'}` };
 }
 function hintFor(tool, args) {
     switch (tool) {
@@ -399,8 +401,9 @@ function hintFor(tool, args) {
         case 'subagent':
         case 'task': {
             const tasks = args.tasks;
-            if (Array.isArray(tasks) && tasks.length > 0)
-                return `${tasks.length} tasks`;
+            if (Array.isArray(tasks) && tasks.length > 0) {
+                return `${tasks.length} task${tasks.length === 1 ? '' : 's'}`;
+            }
             return short(str(args, 'agent_type', 'agent', 'name') || str(args, 'task', 'prompt'));
         }
         default: {

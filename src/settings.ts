@@ -12,10 +12,10 @@ import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
 import { THEME_NAMES, type ThemeName } from './theme/types.js';
 
 /** How write/edit/shell operations are approved. */
-export type ApprovalMode = 'manual' | 'auto' | 'yolo';
+export type ApprovalMode = 'manual' | 'acceptEdits' | 'auto' | 'yolo';
 
 function isApprovalMode(value: unknown): value is ApprovalMode {
-  return value === 'manual' || value === 'auto' || value === 'yolo';
+  return value === 'manual' || value === 'acceptEdits' || value === 'auto' || value === 'yolo';
 }
 
 /** Bounds and default for the fraction of context that triggers compaction. */
@@ -58,6 +58,8 @@ export interface UiSettings {
   compactThreshold?: number;
   /** Colour palette used by the UI. */
   theme?: ThemeName;
+  /** Session voice preset id (see utils/output-styles.ts). */
+  outputStyle?: string;
   /** Segments shown in the status line, in display order. */
   statusLine?: StatusLineItem[];
   /**
@@ -106,6 +108,7 @@ export const DEFAULT_SETTINGS: UiSettings = {
   statusLine: [...STATUS_LINE_ITEMS],
   permissions: { allow: [], ask: [], deny: [] },
   autoverify: false,
+  outputStyle: 'default',
   guardUnreadEdits: true,
   spillToolResults: true,
   toolGroups: [],
@@ -186,6 +189,9 @@ export function loadSettings(): UiSettings {
         : [...STATUS_LINE_ITEMS],
       permissions: normalizePermissions(parsed.permissions),
       autoverify: parsed.autoverify === true,
+      outputStyle: typeof parsed.outputStyle === 'string' && parsed.outputStyle.trim().length > 0
+        ? parsed.outputStyle.trim()
+        : 'default',
       guardUnreadEdits: parsed.guardUnreadEdits !== false,
       spillToolResults: parsed.spillToolResults !== false,
       toolGroups: normalizeToolGroups(parsed.toolGroups),

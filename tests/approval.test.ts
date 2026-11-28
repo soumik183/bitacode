@@ -117,6 +117,24 @@ test('switching back from yolo clears the flag, but not an explicit CLI override
   assert.equal(isDangerouslySkipPermissions(), true);
 });
 
+test('acceptEdits approves file changes automatically but still gates shell commands', async () => {
+  let calls = 0;
+  setApprovalHandler(async () => {
+    calls += 1;
+    return 'approve_once';
+  });
+
+  setApprovalMode('acceptEdits');
+  assert.equal(getApprovalMode(), 'acceptEdits');
+  assert.equal(isDangerouslySkipPermissions(), false);
+
+  assert.equal(await requestApproval(REQ), true);
+  assert.equal(calls, 0, 'file writes need no prompt');
+
+  assert.equal(await requestApproval(SHELL_REQ), true);
+  assert.equal(calls, 1, 'shell commands still prompt');
+});
+
 test('mode switching is idempotent', async () => {
   setApprovalMode('auto');
   setApprovalMode('auto');

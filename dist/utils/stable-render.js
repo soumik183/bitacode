@@ -13,14 +13,20 @@ function erasePrefixLength(text) {
 }
 const instrumented = new WeakSet();
 /**
- * Last positive, finite row count seen on any installed stdout. `stdout.rows`
+ * Last positive, finite row count seen on each installed stdout. `stdout.rows`
  * briefly reads 0/NaN during zoom bursts; jumping to the 24-row fallback then
- * would paint past the live screen, so keep the last real value instead.
+ * would paint past the live screen, so keep the last real value instead. Keyed
+ * by stream so a second install starts with its own baseline.
  */
-let lastValidRows = 24;
-/** ED2/ED3: a full display clear passes through and physically blanks the screen. */
+const DEFAULT_ROWS = 24;
+const lastValidRowsByStream = new WeakMap();
+/**
+ * ED2/ED3: a physical display clear only counts when it *starts* a chunk
+ * (optionally after a cursor-home sequence). An ESC[2J echoed inside tool
+ * output is just text and must not reset the painted-row bookkeeping.
+ */
 // eslint-disable-next-line no-control-regex -- matching the terminal ESC is the point here
-const FULL_CLEAR = /\x1b\[[23]J/;
+const FULL_CLEAR = /^(?:\x1b\[(?:[01]?;[01]?)?[Hf])?\x1b\[[23]J/;
 export function installStableRenderer(stdout) {
     // Installing twice would wrap the wrapper, so every frame would be rewritten
     // twice (double newlines, drifting cursor). Guard per stream.
@@ -52,8 +58,9 @@ export function installStableRenderer(stdout) {
         const suffix = body.slice(lastBreak + 1);
         const rowsNow = stdout.rows;
         if (typeof rowsNow === 'number' && Number.isFinite(rowsNow) && rowsNow > 0) {
-            lastValidRows = Math.floor(rowsNow);
+            lastValidRowsByStream.set(stdout, Math.floor(rowsNow));
         }
+        const lastValidRows = lastValidRowsByStream.get(stdout) ?? DEFAULT_ROWS;
         // A zoom-out can leave `paintedRows` far larger than the new terminal.
         // Never write past the live screen height, or we scroll stale rows into
         // view and leave a blank/black screen. App already renders at rows - 1.
@@ -77,16 +84,24 @@ export function terminalRestoreSequence() {
     return '\x1b[?1006l\x1b[?1000l\x1b]111\x07\x1b[?1049l\x1b[?25h';
 }
 const RESTORE_EVENTS = ['exit', 'SIGINT', 'SIGTERM', 'SIGHUP'];
-let activeTerminalRestore = null;
+/**
+ * One disposer per (stdout, emitter) pair. A global single disposer made a
+ * second install on another stream silently no-op; the nested WeakMaps keep
+ * each install independent and garbage-collectable while staying idempotent
+ * for the same pair.
+ */
+const activeTerminalRestore = new WeakMap();
 /**
  * Restore the terminal on exit or a signal even when React never unmounts
  * (Termux killing the app, terminal closing, native SIGTERM). The bytes are
- * written at most once and this installer is idempotent. Ink's own signalExit
- * handler is left alone — it still handles the actual process teardown.
+ * written at most once per stream and this installer is idempotent per pair.
+ * Ink's own signalExit handler is left alone — it still handles the actual
+ * process teardown.
  */
 export function installTerminalRestore(stdout, emitter = process) {
-    if (activeTerminalRestore)
-        return activeTerminalRestore;
+    const existing = activeTerminalRestore.get(stdout)?.get(emitter);
+    if (existing)
+        return existing;
     let restored = false;
     const restore = () => {
         if (restored)
@@ -99,9 +114,16 @@ export function installTerminalRestore(stdout, emitter = process) {
     const dispose = () => {
         for (const event of RESTORE_EVENTS)
             emitter.off(event, restore);
-        if (activeTerminalRestore === dispose)
-            activeTerminalRestore = null;
+        const byEmitter = activeTerminalRestore.get(stdout);
+        if (byEmitter?.get(emitter) === dispose) {
+            byEmitter.delete(emitter);
+        }
     };
-    activeTerminalRestore = dispose;
+    let byEmitter = activeTerminalRestore.get(stdout);
+    if (!byEmitter) {
+        byEmitter = new WeakMap();
+        activeTerminalRestore.set(stdout, byEmitter);
+    }
+    byEmitter.set(emitter, dispose);
     return dispose;
 }

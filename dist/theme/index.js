@@ -1,6 +1,6 @@
 import dark from './themes/dark.js';
 export { THEME_NAMES } from './types.js';
-export { themes, getTheme } from './palettes.js';
+export { themes, getTheme, registerCustomTheme, customThemes } from './palettes.js';
 export { ThemeProvider, useTheme } from './context.js';
 /**
  * Compatibility export: the historical `theme` object used to be the flat

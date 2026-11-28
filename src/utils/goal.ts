@@ -156,7 +156,7 @@ export function recordRound(state: GoalState, summary: string, verdictText?: str
       : [];
     const history = [...previous, cleanSummary].slice(-MAX_HISTORY_ENTRIES);
 
-    const parsed = parseVerdict(verdictText);
+    const parsed = parseVerdict(verdictText ?? '');
     const verdict: GoalState['verdict'] =
       parsed === 'pass'
         ? 'pass'

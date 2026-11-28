@@ -125,7 +125,22 @@ export const UsageDisplay: React.FC<UsageDisplayProps> = ({
   // One combined row per side keeps the footer a single line; a segment is
   // joined only when it is enabled so hidden items leave no stray separators.
   const rightParts: React.ReactNode[] = [];
-  if (show('model')) rightParts.push(<Text key="model" color={theme.muted}>{modelLabel}</Text>);
+  if (show('model')) {
+    // "Provider / Model": dim the provider, brighten the model. This reads as a
+    // hierarchy instead of one flat grey string.
+    const split = modelLabel.indexOf(' / ');
+    if (split > 0) {
+      rightParts.push(
+        <Text key="model">
+          <Text color={theme.dim}>{modelLabel.slice(0, split)}</Text>
+          <Text color={theme.border}>{' / '}</Text>
+          <Text color={theme.text}>{modelLabel.slice(split + 3)}</Text>
+        </Text>
+      );
+    } else {
+      rightParts.push(<Text key="model" color={theme.muted}>{modelLabel}</Text>);
+    }
+  }
   if (!compact && show('variant')) {
     rightParts.push(<Text key="variant-sep" color={theme.dim}> · </Text>);
     rightParts.push(<Text key="variant" color={variantColor}>{variantLabel}</Text>);

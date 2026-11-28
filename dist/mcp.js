@@ -28,6 +28,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { loadRuntimeConfig, getRuntimeConfig } from './runtime-config.js';
 import { logger } from './utils/logger.js';
+import { buildMcpEnv } from './utils/mcp-env.js';
 import { registerDynamicTool, registerDynamicHandler, unregisterDynamicTool, unregisterDynamicHandler, } from './tools/index.js';
 const CONNECT_TIMEOUT_MS = 15_000;
 const CALL_TIMEOUT_MS = 30_000;
@@ -118,10 +119,12 @@ async function connectStdioServer(serverName, config) {
     const transport = new StdioClientTransport({
         command: config.command,
         args: config.args || [],
-        env: {
-            ...process.env,
-            ...(config.env || {}),
-        },
+        // Never hand every provider key in process.env to a third-party binary.
+        // Only a minimal baseline plus explicitly allowlisted variables are passed.
+        env: buildMcpEnv({
+            allowed: config.envAllowlist ?? config.env,
+            extra: (config.env && typeof config.env === 'object' ? config.env : {}),
+        }),
         cwd: config.cwd,
         stderr: 'pipe',
     });
@@ -242,7 +245,22 @@ async function closeConnection(name, conn) {
 export async function initializeMcp() {
     await loadRuntimeConfig();
     const servers = getRuntimeConfig().mcp?.servers || {};
-    if (Object.keys(servers).length === 0)
+    // Close every connection that is no longer configured (or became invalid)
+    // before doing anything else. Previously a removed server kept its child
+    // process and its dynamic tools registered for the rest of the session.
+    const configured = new Set(Object.keys(servers));
+    for (const [name, existing] of [...connections]) {
+        const serverConfig = servers[name];
+        const removable = !configured.has(name) ||
+            !serverConfig ||
+            serverConfig.enabled === false ||
+            Boolean(mcpConfigError(serverConfig));
+        if (removable) {
+            logger.info(`Closing stale MCP connection: ${name}`);
+            await closeConnection(name, existing);
+        }
+    }
+    if (configured.size === 0)
         return;
     logger.info('Loading MCP servers from merged runtime config');
     const startedAt = Date.now();

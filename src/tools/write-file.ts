@@ -5,8 +5,9 @@
 import fs, { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import { validatePath } from '../utils/path-validation.js';
+import { assertWritablePath } from '../utils/protected-paths.js';
 import { requestApproval } from '../utils/approval.js';
-import { recordRead } from '../utils/file-time.js';
+import { recordRead, checkReadBefore } from '../utils/file-time.js';
 import { computeUnifiedDiff } from '../utils/unified-diff.js';
 
 const MAX_DIFF_READ_BYTES = 2 * 1024 * 1024;
@@ -39,8 +40,16 @@ export async function writeFile(filePath: string, content: string, sessionId?: s
   let validated: string;
   try {
     validated = await validatePath(filePath);
+    assertWritablePath(validated);
   } catch (err: any) {
     return `Error: ${err.message}`;
+  }
+
+  // Staleness guard: refuse to overwrite a file that changed on disk after the
+  // model last read it. New files and never-read files are unaffected.
+  if (sessionId) {
+    const staleError = checkReadBefore(sessionId, validated);
+    if (staleError) return staleError;
   }
 
   // Preserve the permissions of an existing file; new files get the default.

@@ -201,14 +201,23 @@ export const LiveStatus: React.FC<LiveStatusProps> = ({
   const candidates = liveStatusCandidates({ activity, tool, elapsedMs, tps, hint });
   const fitted = candidates.find((entry) => entry.length <= budget) ?? candidates[candidates.length - 1];
   const text = fitted.length <= budget ? fitted : `${fitted.slice(0, Math.max(1, budget - 1))}…`;
+  // Split the label from its metrics so the phase reads first and the numbers
+  // recede, rather than one flat grey line.
+  const [label, ...trailing] = text.split(' · ');
+  const tail = trailing.length > 0 ? ` · ${trailing.join(' · ')}` : '';
 
   return (
     <Box height={1} flexShrink={0} paddingX={gutter} overflow="hidden">
       <Text wrap="truncate-end">
         <Text color={color}>{spinnerGlyph(frame, animate)} </Text>
-        <Text color={theme.muted} wrap="truncate-end">
-          {text}
+        <Text color={theme.text} bold wrap="truncate-end">
+          {label}
         </Text>
+        {tail ? (
+          <Text color={theme.dim} wrap="truncate-end">
+            {tail}
+          </Text>
+        ) : null}
       </Text>
     </Box>
   );

@@ -325,7 +325,7 @@ async function runSubAgentOnce(
   // policy onto the child. Discovery is fail-safe: one bad file is logged by
   // the loader and never prevents the child from running.
   const agentRegistry: readonly AgentDefinition[] = knownAgentsResult.ok ? knownAgentsResult.value : BUILTIN_AGENTS;
-  const selectedAgent = resolveAgentSelection(agentType, agentRegistry);
+  const selectedAgent = resolveAgentSelection(agentType, [...agentRegistry]);
   if (selectedAgent.prompt) {
     subSystemPrompt += `\n\n## Agent: ${selectedAgent.name}\n${selectedAgent.prompt}`;
   }

@@ -8,6 +8,7 @@
 import fs from 'node:fs/promises';
 import { applyPatch as applyPatchToText, parsePatch } from 'diff';
 import { validatePath } from '../utils/path-validation.js';
+import { assertWritablePath } from '../utils/protected-paths.js';
 import { requestApproval } from '../utils/approval.js';
 import { computeUnifiedDiff } from '../utils/unified-diff.js';
 export const applyPatchTool = {
@@ -76,6 +77,7 @@ export async function applyPatch(patch, sessionId) {
         let validated;
         try {
             validated = await validatePath(targetPath);
+            assertWritablePath(validated);
         }
         catch (err) {
             return `Error: ${err.message}`;

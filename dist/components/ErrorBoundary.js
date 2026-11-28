@@ -6,7 +6,7 @@ import { logger } from '../utils/logger.js';
 /** Functional fallback so the error card can read the active palette. */
 const Fallback = ({ message }) => {
     const theme = useTheme();
-    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [_jsx(Text, { color: theme.error, bold: true, children: "Bitacode hit an unexpected UI error." }), _jsx(Text, { color: theme.muted, children: message }), _jsx(Text, { color: theme.dim, children: "Press ctrl+c to quit. Completed turns are already saved." })] }));
+    return (_jsxs(Box, { flexDirection: "column", paddingX: 2, paddingY: 1, children: [_jsx(Text, { color: theme.error, bold: true, children: "Bitacode hit an unexpected UI error." }), _jsx(Text, { color: theme.muted, wrap: "truncate-end", children: String(message ?? '').replace(/\s+/g, ' ').trim() }), _jsx(Text, { color: theme.dim, children: "Press ctrl+c to quit. Completed turns are already saved." })] }));
 };
 /**
  * Last line of defence for render errors. Without it React unmounts the whole

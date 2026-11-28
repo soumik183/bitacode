@@ -84,7 +84,7 @@ function isValidWorktreeName(name: unknown): name is string {
   return true;
 }
 
-function failed(error: unknown, fallback: string): WorktreeResult<never> {
+function failed(error: unknown, fallback: string): { ok: false; error: string } {
   let message = '';
   if (error instanceof Error) message = error.message.trim();
   if (!message) message = String(error ?? '').trim();

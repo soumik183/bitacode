@@ -73,6 +73,8 @@ export interface PaletteItem {
    * came from an alias/keyword and nothing in the label is emphasised.
    */
   matchIndices?: readonly number[];
+  /** Marks the row that is currently in effect (provider, model, …). */
+  active?: boolean;
 }
 
 export interface PaletteProps {
@@ -239,7 +241,13 @@ export const Palette: React.FC<PaletteProps> = ({
             {showSection ? (
               <Text color={theme.dim} wrap="truncate-end">{`  ${item.section}`}</Text>
             ) : null}
-            <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+            <Box
+              flexDirection="row"
+              justifyContent="space-between"
+              width="100%"
+              backgroundColor={active ? theme.surfaceAlt : undefined}
+              overflow="hidden"
+            >
               <Box flexDirection="row" flexShrink={1} minWidth={1}>
                 <Box flexShrink={0}>
                   <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>

@@ -10,7 +10,7 @@ import { logger } from './utils/logger.js';
 import { DEFAULT_VARIANT, VARIANTS } from './variants.js';
 import { THEME_NAMES } from './theme/types.js';
 function isApprovalMode(value) {
-    return value === 'manual' || value === 'auto' || value === 'yolo';
+    return value === 'manual' || value === 'acceptEdits' || value === 'auto' || value === 'yolo';
 }
 /** Bounds and default for the fraction of context that triggers compaction. */
 export const COMPACT_THRESHOLD_MIN = 0.5;
@@ -37,8 +37,15 @@ export const DEFAULT_SETTINGS = {
     statusLine: [...STATUS_LINE_ITEMS],
     permissions: { allow: [], ask: [], deny: [] },
     autoverify: false,
+    outputStyle: 'default',
     guardUnreadEdits: true,
     spillToolResults: true,
+    toolGroups: [],
+    keybindings: {},
+    themePath: '',
+    goalMode: false,
+    vcsSnapshots: false,
+    sessionEventLog: false,
 };
 function getSettingsPath() {
     const home = os.homedir();
@@ -51,6 +58,34 @@ function normalizeStringList(value) {
     if (!Array.isArray(value))
         return [];
     return value.filter((entry) => typeof entry === 'string' && entry.trim().length > 0);
+}
+const VALID_TOOL_GROUPS = new Set(['core', 'files', 'web', 'process', 'agents', 'all']);
+const VALID_KEY_ACTIONS = new Set([
+    'newSession', 'sessions', 'model', 'provider', 'help', 'settings', 'subagents',
+    'clearInput', 'clearTranscript', 'thinking', 'retry', 'copyLast', 'editLast', 'search',
+]);
+const KEY_PATTERN = /^(?:(?:ctrl|alt|shift)\+[a-z0-9]+|[a-z0-9]+|tab|esc|enter|space|up|down|left|right|pageup|pagedown|home|end)$/;
+function normalizeToolGroups(value) {
+    if (!Array.isArray(value))
+        return [];
+    return value
+        .filter((entry) => typeof entry === 'string' && VALID_TOOL_GROUPS.has(entry.toLowerCase()))
+        .map((entry) => entry.toLowerCase());
+}
+function normalizeKeybindings(value) {
+    const input = value && typeof value === 'object' ? value : {};
+    const result = {};
+    const used = new Set();
+    for (const [action, key] of Object.entries(input)) {
+        if (!VALID_KEY_ACTIONS.has(action) || typeof key !== 'string')
+            continue;
+        const normalized = key.toLowerCase().trim().slice(0, 24);
+        if (!KEY_PATTERN.test(normalized) || used.has(normalized))
+            continue;
+        used.add(normalized);
+        result[action] = normalized;
+    }
+    return result;
 }
 function normalizePermissions(value) {
     const input = (value && typeof value === 'object' ? value : {});
@@ -79,8 +114,17 @@ export function loadSettings() {
                 : [...STATUS_LINE_ITEMS],
             permissions: normalizePermissions(parsed.permissions),
             autoverify: parsed.autoverify === true,
+            outputStyle: typeof parsed.outputStyle === 'string' && parsed.outputStyle.trim().length > 0
+                ? parsed.outputStyle.trim()
+                : 'default',
             guardUnreadEdits: parsed.guardUnreadEdits !== false,
             spillToolResults: parsed.spillToolResults !== false,
+            toolGroups: normalizeToolGroups(parsed.toolGroups),
+            keybindings: normalizeKeybindings(parsed.keybindings),
+            themePath: typeof parsed.themePath === 'string' && parsed.themePath.length <= 512 ? parsed.themePath : '',
+            goalMode: parsed.goalMode === true,
+            vcsSnapshots: parsed.vcsSnapshots === true,
+            sessionEventLog: parsed.sessionEventLog === true,
         };
     }
     catch {

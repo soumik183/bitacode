@@ -18,13 +18,13 @@ Layout:
 */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text, useApp, useInput, useStdout, measureElement } from 'ink';
-import { basename } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { spawn } from 'node:child_process';
 import { LeftBar } from './components/LeftBar.js';
 import { Palette, SLASH_COMMANDS } from './components/Palette.js';
 import { Dialog, DialogList, dialogInnerWidth } from './components/Dialog.js';
 import { ApprovalPrompt } from './components/ApprovalPrompt.js';
-import { AskPrompt } from './components/AskPrompt.js';
+import { AskPrompt, askPromptHint } from './components/AskPrompt.js';
 import { ApiKeyPrompt } from './components/ApiKeyPrompt.js';
 import { EntryErrorBoundary } from './components/EntryErrorBoundary.js';
 import { UsageDisplay } from './components/UsageDisplay.js';
@@ -36,10 +36,10 @@ import { TodoPanel, todoPanelRows } from './components/TodoPanel.js';
 import { SubAgentActivity, subAgentActivityRows, subAgentActivitySummary, upsertSubAgentActivity, } from './components/SubAgentActivity.js';
 import { SubAgentDetail } from './components/SubAgentDetail.js';
 import { listSubAgentRuns, loadSubAgentRun, } from './utils/subagent-store.js';
-import { ThemeProvider, useTheme, THEME_NAMES, themes } from './theme/index.js';
+import { ThemeProvider, useTheme, THEME_NAMES, getTheme, registerCustomTheme } from './theme/index.js';
 import { loadSettings, saveSettings, STATUS_LINE_ITEMS, } from './settings.js';
 import { VARIANTS } from './variants.js';
-import { PromptInput } from './components/PromptInput.js';
+import { PromptInput, charWidth } from './components/PromptInput.js';
 import { createProviderClient } from './providers/client.js';
 import { answerLocally } from './utils/local-answers.js';
 import { detectTerminalProfile } from './utils/terminal.js';
@@ -47,7 +47,7 @@ import { createDecodeSpeedTracker } from './utils/decode-speed.js';
 import { loadHooks, runHooks } from './utils/hooks.js';
 import { isProjectTrusted, trustProject } from './utils/project-trust.js';
 import { loadEffectiveRules } from './commands/permissions.js';
-import { mergeRuleSets } from './utils/permission-rules.js';
+import { mergeRuleSets, describeRuleSet } from './utils/permission-rules.js';
 import { loadCustomCommands, expandCommand } from './utils/custom-commands.js';
 import { loadPlugins } from './utils/plugins.js';
 import { loadHistory, appendHistory, HistoryNavigator } from './utils/input-history.js';
@@ -56,9 +56,20 @@ import { findMentionToken, applyMention, listMentionCandidates } from './utils/m
 import { collectMentionCandidates } from './utils/mention-candidates.js';
 import { readGitBranch } from './utils/git-branch.js';
 import { openInBrowser, REPO_URL, BUG_REPORT_URL } from './utils/browser.js';
+import { searchSessions } from './utils/session-search.js';
+import { createInbox } from './utils/session-inbox.js';
+import { discoverAgents, renderAgentCatalog } from './agents.js';
+import { formatTaskNotification, listBackgroundJobs, stopAllBackgroundJobs, } from './utils/background-jobs.js';
+import { deleteDraft, listDrafts, popDraft, saveDraft } from './utils/draft-stash.js';
+import { createConfigWatcher, defaultWatchTargets } from './utils/config-watch.js';
+import { discoverThemeFiles } from './theme/discovery.js';
+import { resolveKeybind } from './utils/keybinds.js';
 import { pickerClickIndex } from './utils/picker-click.js';
 import { splitPathTokens } from './utils/path-highlight.js';
 import { commonPrefix } from './utils/completion.js';
+import { fuzzyFilter } from './utils/fuzzy.js';
+import { formatHints } from './utils/hints.js';
+import { renderShortcutPanel } from './utils/shortcuts.js';
 import { detectChecks, runChecks, renderCheckReport } from './utils/autoverify.js';
 import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
 import { appendJournal } from './utils/session-journal.js';
@@ -70,8 +81,8 @@ import { getRuntimeConfigPath, readConfig, resolveApiKey, writeActiveSelection, 
 import { getActiveRuntimeConfigPath, loadRuntimeConfig } from './runtime-config.js';
 import { getAllProviders, getProvider, getModelDetails, getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { runAgenticLoop, initializeMessages, } from './agentic-loop.js';
-import { setDangerouslySkipPermissions, setApprovalMode, setApprovalHandler, clearApprovalHandler, setAskHandler, recordSubAgentStatus, handleToolCall, setPlanMode, } from './tools/index.js';
-import { setLogLevel, LogLevel, initLogFile, logger } from './utils/logger.js';
+import { setDangerouslySkipPermissions, setApprovalMode, setApprovalHandler, clearApprovalHandler, setAskHandler, setFormHandler, clearFormHandler, setToolGroups, recordSubAgentStatus, handleToolCall, setPlanMode, } from './tools/index.js';
+import { setLogLevel, LogLevel, initLogFile, logger, getRecentLogs } from './utils/logger.js';
 import { createSession, deleteSession, ensureSystemPromptAtTop, hasConversationMessages, saveSession, loadSession, listSessions, generateTitle, formatSessionAge, } from './sessions.js';
 import { clearTodos, getTodosForSession, setTodosForSession } from './tools/todo.js';
 import { stopAllProcesses } from './tools/process.js';
@@ -84,6 +95,8 @@ import { itemAtViewportRow } from './utils/transcript.js';
 import { getLeftMousePress, getWheelDelta, isMouseReport, stripMouseReports } from './utils/mouse.js';
 import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import { formatSessionExit } from './utils/session-exit-format.js';
+import { formatUpdateExit } from './utils/update-exit-format.js';
+import { formatInstallFailure } from './utils/cli-update-format.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import { clampScroll, maxScrollOffset, scrollAfterGrowth, sliceItemsToWindow, visibleRowWindow, } from './utils/scroll.js';
 import { clampIndex, composerTextWidth, finiteDim, frameRows, resolveLayout, splitLiveArea, transcriptFillerRows, } from './utils/layout.js';
@@ -140,7 +153,7 @@ const SPLASH_LINES = [
 ];
 const Splash = () => {
     const theme = useTheme();
-    return (_jsx(Box, { flexDirection: "column", alignItems: "center", children: _jsx(Text, { color: theme.text, bold: true, children: SPLASH_LINES.join('\n') }) }));
+    return (_jsxs(Box, { flexDirection: "column", alignItems: "center", children: [_jsx(Text, { color: theme.accent, bold: true, children: SPLASH_LINES[0] }), _jsx(Text, { color: theme.accent, bold: true, children: SPLASH_LINES[1] }), _jsx(Box, { height: 1 }), _jsx(Text, { color: theme.muted, children: "a small, readable agent" }), _jsx(Box, { height: 1 }), _jsx(Text, { color: theme.dim, children: "type a request \u00B7 / commands" })] }));
 };
 // First-run guidance lives in the main screen, never in a blocking wizard.
 const SETUP_HINT = 'No provider configured — type /provider to choose one';
@@ -240,6 +253,13 @@ function replaySubAgentActivities(addStatic, activities, palette) {
         return;
     addStatic(_jsx(Box, { paddingX: 2, marginBottom: 1, children: _jsx(Text, { color: palette.muted, children: `▣ ${subAgentActivitySummary(activities)}` }) }));
 }
+/** Display cells of a string (CJK/emoji count as two, combining marks as zero). */
+function displayCells(text) {
+    let cells = 0;
+    for (const ch of Array.from(text))
+        cells += charWidth(ch);
+    return cells;
+}
 // Limit streaming text to the free viewport rows. Count WRAPPED rows, not
 // logical lines: one long token with no newline can still wrap to many rows
 // and grow the frame (which pushes the composer off screen).
@@ -251,15 +271,24 @@ function clipToRows(text, maxRows, columns) {
     let rows = 0;
     for (let index = lines.length - 1; index >= 0; index--) {
         const line = lines[index];
-        const lineRows = Math.max(1, Math.ceil(Array.from(line).length / width));
+        const lineRows = Math.max(1, Math.ceil(displayCells(line) / width));
         if (rows + lineRows > budget) {
             // A single line longer than the whole viewport (a reply with no breaks,
             // or a minified blob) must be clipped too, or the live area renders the
             // entire string every frame and pushes the composer off screen.
             if (kept.length === 0) {
                 const chars = Array.from(line);
-                const maxChars = budget * width;
-                kept.unshift(chars.slice(Math.max(0, chars.length - maxChars)).join(''));
+                const cellBudget = budget * width;
+                let used = 0;
+                let count = 0;
+                for (let i = chars.length - 1; i >= 0; i--) {
+                    const w = charWidth(chars[i]);
+                    if (used + w > cellBudget)
+                        break;
+                    used += w;
+                    count++;
+                }
+                kept.unshift(chars.slice(Math.max(0, chars.length - Math.max(1, count))).join(''));
             }
             break;
         }
@@ -273,7 +302,71 @@ function wrappedRowCount(text, width) {
     const cols = Math.max(1, Math.floor(width));
     return text
         .split('\n')
-        .reduce((total, line) => total + Math.max(1, Math.ceil(Array.from(line).length / cols)), 0);
+        .reduce((total, line) => total + Math.max(1, Math.ceil(displayCells(line) / cols)), 0);
+}
+/**
+ * Turn an Ink input/key pair into a canonical `ctrl+…` / `tab` / `esc` token so
+ * a configured keybinding can be compared with it. Ink reports function keys
+ * and some control bytes as raw `input` strings, hence the normalisation.
+ */
+function canonicalPressed(input, key) {
+    const mods = `${key.ctrl ? 'ctrl+' : key.meta ? 'alt+' : key.shift ? 'shift+' : ''}`;
+    if (key.tab)
+        return `${mods}tab`;
+    if (key.escape)
+        return `${mods}esc`;
+    if (key.return)
+        return `${mods}enter`;
+    if (key.upArrow)
+        return `${mods}up`;
+    if (key.downArrow)
+        return `${mods}down`;
+    if (key.leftArrow)
+        return `${mods}left`;
+    if (key.rightArrow)
+        return `${mods}right`;
+    if (key.pageUp)
+        return `${mods}pageup`;
+    if (key.pageDown)
+        return `${mods}pagedown`;
+    if (key.home)
+        return `${mods}home`;
+    if (key.end)
+        return `${mods}end`;
+    if (key.f12)
+        return `${mods}f12`;
+    const ch = input === '\x1c' ? ',' : input === '\x1f' ? '/' : input;
+    if (!ch)
+        return '';
+    // F12 arrives as `ESC [ 2 4 ~` on most terminals.
+    if (ch === '\x1b[24~')
+        return `${mods}f12`;
+    return `${mods}${ch.toLowerCase()}`;
+}
+/**
+ * Register user palettes synchronously at startup. Called from App before
+ * ThemeProvider resolves a palette, so a saved `custom` selection paints with
+ * its real colours on the very first frame. `settings.themePath` wins over
+ * discovery, which otherwise takes the first alphabetical file in its folder.
+ */
+function registerUserThemes(themePath) {
+    try {
+        const dir = themePath ? dirname(themePath) : undefined;
+        const found = discoverThemeFiles({ extraDirs: dir ? [dir] : [] });
+        if (!found.ok)
+            return;
+        const exact = themePath
+            ? found.value.find((file) => file.path === themePath || basename(file.path) === basename(themePath))
+            : undefined;
+        const ordered = exact ? [exact, ...found.value.filter((file) => file !== exact)] : found.value;
+        for (const file of ordered) {
+            if (registerCustomTheme('custom', file.raw))
+                break;
+        }
+    }
+    catch {
+        // A broken theme file must never stop the TUI from starting.
+    }
 }
 // Tools that can change files or system state. In plan mode their tool_call
 // events are shown as blocked instead of being forwarded to the transcript.
@@ -381,7 +474,7 @@ function copyToClipboard(text) {
 // ─── Help text derived from slash commands ───
 // Shortcuts accept ctrl OR alt (Ink reports Alt via `key.meta`). Text-editing
 // keys a/e/u/w belong to PromptInput, so they are deliberately absent here.
-const APPROVAL_MODES = ['manual', 'auto', 'yolo'];
+const APPROVAL_MODES = ['manual', 'acceptEdits', 'auto', 'yolo'];
 function buildHelpText(approvalMode) {
     // Keep the panel compact: the live area is height-capped so the composer and
     // footer can never be pushed off screen.
@@ -421,6 +514,7 @@ const THEME_INTENTS = {
     sand: 'warm notebook · terracotta',
     moss: 'forest calm · olive, low glare',
     'high-contrast': 'pure black/white · maximum contrast',
+    custom: 'user theme',
 };
 function buildClient(config, apiKeyOverride) {
     // Delegates to the shared factory so headless mode and the TUI cannot drift.
@@ -570,6 +664,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         setPlanMode(mode === 'plan');
         return () => setPlanMode(false);
     }, [mode]);
+    // `?` shortcut overlay and F12 log panel are non-modal: they never steal
+    // focus, and are hidden whenever a dialog owns the frame.
+    const [showShortcuts, setShowShortcuts] = useState(false);
+    const shortcutGuardRef = useRef(false);
+    const [showErrorPanel, setShowErrorPanel] = useState(false);
     // Live one-line hint/toast (retry, copy, background task completion, …).
     const [toast, setToast] = useState(null);
     const toastActiveRef = useRef(false);
@@ -610,6 +709,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         if (toastTimerRef.current)
             clearTimeout(toastTimerRef.current);
     }, []);
+    /** Ctrl+L: drop the transcript cards, rewind scroll and repaint the canvas. */
+    const clearTranscriptAndRedraw = useCallback(() => {
+        setStaticItems([]);
+        setUserScroll(0);
+        setMeasuringTranscript(false);
+        try {
+            stdout?.write('\x1b[2J\x1b[H');
+        }
+        catch {
+            // A closed/unusable stdout must never break the TUI; Ink still redraws
+            // from the cleared state on the next frame.
+        }
+        showToast('Screen cleared', 0);
+    }, [stdout, showToast]);
     // User-facing preferences arrive from App; the live reasoning/todo state
     // stays local. The palette comes from ThemeProvider via useTheme() above.
     // Keep the terminal canvas in step with the palette so the row below the
@@ -649,6 +762,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const [inputResetKey, setInputResetKey] = useState(0);
     // Palette state: slash-command list, provider/model/variant pickers
     const [commandIndex, setCommandIndex] = useState(0);
+    // Ink can deliver Enter with an older `commandIndex` closure; the ref is
+    // updated synchronously on every arrow/typing change so Enter selects the
+    // row that is actually highlighted.
+    const commandIndexRef = useRef(commandIndex);
+    commandIndexRef.current = commandIndex;
     const [picker, setPicker] = useState(null);
     const [pickerIndex, setPickerIndex] = useState(0);
     const [variantId, setVariantId] = useState(settings.variant);
@@ -662,9 +780,83 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [pendingSessionDelete, setPendingSessionDelete] = useState(null);
     // Full provider -> model -> API key wizard, reopened from inside the TUI.
-    // Approval state
+    // Approval state. Each entry carries both settle paths so a session switch
+    // or an abort can close the prompt instead of stranding the tool's promise.
     const [pendingAsk, setPendingAsk] = useState(null);
     const [pendingApproval, setPendingApproval] = useState(null);
+    // Refs mirror the modal slots: async handlers must see a prompt that opened
+    // after their render, and must not let a second prompt overwrite the first.
+    const pendingAskRef = useRef(null);
+    pendingAskRef.current = pendingAsk;
+    const pendingApprovalRef = useRef(null);
+    pendingApprovalRef.current = pendingApproval;
+    const settleAsk = useCallback((response) => {
+        const entry = pendingAskRef.current;
+        if (!entry)
+            return;
+        pendingAskRef.current = null;
+        entry.dispose?.();
+        entry.resolve(response);
+        setPendingAsk(null);
+    }, []);
+    const rejectAsk = useCallback((reason) => {
+        const entry = pendingAskRef.current;
+        if (!entry)
+            return;
+        pendingAskRef.current = null;
+        entry.dispose?.();
+        entry.reject(reason ?? new Error('Question cancelled'));
+        setPendingAsk(null);
+    }, []);
+    const settleApproval = useCallback((response) => {
+        const entry = pendingApprovalRef.current;
+        if (!entry)
+            return;
+        pendingApprovalRef.current = null;
+        entry.resolve(response);
+        setPendingApproval(null);
+    }, []);
+    const rejectApproval = useCallback((reason) => {
+        const entry = pendingApprovalRef.current;
+        if (!entry)
+            return;
+        pendingApprovalRef.current = null;
+        entry.reject(reason ?? new Error('Approval cancelled'));
+        setPendingApproval(null);
+    }, []);
+    /** Open one ask/form prompt; reject a duplicate instead of overwriting it. */
+    const openAsk = useCallback((request, signal) => new Promise((resolve, reject) => {
+        if (pendingAskRef.current) {
+            reject(new Error('Another question or form is already open — answer it first.'));
+            return;
+        }
+        if (signal?.aborted) {
+            reject(new Error('Question cancelled'));
+            return;
+        }
+        let dispose;
+        const onAbort = () => {
+            pendingAskRef.current = null;
+            setPendingAsk(null);
+            reject(new Error('Question cancelled'));
+        };
+        if (signal) {
+            signal.addEventListener('abort', onAbort, { once: true });
+            dispose = () => signal.removeEventListener('abort', onAbort);
+        }
+        const entry = { request, resolve, reject, dispose };
+        pendingAskRef.current = entry;
+        setPendingAsk(entry);
+    }), []);
+    const openApproval = useCallback((request) => new Promise((resolve, reject) => {
+        if (pendingApprovalRef.current) {
+            reject(new Error('Another approval is already open — answer it first.'));
+            return;
+        }
+        const entry = { request, resolve, reject };
+        pendingApprovalRef.current = entry;
+        setPendingApproval(entry);
+    }), []);
     // Usage state
     const [lastUsage, setLastUsage] = useState(null);
     const [totalCost, setTotalCost] = useState(0);
@@ -725,6 +917,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // Session to advertise on exit, and a guard against saving twice on a fast
     // ctrl+c / /quit burst.
     const exitSessionIdRef = useRef(null);
+    // Set after a successful in-app update so the post-exit screen can explain
+    // that the installed build only takes effect on the next launch.
+    const exitUpdateRef = useRef(null);
+    // Guards against a second `/update` while npm is still installing.
+    const updatingRef = useRef(false);
     const exitingRef = useRef(false);
     const assistantMessageRef = useRef(null);
     // Latest reasoning for the current turn; refs survive stale loop closures.
@@ -734,6 +931,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // Monotonic run id. /new bumps it so an older run cannot write its results
     // into the new session after being aborted.
     const activeRunRef = useRef(0);
+    // Prompts typed while a turn is running are admitted here, not dropped.
+    const inboxRef = useRef(createInbox());
+    // A queued prompt is acknowledged only after its turn actually starts, so a
+    // submit that fails early does not silently lose the user's prompt.
+    const queuedDeliveryRef = useRef(null);
+    const deliveryInFlightRef = useRef(false);
+    /** Background jobs whose completion has already been surfaced to the model. */
+    const notifiedJobsRef = useRef(new Set());
     // Buffer for streaming text that accumulates content and flushes complete lines to static
     // This prevents the live streaming area from growing unbounded - complete lines are
     // immediately flushed to <Static>, only the incomplete final line stays in the dynamic frame
@@ -791,12 +996,16 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 // main model can query what its children are doing.
                 recordSubAgentStatus(fields.subAgentId, fields.subAgentTask ?? fields.subAgentLabel ?? '', fields.subAgentStatus ?? 'start');
             }
-            if (fields.subAgentStatus === 'done' || fields.subAgentTool?.status === 'done') {
+            // A child tool finishing is not the child finishing: only the status
+            // field marks completion, so one toast is emitted per sub-agent.
+            if (fields.subAgentStatus === 'done') {
                 const label = fields.subAgentLabel || fields.subAgentTask || 'Sub-agent';
                 showToast(`✓ ${label} finished`);
             }
         }
-        if (event.type === 'tool_result' && event.toolCall?.name === 'start_process') {
+        if (event.type === 'tool_result' &&
+            event.toolCall?.name === 'start_process' &&
+            !(mode === 'plan' && MUTATING_TOOLS.has('start_process'))) {
             showToast('Background process started');
         }
         handleAgentEvent(event);
@@ -823,7 +1032,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     // A terminal that repaints badly (Apple_Terminal) or not at all (TERM=dumb)
     // gets a static footer instead of an animation loop.
     const animationsEnabled = settings.animations && terminalProfile.animations;
-    const toolPolicy = useMemo(() => ({
+    // Built per turn (not memoised): reloadRuntimePolicy mutates the refs in
+    // place, so a memo here would keep serving stale rules/hooks after /trust.
+    const buildToolPolicy = useCallback(() => ({
         permissionRules: rulesRef.current,
         hooks: hooksRef.current,
         guardUnreadEdits: settings.guardUnreadEdits !== false,
@@ -870,6 +1081,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
     }, []);
     const printedThreadErrorIdsRef = useRef(new Set());
+    // Dedupe the baked error card so a theme change cannot reprint the same error.
+    const printedErrorRef = useRef(null);
     const initializeWithConfig = useCallback(async (loadedConfig) => {
         // The first-run wizard may have just written a new config, so refresh the
         // provider registry before building the client.
@@ -1048,9 +1261,10 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setPendingSessionDelete(null);
     }, [picker]);
     useEffect(() => {
-        if (error) {
-            addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.error, children: ["Error: ", error] }) }));
-        }
+        if (!error || printedErrorRef.current === error)
+            return;
+        printedErrorRef.current = error;
+        addStatic(_jsx(Box, { paddingX: 2, children: _jsxs(Text, { color: theme.error, children: ["Error: ", error] }) }));
     }, [error, addStatic, theme]);
     useEffect(() => {
         for (const threadError of threadErrors) {
@@ -1086,6 +1300,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         return () => {
             stdout.write('\x1b[?1006l\x1b[?1000l');
             stdout.write('\x1b[?1049l');
+            // After an update, tell the user to relaunch before the usual resume card:
+            // the just-installed version is not what this process is running.
+            const updateExit = exitUpdateRef.current;
+            if (updateExit)
+                stdout.write(`${formatUpdateExit(updateExit, themeRef.current)}\n`);
             // The card is painted while the themed terminal background is still set;
             // reset it afterwards so the user's own colours come back.
             const exitId = exitSessionIdRef.current;
@@ -1130,58 +1349,6 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             stdout.off('resize', onResize);
         };
     }, [stdout, dims.columns, dims.rows]);
-    // The bottom input/footer are fixed; the transcript viewport takes the
-    // remaining rows. Measure it so wheel/keyboard scrolling can clamp exactly.
-    //
-    // The viewport height is derived from the frame minus the live panels, so it
-    // only needs re-measuring when one of those changes size. Measuring on every
-    // render (the previous behaviour) fired a state update per keystroke and per
-    // spinner tick, which reflowed the whole tree and made scrolling stutter.
-    const liveAreaSignature = [
-        rows,
-        columns,
-        resizeTick,
-        todos.length,
-        thinkingText.length,
-        thinkingExpanded,
-        streamingText.length,
-        // `busy` is declared later as loading || isStreaming || Boolean(activeTool);
-        // listing its parts here avoids a use-before-declaration and re-measures on
-        // every transition into or out of the activity strip.
-        loading ? 1 : 0,
-        isStreaming ? 1 : 0,
-        activeTool ?? '',
-        error ?? '',
-        threadErrors.length,
-        // searchMatches is staticItems filtered by searchQuery, both listed here.
-        staticItems.length,
-        searchQuery?.length ?? 0,
-        decodeTps ?? '',
-        // Full text, not just its length: two messages of equal length can wrap
-        // into a different number of help rows.
-        helpMessage ?? '',
-        pendingApproval ? 1 : 0,
-        pendingAsk ? 1 : 0,
-        keyPrompt ? 1 : 0,
-        picker ?? '',
-        settingsIndex !== null ? 1 : 0,
-        initialized ? 1 : 0,
-        config ? 1 : 0,
-        subAgentActivities.length,
-        showSubAgentPanel ? 1 : 0,
-        updateNotice ? 1 : 0,
-        mode,
-        toast?.length ?? 0,
-        composerRows,
-    ].join(':');
-    useEffect(() => {
-        if (!viewportRef.current)
-            return;
-        const height = measureElement(viewportRef.current).height;
-        if (height > 0 && height !== viewportRows) {
-            setViewportRows(height);
-        }
-    }, [liveAreaSignature]);
     // One-time initialization: logging, approval handlers, config loading
     useEffect(() => {
         const init = async () => {
@@ -1207,17 +1374,60 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setApprovalHandler(async (req) => {
                 if (modeRef.current === 'plan')
                     return 'reject';
-                return new Promise((resolve) => {
-                    setPendingApproval({ request: req, resolve });
-                });
+                return openApproval(req);
             });
             // The agent can pause to ask the user a question; the UI owns the
             // interaction and resolves the promise with the collected answers.
-            setAskHandler(async (req) => {
-                return new Promise((resolve) => {
-                    setPendingAsk({ request: req, resolve });
+            // `askUser` does not forward a signal today, but the optional parameter
+            // keeps the bridge ready: an abort settles and clears the slot.
+            setAskHandler(async (req, _signal) => {
+                return openAsk(req, _signal).catch(() => []);
+            });
+            // Structured forms reuse the same dialog. Mapping stays in this adapter
+            // so the tool itself has no React dependency.
+            setFormHandler(async (req, signal) => {
+                const askRequest = {
+                    sessionId: req.sessionId,
+                    questions: req.questions.map((question) => {
+                        // AskPrompt starts with the first option selected, so a form default
+                        // must mark its option recommended AND move it to the front.
+                        const preferredFirst = (options) => {
+                            const index = options.findIndex((option) => option.recommended);
+                            return index > 0 ? [options[index], ...options.filter((_, i) => i !== index)] : options;
+                        };
+                        const options = question.type === 'select'
+                            ? preferredFirst((question.options ?? []).map((label) => ({
+                                label,
+                                recommended: typeof question.default === 'string' && label === question.default,
+                            })))
+                            : question.type === 'confirm'
+                                ? preferredFirst([
+                                    { label: 'Yes', recommended: question.default === true },
+                                    { label: 'No', recommended: question.default === false },
+                                ])
+                                : undefined;
+                        return {
+                            id: question.id,
+                            question: `${question.label}${question.required ? ' *' : ''}`,
+                            context: req.title ? `${req.title} · ${question.type}` : question.type,
+                            options,
+                            allow_free_text: question.type !== 'select',
+                        };
+                    }),
+                };
+                // openAsk rejects on abort/duplicate; `form()` turns those into clear
+                // cancellation/error messages instead of hanging forever.
+                const answers = await openAsk(askRequest, signal);
+                return req.questions.map((question, index) => {
+                    const raw = answers[index]?.answer ?? '';
+                    if (question.type === 'confirm') {
+                        return { id: question.id, value: /^(y|yes|true|1)$/i.test(raw.trim()) };
+                    }
+                    return { id: question.id, value: raw };
                 });
             });
+            // Tool groups are opt-in; an empty setting keeps every schema visible.
+            setToolGroups(settings.toolGroups);
             // First run: create the shared config folder, then let the inline setup
             // flow choose a provider/model instead of failing with "no config".
             try {
@@ -1251,25 +1461,21 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         // Cleanup on unmount
         return () => {
             clearApprovalHandler();
+            clearFormHandler();
             closeMcp();
             // Detached children would otherwise keep running after quit.
             stopAllProcesses();
+            stopAllBackgroundJobs();
         };
-    }, []);
+    }, [openApproval, openAsk]);
     // Palette contents. Kept ahead of handleSubmit because Enter runs the highlighted row.
     // Command palette: prefix match on the name wins, keywords and the
     // description keep a search like "/key" finding "/provider".
     const commandQuery = inputText.trim().toLowerCase();
     const commandNeedle = commandQuery.replace(/^\//, '');
-    const commandMatches = SLASH_COMMANDS.filter((cmd) => {
-        const name = cmd.name.toLowerCase();
-        if (name.startsWith(commandQuery))
-            return true;
-        if (!commandNeedle)
-            return false;
-        return (name.slice(1).startsWith(commandNeedle)
-            || (cmd.keywords ?? '').toLowerCase().includes(commandNeedle)
-            || cmd.description.toLowerCase().includes(commandNeedle));
+    const commandMatches = fuzzyFilter(SLASH_COMMANDS, commandNeedle, {
+        getText: (cmd) => cmd.name,
+        getAlias: (cmd) => `${cmd.description} ${cmd.keywords ?? ''}`,
     });
     const commandMeta = (name) => {
         switch (name) {
@@ -1281,12 +1487,13 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             default: return undefined;
         }
     };
-    const commandItems = commandMatches.map((cmd) => ({
+    const commandItems = commandMatches.map(({ item: cmd, indices }) => ({
         id: cmd.name,
         label: cmd.name,
         description: cmd.description,
         section: cmd.category,
         meta: commandMeta(cmd.name),
+        matchIndices: indices,
     }));
     const commandItemsRef = useRef(commandItems);
     commandItemsRef.current = commandItems;
@@ -1296,7 +1503,9 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         return {
             id: provider.id,
             label: provider.name,
-            description: `${provider.id} · ${modelCount} model${modelCount === 1 ? '' : 's'}${keyReady ? '' : ' · key needed'}`,
+            description: `${provider.id}${keyReady ? '' : ' · key needed'}`,
+            meta: `${modelCount} model${modelCount === 1 ? '' : 's'}`,
+            active: config?.provider === provider.id,
         };
     });
     const modelProviderId = pendingProviderId ?? config?.provider;
@@ -1310,10 +1519,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const cachedModelItems = modelProviderId ? remoteModels[modelProviderId] : undefined;
     const allModelItems = cachedModelItems && cachedModelItems.length > 0 ? cachedModelItems : staticModelItems;
     const modelSearchTerm = modelSearch.trim().toLowerCase();
-    const modelItems = modelSearchTerm
+    const modelItems = (modelSearchTerm
         ? allModelItems.filter((item) => item.label.toLowerCase().includes(modelSearchTerm) ||
             item.id.toLowerCase().includes(modelSearchTerm))
-        : allModelItems;
+        : allModelItems).map((item) => ({
+        ...item,
+        // Right-align the context window so names form a clean column, and mark the
+        // model that is currently active (only when browsing its own provider).
+        description: undefined,
+        meta: item.description,
+        active: Boolean(config &&
+            !pendingProviderId &&
+            config.provider === modelProviderId &&
+            config.model === item.id),
+    }));
     const selectedModelIndex = clampIndex(pickerIndex, modelItems.length);
     const variantItems = VARIANTS.map((variant) => ({
         id: variant.id,
@@ -1359,13 +1578,18 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     ];
     // Each row carries a live swatch painted with that palette's own colours;
     // DialogList renders it as an accent glyph on the palette background.
-    const themeItems = THEME_NAMES.map((name) => ({
-        id: name,
-        label: name,
-        swatch: { accent: themes[name].accent, bg: themes[name].bg },
-        description: THEME_INTENTS[name],
-        meta: (settings.theme ?? 'black') === name ? 'current' : undefined,
-    }));
+    const themeItems = THEME_NAMES.map((name) => {
+        // getTheme resolves a registered custom palette, so its swatch shows the
+        // real colours instead of the placeholder stored in `themes.custom`.
+        const palette = getTheme(name);
+        return {
+            id: name,
+            label: name,
+            swatch: { accent: palette.accent, bg: palette.bg },
+            description: THEME_INTENTS[name],
+            meta: (settings.theme ?? 'black') === name ? 'current' : undefined,
+        };
+    });
     const toggleSetting = useCallback((index) => {
         const key = SETTING_KEYS[index];
         if (!key)
@@ -1514,8 +1738,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setKeyPrompt({ ...prompt, busy: false, error: err.message });
             return;
         }
-        // Check the key before persisting it so a typo is not saved.
-        const result = await listProviderModels(client, prompt.providerId);
+        // Check the key before persisting it so a typo is not saved. A network
+        // throw must clear `busy` or the dialog would hang on a spinner.
+        let result;
+        try {
+            result = await listProviderModels(client, prompt.providerId);
+        }
+        catch (err) {
+            setKeyPrompt({
+                ...prompt,
+                busy: false,
+                error: `Could not verify the API key: ${err?.message ?? String(err)}`,
+            });
+            return;
+        }
         if (result.authError) {
             setKeyPrompt({
                 ...prompt,
@@ -1612,7 +1848,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         setModelNotice(null);
         setModelsLoading(false);
         setKeyPrompt(null);
-        setPendingAsk(null);
+        // Close any modal promise before dropping it: otherwise the tool's await
+        // hangs forever after a /new or /session switch.
+        settleApproval('reject');
+        settleAsk([]);
+        printedErrorRef.current = null;
+        setShowShortcuts(false);
+        setShowErrorPanel(false);
+        commandIndexRef.current = 0;
         setCommandIndex(0);
         setSessionItems([]);
         setSessionsLoading(false);
@@ -1625,7 +1868,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         blockedToolIdsRef.current.clear();
         pendingImageRef.current = null;
         sessionSavedRef.current = false;
-    }, []);
+    }, [settleApproval, settleAsk]);
     const startNewSession = useCallback(async () => {
         if (!config) {
             setError('Cannot start a new session: no provider/model is configured.');
@@ -1637,10 +1880,16 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         // events and its `finally` block pushes the previous conversation back into
         // the freshly created session, so /new looked like it "did nothing" or
         // duplicated the old transcript.
+        const previousSessionId = session?.id ?? null;
         abortControllerRef.current?.abort();
         abortControllerRef.current = null;
-        const previousSessionId = session?.id ?? null;
         activeRunRef.current += 1;
+        // Queued prompts belong to the old turn/session; never deliver them into
+        // the fresh one.
+        deliveryInFlightRef.current = false;
+        queuedDeliveryRef.current = null;
+        if (previousSessionId)
+            inboxRef.current.clear(previousSessionId);
         try {
             // Preserve the current conversation before wiping the screen. If this
             // fails, keep the existing session so no transcript is lost.
@@ -1793,6 +2042,15 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setPicker(null);
             return;
         }
+        // Stop the old turn before installing another session: its `finally`
+        // would otherwise save the previous transcript over the new one.
+        abortControllerRef.current?.abort();
+        abortControllerRef.current = null;
+        activeRunRef.current += 1;
+        deliveryInFlightRef.current = false;
+        queuedDeliveryRef.current = null;
+        if (session?.id)
+            inboxRef.current.clear(session.id);
         try {
             const loaded = await loadSession(id);
             if (!loaded) {
@@ -1898,27 +2156,47 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             exit();
         });
     }, [session, completionMessages, variantId, subAgentActivities, exit]);
-    /** Check npm and install the newest release without leaving the chat. */
+    /** Check npm, install the newest release, then close so it can take effect. */
     const handleUpdate = useCallback(async (local = false) => {
+        if (updatingRef.current) {
+            showToast('An update is already running…');
+            return;
+        }
+        updatingRef.current = true;
         setError(null);
-        const info = await checkForUpdate(version ?? '', { force: true });
-        if (!info) {
-            setError('Could not reach npm for an update check. Try again later.');
-            return;
+        let exiting = false;
+        try {
+            const scope = local ? 'local' : 'global';
+            const info = await checkForUpdate(version ?? '', { force: true });
+            if (!info) {
+                setError('Could not check npm for updates. Check your connection and try again.');
+                return;
+            }
+            if (!info.updateAvailable) {
+                showToast(`Already up to date (v${info.current})`);
+                return;
+            }
+            showToast(`Installing v${info.latest} (${scope})…`, 0);
+            const result = await installUpdate({ version: info.latest, global: !local });
+            if (!result.success) {
+                setError(formatInstallFailure(info.latest, scope, result.message));
+                return;
+            }
+            // npm has replaced the package on disk, but this process keeps running the
+            // old code. Save the conversation, close the TUI, and print a card telling
+            // the user to reopen for the new version.
+            exitUpdateRef.current = { from: info.current, to: info.latest, scope };
+            showToast(`Updated to v${info.latest} — closing…`, 0);
+            exiting = true;
+            setTimeout(() => exitWithSave(), 450);
         }
-        if (!info.updateAvailable) {
-            showToast(`Already up to date (v${info.current})`);
-            return;
+        finally {
+            // Keep the guard closed once we are about to exit; otherwise let the user
+            // retry after an early return or a failed install.
+            if (!exiting)
+                updatingRef.current = false;
         }
-        showToast(`Installing v${info.latest} from npm…`, 0);
-        const result = await installUpdate({ version: info.latest, global: !local });
-        if (result.success) {
-            showToast(`Updated to v${info.latest} — restart Bitacode to use it`, 0);
-        }
-        else {
-            setError(result.message);
-        }
-    }, [version, showToast]);
+    }, [version, showToast, exitWithSave]);
     const handleSlashCommand = useCallback(async (cmd, raw = cmd) => {
         const parts = raw.trim().split(/\s+/);
         const command = cmd.toLowerCase();
@@ -2026,6 +2304,94 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 }
                 return true;
             }
+            case '/search': {
+                const query = parts.slice(1).join(' ').trim();
+                if (!query) {
+                    setError('Usage: /search <text>  (searches every saved session)');
+                    return true;
+                }
+                try {
+                    const result = await searchSessions(query);
+                    if (!result.ok) {
+                        setError(`Session search failed: ${result.error}`);
+                        return true;
+                    }
+                    if (result.value.length === 0) {
+                        showToast(`No sessions match "${query}"`, 0);
+                        return true;
+                    }
+                    const lines = result.value.map((hit, index) => `${index + 1}. [${hit.sessionId}] ${hit.title} — ${hit.snippet}`);
+                    setHelpMessage(`Sessions matching "${query}"\n\n${lines.join('\n')}\n\nUse /session <id> to open one.`);
+                }
+                catch (error) {
+                    logger.warn('Session search crashed', { error: String(error) });
+                    setError('Session search failed unexpectedly. See the log for details.');
+                }
+                return true;
+            }
+            case '/agent': {
+                const discovered = discoverAgents();
+                if (!discovered.ok) {
+                    setError(`Agent discovery failed: ${discovered.error}`);
+                }
+                else {
+                    setHelpMessage(`Available agents\n\n${renderAgentCatalog(discovered.value)}\n\nUse \`agent_type: "<name>"\` with the sub_agent tool.`);
+                }
+                return true;
+            }
+            case '/stash': {
+                const action = (parts[1] ?? 'list').toLowerCase();
+                try {
+                    if (action === 'save') {
+                        const text = parts.slice(2).join(' ').trim() || inputText.trim();
+                        if (!text) {
+                            setError('Usage: /stash save <text>  (or type text and run /stash save)');
+                        }
+                        else {
+                            const result = saveDraft(text);
+                            if (!result.ok)
+                                setError(result.error);
+                            else
+                                showToast(`Saved draft ${result.value.id}`, 0);
+                        }
+                    }
+                    else if (action === 'pop') {
+                        const result = popDraft(parts[2] ?? 'latest');
+                        if (!result.ok)
+                            setError(result.error);
+                        else {
+                            setInputText(result.value.text);
+                            setInputResetKey((prev) => prev + 1);
+                            showToast(`Restored draft ${result.value.id}`, 0);
+                        }
+                    }
+                    else if (action === 'delete') {
+                        if (!parts[2]) {
+                            setError('Usage: /stash delete <id>');
+                            return true;
+                        }
+                        const result = deleteDraft(parts[2]);
+                        if (!result.ok)
+                            setError(result.error);
+                        else
+                            showToast(result.value ? `Deleted ${parts[2]}` : 'No such draft', 0);
+                    }
+                    else {
+                        const result = listDrafts();
+                        if (!result.ok)
+                            setError(result.error);
+                        else {
+                            const lines = result.value.map((draft) => `${draft.id}\t${draft.savedAt ? new Date(draft.savedAt).toISOString() : ''}\t${draft.label || draft.text.slice(0, 60)}`);
+                            setHelpMessage(lines.length ? `Saved drafts\n\n${lines.join('\n')}\n\n/stash pop [id]` : 'No saved drafts.');
+                        }
+                    }
+                }
+                catch (error) {
+                    logger.warn('Draft stash command failed', { error: String(error) });
+                    setError('Draft stash failed. See the log for details.');
+                }
+                return true;
+            }
             case '/image': {
                 const imagePath = parts.slice(1).join(' ').trim();
                 if (!imagePath) {
@@ -2106,6 +2472,25 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 setHelpMessage(`Trusted ${canonical}. Project permission rules, hooks and commands are now active.`);
                 return true;
             }
+            case '/permissions': {
+                // /permissions is listed in the palette, so it must not fall through
+                // to the model as literal text.
+                setError(null);
+                const cwd = process.cwd();
+                try {
+                    const effective = loadEffectiveRules(cwd);
+                    const lines = [
+                        `Permissions for ${cwd} (${isProjectTrusted(cwd) ? 'trusted' : 'not trusted'})`,
+                        ...(effective.projectError ? [`! ${effective.projectError}`] : []),
+                        ...describeRuleSet(effective.rules),
+                    ];
+                    setHelpMessage(lines.join('\n'));
+                }
+                catch (err) {
+                    setError(`Could not read permission rules: ${err?.message ?? String(err)}`);
+                }
+                return true;
+            }
             case '/checkpoint': {
                 const notes = getWorkingCheckpoint(session?.id);
                 setHelpMessage(notes
@@ -2129,6 +2514,11 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 }
                 const kept = completionMessages.slice(0, target.messageIndex);
                 setCompletionMessages(kept);
+                // Rebuild scrollback from the kept messages; otherwise cards for the
+                // dropped turns remain visible and clickable.
+                setStaticItems([]);
+                setUserScroll(0);
+                replayMessagesToScrollback(addStatic, kept, theme, MAX_REPLAY_MESSAGES, columns);
                 if (session) {
                     session.completionMessages = kept;
                     await saveSession(session);
@@ -2177,6 +2567,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         theme,
         version,
         reloadRuntimePolicy,
+        columns,
     ]);
     // Shared save path for both entry points (settings row and /theme).
     const applyTheme = useCallback((name) => {
@@ -2324,8 +2715,36 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     ]);
     const handleSubmit = useCallback(async (value, force = false, keepInput = false) => {
         const trimmed = value.trim();
-        if (!trimmed || (loading && !force))
+        if (!trimmed)
             return;
+        if (loading && !force) {
+            // Slash commands and `!` shell escapes are actions, not prompts: queueing
+            // them would run the wrong command after this turn. Keep the draft so it
+            // can be retried once the agent is idle.
+            if (trimmed.startsWith('/') || trimmed.startsWith('!')) {
+                showToast('Commands and ! shell are unavailable while busy — wait for this turn', 0);
+                return;
+            }
+            // Steering: admit the prompt now and let the turn boundary deliver it.
+            const admission = inboxRef.current.enqueue({
+                id: `in-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+                sessionId: session?.id ?? 'default',
+                text: trimmed,
+                mode: 'steer',
+                enqueuedAt: Date.now(),
+            });
+            if (!admission.ok) {
+                setError(admission.error);
+                return;
+            }
+            setInputText('');
+            setInputResetKey((prev) => prev + 1);
+            commandIndexRef.current = 0;
+            setCommandIndex(0);
+            const queueCount = inboxRef.current.pending(session?.id ?? 'default').length;
+            showToast(`Queued · ${queueCount} queued — will run after this turn`, 0);
+            return;
+        }
         // Shell escape: `! ls` runs locally and never reaches the model.
         if (trimmed.startsWith('! ')) {
             const command = trimmed.slice(2).trim();
@@ -2342,16 +2761,19 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
         // Slash commands work even before a provider is configured.
         if (trimmed.startsWith('/')) {
-            // Derive the command from the submitted text, not from the palette's
-            // last-rendered index: Ink can deliver Enter with a stale closure, which
-            // made the first Enter run the previous command (needing a second try).
+            // Enter runs the highlighted palette row, tracked synchronously in a ref
+            // (state can arrive a frame late when arrows and Enter share a burst).
             const typed = trimmed.split(/\s+/)[0];
             const matches = SLASH_COMMANDS.filter((cmd) => cmd.name.toLowerCase().startsWith(typed.toLowerCase()));
-            const selected = matches.find((cmd) => cmd.name.toLowerCase() === typed.toLowerCase())?.name
+            const highlighted = commandItemsRef.current[clampIndex(commandIndexRef.current, commandItemsRef.current.length)]?.label;
+            const selected = highlighted
+                ?? matches.find((cmd) => cmd.name.toLowerCase() === typed.toLowerCase())?.name
                 ?? matches[0]?.name
                 ?? typed;
             const handled = await handleSlashCommand(selected, trimmed);
             if (handled) {
+                commandIndexRef.current = 0;
+                setCommandIndex(0);
                 if (!keepInput) {
                     setInputText('');
                     setInputResetKey((prev) => prev + 1);
@@ -2410,6 +2832,15 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             }
         }
         if (!clientRef.current || !config) {
+            // No turn can start: drop the claimed queue item instead of retrying it
+            // on every render, and tell the user why it was not run.
+            const dropped = queuedDeliveryRef.current;
+            if (dropped) {
+                inboxRef.current.ack(dropped.sessionId, dropped.id);
+                queuedDeliveryRef.current = null;
+                showToast('Queued prompt dropped — no provider configured', 0);
+            }
+            deliveryInFlightRef.current = false;
             setError(API_MISSING_HINT);
             return;
         }
@@ -2419,6 +2850,14 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         }
         sessionSavedRef.current = false;
         setSearchQuery(null);
+        // Acknowledge the queued prompt only now that the turn is actually
+        // starting; an earlier failure leaves it pending for the next turn.
+        const queued = queuedDeliveryRef.current;
+        if (queued && force) {
+            inboxRef.current.ack(queued.sessionId, queued.id);
+            queuedDeliveryRef.current = null;
+        }
+        deliveryInFlightRef.current = false;
         setLoading(true);
         setIsStreaming(false);
         setStreamingText('');
@@ -2490,7 +2929,7 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 requestDefaults,
                 compactThreshold: settings.compactThreshold,
                 hooks: hooksRef.current,
-                toolPolicy,
+                toolPolicy: buildToolPolicy(),
             });
             // A newer run (or /new) superseded this one: drop the result instead of
             // writing the old conversation into the current session.
@@ -2524,6 +2963,30 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     logger.warn('Autoverify failed to run', { error: String(err?.message ?? err) });
                 }
             }
+            // Background jobs report completion as synthetic user input so the next
+            // turn sees the result without the model having to poll. Each job is
+            // surfaced once; failures here are cosmetic and never fail the turn.
+            try {
+                const notices = [];
+                for (const job of listBackgroundJobs()) {
+                    if (job.status === 'running' || notifiedJobsRef.current.has(job.id))
+                        continue;
+                    const text = formatTaskNotification(job);
+                    if (text) {
+                        notices.push(text);
+                        notifiedJobsRef.current.add(job.id);
+                    }
+                }
+                if (notices.length > 0) {
+                    for (const notice of notices) {
+                        updatedMessages.push({ role: 'user', content: notice });
+                    }
+                    showToast(`${notices.length} background job${notices.length === 1 ? '' : 's'} finished`, 0);
+                }
+            }
+            catch (error) {
+                logger.warn('Could not collect background job notifications', { error: String(error) });
+            }
             // Update session
             if (session) {
                 session.completionMessages = updatedMessages;
@@ -2543,11 +3006,16 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setError(err.message);
         }
         finally {
+            deliveryInFlightRef.current = false;
             if (runId === activeRunRef.current) {
                 setLoading(false);
             }
         }
-    }, [loading, config, completionMessages, session, handleSlashCommand, addStatic, rows, commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents, mode, runShellCommand, theme, getModelPaletteInfo]);
+    }, [
+        loading, config, completionMessages, session, handleSlashCommand, addStatic, rows,
+        commandItems, commandIndex, variantId, settings, handleAgentEventWithSubAgents,
+        mode, runShellCommand, theme, getModelPaletteInfo, columns, buildToolPolicy,
+    ]);
     // Any command path can reject; never let that become an unhandled rejection
     // that kills the TUI after a turn.
     const submitSafely = useCallback(async (value, force = false, keepInput = false) => {
@@ -2559,6 +3027,57 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             setLoading(false);
         }
     }, [handleSubmit]);
+    // Deliver prompts that arrived while a turn was running. Steers are admitted
+    // once and removed on delivery, so a re-render can never replay them.
+    useEffect(() => {
+        if (loading || deliveryInFlightRef.current)
+            return;
+        const sessionId = session?.id ?? 'default';
+        // Peek instead of deliverNext: the item is acknowledged in handleSubmit
+        // once the turn has actually started (`force` marks the queued path).
+        const next = inboxRef.current.pending(sessionId)[0];
+        if (!next)
+            return;
+        deliveryInFlightRef.current = true;
+        queuedDeliveryRef.current = { id: next.id, sessionId };
+        showToast(`Running queued prompt: ${next.text.slice(0, 40)}`, 0);
+        void submitSafely(next.text, true, true);
+    }, [loading, session?.id, showToast, submitSafely]);
+    // Config files can change while the app is open. Watching is best-effort:
+    // an unsupported platform simply leaves the old behaviour (restart to apply).
+    useEffect(() => {
+        const watcher = createConfigWatcher(defaultWatchTargets(), (event) => {
+            showToast(`${event.label} changed — restart to apply`, 0);
+        });
+        watcher.start();
+        return () => watcher.stop();
+    }, [showToast]);
+    // User themes are optional. The first valid file wins; a bad palette is
+    // ignored by registerCustomTheme and the built-in palette stays in place.
+    useEffect(() => {
+        try {
+            const found = discoverThemeFiles({
+                extraDirs: settings.themePath ? [dirname(settings.themePath)] : [],
+            });
+            if (!found.ok)
+                return;
+            // Prefer the explicitly configured file over discovery's alphabetical
+            // first match in the same directory.
+            const exact = settings.themePath
+                ? found.value.find((file) => file.path === settings.themePath || basename(file.path) === basename(settings.themePath))
+                : undefined;
+            const ordered = exact ? [exact, ...found.value.filter((file) => file !== exact)] : found.value;
+            for (const file of ordered) {
+                if (registerCustomTheme('custom', file.raw)) {
+                    showToast('Custom theme loaded (select "custom")', 0);
+                    break;
+                }
+            }
+        }
+        catch (error) {
+            logger.warn('Custom theme discovery failed', { error: String(error) });
+        }
+    }, [settings.themePath, showToast]);
     // One tick per second while busy: drives the activity strip's elapsed time
     // without touching the transcript or the token stream.
     useEffect(() => {
@@ -2624,12 +3143,93 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                 : 'waiting';
     const statusRows = busy ? 1 : 0;
     const busyElapsedMs = busyStartedAt !== null ? Math.max(0, busyClock - busyStartedAt) : 0;
+    // Any interactive prompt owns the live area. One dialog owns the whole frame
+    // so its card floats on a clean canvas instead of competing with the strips.
+    const dialogActive = subagentDetail !== null ||
+        picker !== null ||
+        settingsIndex !== null ||
+        keyPrompt !== null ||
+        pendingApproval !== null ||
+        pendingAsk !== null;
+    // ── Non-modal strips directly above the composer ──────────────────────
+    // Their rows are charged to the live-area budget so an open shortcut or log
+    // panel can never push the composer off screen.
+    const hintRows = initialized && !dialogActive ? 1 : 0;
+    const queueCount = inboxRef.current.pending(session?.id ?? 'default').length;
+    const hintText = (() => {
+        try {
+            const ctx = {
+                busy,
+                streaming: isStreaming,
+                planMode: mode === 'plan',
+                picker,
+                dialog: pendingApproval
+                    ? 'approval'
+                    : pendingAsk
+                        ? 'ask'
+                        : keyPrompt
+                            ? 'key'
+                            : settingsIndex !== null
+                                ? 'settings'
+                                : subagentDetail
+                                    ? 'subagent'
+                                    : null,
+                searchActive: searchQuery !== null,
+                queueCount,
+                compact: dense,
+            };
+            return formatHints(ctx, { width: columns, keybinds: settings.keybindings });
+        }
+        catch {
+            return '';
+        }
+    })();
+    // formatHints owns the wording; keep an explicit fallback so the queue cue
+    // is never lost if the helper ignores `queueCount`.
+    const hintLine = queueCount > 0 && !/queued/i.test(hintText)
+        ? `${hintText}${hintText ? ' · ' : ''}${queueCount} queued`
+        : hintText;
+    const shortcutLines = showShortcuts && !dialogActive && !busy
+        ? (() => {
+            try {
+                return renderShortcutPanel(columns, settings.keybindings) ?? [];
+            }
+            catch {
+                return [];
+            }
+        })()
+        : [];
+    const shortcutRows = shortcutLines.length > 0 ? shortcutLines.length + 1 : 0;
+    const errorLines = showErrorPanel && !dialogActive
+        ? (() => {
+            try {
+                return getRecentLogs(12).map((entry) => {
+                    const level = ['ERR', 'WARN', 'INFO', 'DBG', 'TRC'][entry.level] ?? String(entry.level);
+                    const context = entry.context && Object.keys(entry.context).length > 0
+                        ? ` ${JSON.stringify(entry.context).slice(0, 80)}`
+                        : '';
+                    return `${level.padEnd(4)} ${entry.timestamp} ${String(entry.message).slice(0, 140)}${context}`;
+                });
+            }
+            catch {
+                return [];
+            }
+        })()
+        : [];
+    const errorPanelRows = showErrorPanel && !dialogActive
+        ? Math.min(12, Math.max(1, errorLines.length)) + 3
+        : 0;
+    // Overlays are informational: a busy turn or a dialog takes precedence.
+    useEffect(() => {
+        if (busy || dialogActive)
+            setShowShortcuts(false);
+    }, [busy, dialogActive]);
     // Panels that stay under the transcript (todos, help, child agents) reserve
     // their own rows; thinking and streaming live inside the transcript now.
     const area = splitLiveArea(frameHeight, {
         todos: todoRows,
         thinking: 0,
-        help: helpRows,
+        help: helpRows + hintRows + shortcutRows + errorPanelRows,
         streaming: subAgentRows,
         status: statusRows,
         dense,
@@ -2672,6 +3272,55 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     const searchMatches = searchQuery
         ? staticItems.filter((item) => nodeText(item.node).toLowerCase().includes(searchQuery.toLowerCase()))
         : staticItems;
+    // Re-measure the viewport only when something that changes its height
+    // changes. Panel heights (not just item counts) belong here: two todos or
+    // two help lines of different length can wrap into a different row count.
+    const liveAreaSignature = [
+        rows,
+        columns,
+        resizeTick,
+        thinkingText.length,
+        thinkingExpanded,
+        streamingText.length,
+        thinkingRows,
+        todoRows,
+        helpRows,
+        subAgentRows,
+        searchMatches.length,
+        staticItems.length,
+        searchQuery?.length ?? 0,
+        hintRows,
+        shortcutRows,
+        errorPanelRows,
+        loading ? 1 : 0,
+        isStreaming ? 1 : 0,
+        activeTool ?? '',
+        error ?? '',
+        threadErrors.length,
+        decodeTps ?? '',
+        helpMessage ?? '',
+        pendingApproval ? 1 : 0,
+        pendingAsk ? 1 : 0,
+        keyPrompt ? 1 : 0,
+        picker ?? '',
+        settingsIndex !== null ? 1 : 0,
+        initialized ? 1 : 0,
+        config ? 1 : 0,
+        subAgentActivities.length,
+        showSubAgentPanel ? 1 : 0,
+        updateNotice ? 1 : 0,
+        mode,
+        toast?.length ?? 0,
+        composerRows,
+    ].join(':');
+    useEffect(() => {
+        if (!viewportRef.current)
+            return;
+        const height = measureElement(viewportRef.current).height;
+        if (height > 0 && height !== viewportRows) {
+            setViewportRows(height);
+        }
+    }, [liveAreaSignature]);
     // Rows for an item: live rows use their estimate (their content changes every
     // frame, so a cached measurement would lag a growing stream), while archived
     // items use the height Ink measured for them.
@@ -2775,6 +3424,15 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         // handles 1/2/3/Esc. Nothing below may scroll, submit or abort underneath it.
         if (pendingApproval)
             return;
+        // A question/form owns the keyboard too: AskPrompt handles its own Esc,
+        // and App must not fall through to abort the turn underneath it.
+        if (pendingAsk)
+            return;
+        // F12 toggles a compact log/details panel. No modal, no input captured.
+        if (canonicalPressed(input, key).endsWith('f12')) {
+            setShowErrorPanel((prev) => !prev);
+            return;
+        }
         // API key prompt owns text input; only Esc (when idle) is handled here.
         if (keyPrompt) {
             if (key.escape && !keyPrompt.busy)
@@ -2916,9 +3574,29 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             }
             return;
         }
+        // `?` on an empty draft opens the non-modal shortcut sheet. Pressing it
+        // again closes the sheet and inserts a literal `?` into the composer. The
+        // guard makes PromptInput ignore the same keystroke so it is not doubled.
+        if (input === '?' && !key.ctrl && !key.meta && (showShortcuts || inputTextRef.current === '')) {
+            shortcutGuardRef.current = true;
+            queueMicrotask(() => { shortcutGuardRef.current = false; });
+            if (showShortcuts) {
+                setShowShortcuts(false);
+                setInputText('?');
+                setInputResetKey((prev) => prev + 1);
+            }
+            else {
+                setShowShortcuts(true);
+                setInputText('');
+            }
+            return;
+        }
         // Terminal mouse report (SGR): wheel scrolls the transcript, a left press
         // inside the live thinking block toggles it, everything else is ignored.
+        // While a dialog owns the frame nothing underneath may react to a click.
         if (isMouseReport(input)) {
+            if (dialogActive)
+                return;
             const wheel = getWheelDelta(input);
             if (wheel !== 0) {
                 scrollBy(-wheel * 3);
@@ -2973,92 +3651,112 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
             }
             return;
         }
-        // Global shortcuts (ctrl or alt/option — Ink reports Alt as `key.meta`).
-        // This sits after the picker/settings/API-key/mouse handlers so a modified
-        // key can never be mistaken for a command while searching a picker or
-        // confirming approval. a/e/u/w are left to PromptInput's text editing.
+        // Global shortcuts. Every KeyAction is resolved through resolveKeybind, so
+        // user overrides work even when they differ from the built-in binding (and
+        // defaults such as settings:ctrl+o / search:ctrl+f are handled too). canonical
+        // keys make tab/esc/arrows usable as bindings. a/e/u/w stay in PromptInput.
         const dismissible = !picker && settingsIndex === null && !keyPrompt && !pendingApproval && !pendingAsk;
         if (dismissible) {
             // Tab inside an @mention belongs to completion, not to the mode toggle.
             if (key.tab && findMentionToken(inputText, inputText.length))
                 return;
-            // Tab switches build <-> plan mode. PromptInput ignores Tab, so focus and
-            // composition are unaffected.
             if (key.tab) {
+                // Tab completes the highlighted slash command (the palette advertises
+                // this); otherwise it toggles build <-> plan mode.
+                const highlighted = commandItemsRef.current[clampIndex(commandIndexRef.current, commandItemsRef.current.length)]?.label;
+                if (inputTextRef.current.startsWith('/') && highlighted) {
+                    setInputText(highlighted);
+                    setInputResetKey((prev) => prev + 1);
+                    commandIndexRef.current = 0;
+                    setCommandIndex(0);
+                    return;
+                }
                 const next = mode === 'build' ? 'plan' : 'build';
                 setMode(next);
                 showToast(next === 'plan' ? 'PLAN MODE — no file changes' : 'BUILD MODE', 0);
                 return;
             }
-            // Copy the last visible transcript card. Never throws when xclip/pbcopy/
-            // termux-clipboard-set is unavailable.
-            if ((key.ctrl && input === 'y') || (key.meta && input === 'c')) {
+            const pressed = canonicalPressed(input, key);
+            const keybindings = (settings.keybindings ?? {});
+            const toggleHelp = () => setHelpMessage((prev) => (prev ? null : buildHelpText(effectiveApprovalMode)));
+            const copyLastMessage = () => {
                 const card = visibleItems[visibleItems.length - 1];
                 const text = card ? nodeText(card.node) : '';
                 if (text) {
                     void copyToClipboard(text);
                     showToast('Copied message', 0);
                 }
+            };
+            const retryLast = () => {
+                const last = lastSubmitRef.current;
+                if (!last)
+                    return;
+                abortControllerRef.current?.abort();
+                abortControllerRef.current = null;
+                activeRunRef.current += 1;
+                setLoading(false);
+                setIsStreaming(false);
+                setStreamingText('');
+                setActiveTool(null);
+                setInputText(last);
+                setInputResetKey((prev) => prev + 1);
+                showToast(`Retrying: ${last.slice(0, 60)}`, 0);
+                void submitSafely(last, true, true);
+            };
+            const editLast = () => {
+                const lastUser = [...completionMessages]
+                    .reverse()
+                    .find((message) => message.role === 'user' && typeof message.content === 'string');
+                if (lastUser && typeof lastUser.content === 'string') {
+                    const text = lastUser.content
+                        .replace(PLAN_MODE_NOTE, '')
+                        .replace(/^\[Attached image:[^\]]*\]\s*\S+\s*/, '')
+                        .trim();
+                    setInputText(text);
+                    setInputResetKey((prev) => prev + 1);
+                    showToast('Loaded last message — edit and press Enter', 0);
+                }
+            };
+            const actionRunners = [
+                ['newSession', () => void handleSlashCommand('/new')],
+                ['sessions', () => openSessionPicker()],
+                ['model', () => void handleSlashCommand('/model')],
+                ['provider', () => void handleSlashCommand('/provider')],
+                ['help', toggleHelp],
+                ['settings', () => setSettingsIndex(0)],
+                ['subagents', () => void handleSlashCommand('/subagents')],
+                ['clearInput', () => {
+                        setInputText('');
+                        setInputResetKey((prev) => prev + 1);
+                        commandIndexRef.current = 0;
+                        setCommandIndex(0);
+                    }],
+                ['clearTranscript', () => clearTranscriptAndRedraw()],
+                ['thinking', () => {
+                        if (thinkingText) {
+                            thinkingPinnedRef.current = true;
+                            setThinkingExpanded((expanded) => !expanded);
+                        }
+                    }],
+                ['retry', retryLast],
+                ['copyLast', copyLastMessage],
+                ['editLast', editLast],
+                ['search', () => void handleSlashCommand('/search')],
+            ];
+            for (const [action, run] of actionRunners) {
+                if (pressed !== resolveKeybind(keybindings, action))
+                    continue;
+                run();
                 return;
             }
-            // Some terminals send ctrl+, / ctrl+/ as raw control bytes with no
-            // modifier flags; normalise them so both spellings work.
-            const ch = input === '\x1c' ? ',' : input === '\x1f' ? '/' : input;
-            if (key.ctrl || key.meta || ch !== input) {
+            // Legacy fallbacks with no KeyAction: variant, help via `/`, settings
+            // via raw ctrl+, byte, session list via `q`, card collapse via `e`, and
+            // transcript scrolling via b/f.
+            if (key.ctrl || key.meta || input === '\x1c' || input === '\x1f') {
                 const pageRows = Math.max(1, Math.floor(viewportRows / 2));
-                const toggleHelp = () => setHelpMessage((prev) => (prev ? null : buildHelpText(effectiveApprovalMode)));
-                switch (ch) {
-                    case 'r': {
-                        // Ctrl+R regenerates: abort the in-flight turn, then re-submit the
-                        // last user text. The text is left in the composer for editing.
-                        const last = lastSubmitRef.current;
-                        if (!last)
-                            return;
-                        abortControllerRef.current?.abort();
-                        abortControllerRef.current = null;
-                        activeRunRef.current += 1;
-                        setLoading(false);
-                        setIsStreaming(false);
-                        setStreamingText('');
-                        setActiveTool(null);
-                        setInputText(last);
-                        setInputResetKey((prev) => prev + 1);
-                        showToast(`Retrying: ${last.slice(0, 60)}`, 0);
-                        void submitSafely(last, true, true);
-                        return;
-                    }
-                    case 'e': {
-                        // Ctrl+E collapses all expandable cards (or expands them all).
-                        const anyExpanded = staticItems.some((item) => item.toggle && item.expanded);
-                        setStaticItems((prev) => prev.map((item) => {
-                            if (!item.toggle)
-                                return item;
-                            const expanded = !anyExpanded;
-                            return { ...item, expanded, node: expanded ? item.toggle.expanded : item.toggle.collapsed };
-                        }));
-                        showToast(anyExpanded ? 'Collapsed all cards' : 'Expanded all cards', 0);
-                        return;
-                    }
-                    case 'n':
-                        void handleSlashCommand('/new');
-                        return;
-                    case 's':
-                        void openSessionPicker();
-                        return;
-                    case 'g':
-                        void handleSlashCommand('/subagents');
-                        return;
-                    case 'm':
-                        void handleSlashCommand('/model');
-                        return;
-                    case 'p':
-                        void handleSlashCommand('/provider');
-                        return;
+                switch (input === '\x1c' ? ',' : input === '\x1f' ? '/' : input) {
                     case 'v':
                         void handleSlashCommand('/variant');
-                        return;
-                    case 'h':
-                        toggleHelp();
                         return;
                     case '/':
                         toggleHelp();
@@ -3069,20 +3767,17 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                     case 'q':
                         void openSessionPicker();
                         return;
-                    case 'k':
-                        setInputText('');
-                        setInputResetKey((prev) => prev + 1);
+                    case 'e': {
+                        const anyExpanded = staticItems.some((item) => item.toggle && item.expanded);
+                        setStaticItems((prev) => prev.map((item) => {
+                            if (!item.toggle)
+                                return item;
+                            const expanded = !anyExpanded;
+                            return { ...item, expanded, node: expanded ? item.toggle.expanded : item.toggle.collapsed };
+                        }));
+                        showToast(anyExpanded ? 'Collapsed all cards' : 'Expanded all cards', 0);
                         return;
-                    case 'l':
-                        setStaticItems([]);
-                        setUserScroll(0);
-                        return;
-                    case 't':
-                        if (thinkingText) {
-                            thinkingPinnedRef.current = true;
-                            setThinkingExpanded((expanded) => !expanded);
-                        }
-                        return;
+                    }
                     case 'b':
                         scrollBy(pageRows);
                         return;
@@ -3142,6 +3837,8 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         if (key.escape && inputText.startsWith('/')) {
             setInputText('');
             setInputResetKey((prev) => prev + 1);
+            commandIndexRef.current = 0;
+            setCommandIndex(0);
             return;
         }
         if (key.escape && loading && abortControllerRef.current) {
@@ -3155,10 +3852,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
     useInput((_input, key) => {
         const count = commandItemsRef.current.length;
         if (inputTextRef.current.startsWith('/') && count > 0) {
-            if (key.upArrow)
-                setCommandIndex((index) => (index - 1 + count) % count);
-            else if (key.downArrow)
-                setCommandIndex((index) => (index + 1) % count);
+            if (key.upArrow) {
+                setCommandIndex((index) => {
+                    const next = (index - 1 + count) % count;
+                    commandIndexRef.current = next;
+                    return next;
+                });
+            }
+            else if (key.downArrow) {
+                setCommandIndex((index) => {
+                    const next = (index + 1) % count;
+                    commandIndexRef.current = next;
+                    return next;
+                });
+            }
             return;
         }
         if (!key.upArrow && !key.downArrow)
@@ -3239,15 +3946,6 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         staticItems.length === 0 &&
         !hasConversationMessages(completionMessages);
     const inputFocused = initialized && picker === null && settingsIndex === null && keyPrompt === null;
-    // One dialog owns the screen for any picker or prompt. The card is centred
-    // horizontally and anchored to the upper part of the page, so it reads as a
-    // floating window instead of a footer that happens to be above the composer.
-    const dialogActive = subagentDetail !== null ||
-        picker !== null ||
-        settingsIndex !== null ||
-        keyPrompt !== null ||
-        pendingApproval !== null ||
-        pendingAsk !== null;
     const dialogInner = dialogInnerWidth(columns);
     const compactDialog = rows <= 10;
     const approvalRequest = pendingApproval
@@ -3267,22 +3965,26 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
         : modelSearch.trim()
             ? `No models match "${modelSearch}".`
             : modelNotice ?? 'No models available.';
-    const dialog = subagentDetail ? (_jsx(SubAgentDetail, { record: subagentDetail, columns: columns, height: Math.max(8, rows - 2), onBack: () => setSubagentDetail(null) })) : pendingApproval && approvalRequest ? (_jsx(Dialog, { title: "Approval required", badge: pendingApproval.request.type.replace(/_/g, ' '), hint: "\u2191\u2193 move \u00B7 enter confirm \u00B7 1/2/3 pick \u00B7 esc reject", columns: columns, compact: compactDialog, children: _jsx(ApprovalPrompt, { request: approvalRequest, columns: compactDialog ? columns : dialogInner + 2, compact: dense || compactDialog, rows: rows, embedded: true, onRespond: (response) => {
-                pendingApproval.resolve(response);
-                setPendingApproval(null);
-            } }) })) : pendingAsk ? (_jsx(Dialog, { title: "Agent question", badge: pendingAsk.request.questions.length > 1
+    const dialog = subagentDetail ? (_jsx(SubAgentDetail, { record: subagentDetail, columns: columns, height: Math.max(8, rows - 2), onBack: () => setSubagentDetail(null) })) : pendingApproval && approvalRequest ? (_jsx(Dialog, { title: "Approval required", badge: pendingApproval.request.type.replace(/_/g, ' '), hint: "\u2191\u2193 move \u00B7 enter confirm \u00B7 1/2/3 pick \u00B7 esc reject", columns: columns, compact: compactDialog, children: _jsx(ApprovalPrompt, { request: approvalRequest, columns: compactDialog ? columns : dialogInner + 2, compact: dense || compactDialog, rows: rows, embedded: true, onRespond: (response) => settleApproval(response) }) })) : pendingAsk ? (_jsx(Dialog, { title: "Agent question", badge: pendingAsk.request.questions.length > 1
             ? `${pendingAsk.request.questions.length} questions`
-            : undefined, hint: "\u2191\u2193 pick \u00B7 tab to type \u00B7 enter send \u00B7 esc skip", columns: columns, compact: compactDialog, children: _jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onRespond: (response) => {
-                pendingAsk.resolve(response);
-                setPendingAsk(null);
-            } }) })) : keyPrompt ? (_jsx(Dialog, { title: "API key", badge: keyPrompt.providerName, hint: keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel', columns: columns, compact: compactDialog, children: _jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onSubmit: (value) => { void handleApiKeySubmit(value); } }) })) : settingsIndex !== null ? (_jsx(Dialog, { title: "Settings", badge: `${settingsIndex + 1}/${settingItems.length}`, hint: "\u2191\u2193 move \u00B7 enter toggle/open \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'theme' ? (_jsx(Dialog, { title: "Theme", accentGlyph: "\u25C8", borderStyle: "square", badge: `${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`, hint: `↑↓ move · enter use · 1-${THEME_NAMES.length} pick · esc close`, columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: themeItems, selected: clampIndex(pickerIndex, themeItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'model' ? (_jsxs(Dialog, { title: "Select model", badge: modelProvider ? modelProvider.name : undefined, hint: "type to search \u00B7 \u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, children: "search  " }), _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: theme.text, wrap: "truncate-end", children: [modelSearch, _jsx(Text, { inverse: true, children: ' ' })] }) }), _jsx(Text, { color: theme.dim, children: `  ${modelItems.length}` })] }), (modelsLoading || modelNotice) && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
+            : undefined, hint: (() => {
+            const question = pendingAsk.request.questions[0];
+            return askPromptHint({
+                typing: false,
+                hasOptions: Boolean(question?.options?.length),
+                canType: question?.allow_free_text !== false,
+                multiple: Boolean(question?.multiple),
+            });
+        })(), columns: columns, compact: compactDialog, children: _jsx(AskPrompt, { questions: pendingAsk.request.questions, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onRespond: (response) => settleAsk(response) }) })) : keyPrompt ? (_jsx(Dialog, { title: "API key", badge: keyPrompt.providerName, hint: keyPrompt.busy ? 'Checking key and fetching models…' : 'enter save · esc cancel', columns: columns, compact: compactDialog, children: _jsx(ApiKeyPrompt, { providerName: keyPrompt.providerName, path: keyPrompt.path, error: keyPrompt.error, busy: keyPrompt.busy, columns: compactDialog ? columns : dialogInner + 4, compact: dense || compactDialog, embedded: true, onSubmit: (value) => { void handleApiKeySubmit(value); } }) })) : settingsIndex !== null ? (_jsx(Dialog, { title: "Settings", badge: `${settingsIndex + 1}/${settingItems.length}`, hint: "\u2191\u2193 move \u00B7 enter toggle/open \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: settingItems, selected: settingsIndex, maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'theme' ? (_jsx(Dialog, { title: "Theme", accentGlyph: "\u25C8", borderStyle: "square", badge: `${clampIndex(pickerIndex, themeItems.length) + 1}/${themeItems.length}`, hint: `↑↓ move · enter use · 1-${THEME_NAMES.length} pick · esc close`, columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: themeItems, selected: clampIndex(pickerIndex, themeItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'model' ? (_jsxs(Dialog, { title: "Select model", accentGlyph: "\u25C7", badge: modelProvider ? modelProvider.name : undefined, hint: "type to search \u00B7 \u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: [_jsxs(Box, { flexDirection: "row", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, children: "search  " }), _jsx(Box, { flexShrink: 1, minWidth: 1, children: _jsxs(Text, { color: theme.text, wrap: "truncate-end", children: [modelSearch, _jsx(Text, { inverse: true, children: ' ' })] }) }), _jsx(Text, { color: theme.dim, children: `  ${modelItems.length}` })] }), (modelsLoading || modelNotice) && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: modelsLoading
                     ? `Fetching models${modelProvider ? ` · ${modelProvider.name}` : ''}…`
-                    : modelNotice })), _jsx(DialogList, { items: modelItems, selected: selectedModelIndex, maxVisible: paletteWindow, empty: modelEmptyMessage, compact: compactDialog })] })) : picker === 'provider' ? (_jsx(Dialog, { title: "Select provider", badge: `${providerItems.length} available`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: providerItems, selected: clampIndex(pickerIndex, providerItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'session' ? (_jsx(Dialog, { title: pendingSessionDelete ? 'Delete session?' : 'Select session', badge: pendingSessionDelete?.label, hint: pendingSessionDelete
+                    : modelNotice })), _jsx(DialogList, { items: modelItems, selected: selectedModelIndex, maxVisible: paletteWindow, empty: modelEmptyMessage, compact: compactDialog })] })) : picker === 'provider' ? (_jsx(Dialog, { title: "Select provider", accentGlyph: "\u25C7", badge: `${providerItems.length} available`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: providerItems, selected: clampIndex(pickerIndex, providerItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'session' ? (_jsx(Dialog, { title: pendingSessionDelete ? 'Delete session?' : 'Select session', badge: pendingSessionDelete?.label, hint: pendingSessionDelete
             ? 'y delete permanently · n cancel'
             : '↑↓ move · enter resume · d delete · esc close', columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: sessionItems, selected: clampIndex(pickerIndex, sessionItems.length), maxVisible: paletteWindow, empty: sessionsLoading ? 'Loading sessions…' : 'No saved sessions. Press esc to close.', compact: compactDialog }) })) : picker === 'subagents' ? (_jsx(Dialog, { title: "Sub-agents", badge: `${subagentItems.length} run${subagentItems.length === 1 ? '' : 's'}`, hint: "\u2191\u2193 move \u00B7 enter inspect \u00B7 click a row \u00B7 esc close", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: subagentItems, selected: clampIndex(pickerIndex, subagentItems.length), maxVisible: paletteWindow, empty: subagentLoading ? 'Loading sub-agent runs…' : 'No sub-agent runs yet. Delegate a task with sub_agent first.', compact: compactDialog }) })) : picker === 'variant' ? (_jsx(Dialog, { title: "Reasoning variant", badge: `${variantItems.length} options`, hint: "\u2191\u2193 move \u00B7 enter use \u00B7 esc cancel", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: variantItems, selected: clampIndex(pickerIndex, variantItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : picker === 'statusLine' ? (_jsx(Dialog, { title: "Status line", badge: `${(settings.statusLine ?? STATUS_LINE_ITEMS).length}/${STATUS_LINE_ITEMS.length} shown`, hint: "\u2191\u2193 move \u00B7 enter toggle \u00B7 esc back", columns: columns, compact: compactDialog, children: _jsx(DialogList, { items: statusLineItems, selected: clampIndex(pickerIndex, statusLineItems.length), maxVisible: paletteWindow, compact: compactDialog }) })) : null;
     // Rail geometry. `viewportRows` is measured from the real layout, so the
     // thumb lines up with what is actually on screen.
-    const scrollbar = scrollbarGeometry(transcriptRows, viewportRows, effectiveUserScroll);
+    // Rail height must match the slice actually scrolled (viewport minus the
+    // top breathing row), otherwise the thumb drifts from the visible content.
+    const scrollbar = scrollbarGeometry(transcriptRows, windowRows, effectiveUserScroll);
     const railLines = restoringTranscript ? [] : scrollbarLines(scrollbar);
     // A dialog owns the full frame so its card floats on a clean canvas. This
     // can trigger Ink's full-repaint path while navigating, which is acceptable
@@ -3293,9 +3995,20 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
                                     // blank spacer here shows empty rows and shoves the item's
                                     // bottom off-screen. The wrapper is registered for clicks so
                                     // the yoga lookup still sees the clipped geometry.
-                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id))), fillerRows > 0 && _jsx(Box, { height: fillerRows, flexShrink: 0 })] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow, query: inputText.trim(), columns: columns, hint: "\u2191\u2193 move \u00B7 tab complete \u00B7 enter run \u00B7 esc close" }))] }), initialized && !dialogActive && (_jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, alignItems: "center", flexShrink: 0, overflow: "hidden", children: [busy && !hasCriticalPrompt ? (_jsx(Box, { width: layout.inputWidth, backgroundColor: theme.bg, flexShrink: 0, children: _jsx(LiveStatus, { columns: layout.inputWidth, activity: liveActivity, tool: activeTool, elapsedMs: busyElapsedMs, tps: decodeTps, frame: spinnerFrame, animate: animationsEnabled, gutter: 1 }) })) : null, _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: composerRows, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: composerRows, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: (value) => {
+                                    _jsx(Box, { ref: (node) => registerEntryNode(item.id, node), height: Math.max(1, (visibleRowItems[0]?.rows ?? 1) - trimTop), overflow: "hidden", flexShrink: 0, children: _jsx(Box, { marginTop: -trimTop, flexShrink: 0, children: _jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }) }) }, item.id)) : (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem, onRef: registerEntryNode }, item.id))), fillerRows > 0 && _jsx(Box, { height: fillerRows, flexShrink: 0 })] })), measuringTranscript && unmeasuredItems.length > 0 && (_jsx(Box, { height: 0, overflow: "hidden", position: "relative", width: "100%", flexShrink: 0, children: _jsx(Box, { position: "absolute", width: "100%", flexDirection: "column", children: unmeasuredItems.map((item) => (_jsx(StaticEntry, { item: item, columns: columns, onMeasure: handleMeasureItem }, `measure-${item.id}`))) }) }))] }), railLines.length > 0 && (_jsx(Box, { flexDirection: "column", flexShrink: 0, width: 1, overflow: "hidden", children: railLines.map((line, index) => (_jsx(Text, { color: line === SCROLLBAR_THUMB ? theme.muted : theme.border, children: line }, index))) }))] })), _jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, flexGrow: dialogActive ? 1 : 0, flexShrink: 1, minHeight: 0, overflow: "hidden", alignItems: dialogActive ? 'center' : undefined, justifyContent: dialogActive ? (rows >= 14 ? 'center' : 'flex-start') : undefined, children: [dialogActive ? dialog : (_jsxs(_Fragment, { children: [showUpdateNotice && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.info, children: "\u2B06 " }), _jsx(Text, { color: theme.muted, children: updateNotice })] }) })), mode === 'plan' && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsxs(Text, { color: theme.info, bold: true, wrap: "truncate-end", children: [`PLAN MODE`, _jsx(Text, { color: theme.dim, children: ` · Tab for build · no file changes` })] }) })), searchQuery !== null && !hasCriticalPrompt && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.accent, wrap: "truncate-end", children: `${searchMatches.length} match${searchMatches.length === 1 ? '' : 'es'} for "${searchQuery}" · Esc clear` }) })), toast && !hasCriticalPrompt && !searchQuery && (_jsx(Box, { height: 1, flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.success, wrap: "truncate-end", children: toast }) })), helpMessage && !dense && !hasCriticalPrompt && (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginTop: 1, marginBottom: 1, children: _jsx(Text, { wrap: "truncate-end", children: helpMessage }) }) })), !initialized && !error && _jsx(Text, { color: theme.dim, children: "Initializing..." }), initialized && !config && !hasCriticalPrompt && (_jsx(Box, { paddingX: gutter, children: _jsx(Text, { color: theme.info, wrap: "truncate-end", children: SETUP_HINT }) })), initialized && !hasCriticalPrompt && (_jsx(TodoPanel, { todos: todos, columns: columns, maxVisible: visibleTodos })), showSubAgentPanel && !hasCriticalPrompt && (_jsx(SubAgentActivity, { activities: subAgentActivities, columns: columns })), !hasCriticalPrompt && threadErrors.filter((threadError) => threadError.transient).map((threadError) => (_jsx(Box, { paddingX: 2, children: _jsx(LeftBar, { color: theme.muted, marginBottom: 1, children: _jsx(Text, { color: theme.muted, children: threadError.message }) }) }, `thread-error-${threadError.id}`)))] })), !picker && !keyPrompt && settingsIndex === null && initialized && !hasCriticalPrompt && inputText.startsWith('/') && (_jsx(Palette, { items: commandItems, selected: commandIndex, maxVisible: paletteWindow, query: inputText.trim(), columns: columns, hint: "\u2191\u2193 move \u00B7 tab complete \u00B7 enter run \u00B7 esc close" }))] }), showErrorPanel && !dialogActive && (_jsxs(Box, { flexDirection: "column", width: "100%", borderStyle: "single", borderColor: theme.border, paddingX: 1, flexShrink: 0, overflow: "hidden", children: [_jsx(Text, { color: theme.dim, bold: true, wrap: "truncate-end", children: `Recent logs · F12 close` }), errorLines.length === 0
+                        ? _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: "No log entries yet." })
+                        : errorLines.map((line, index) => (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: line }, index)))] })), shortcutLines.length > 0 && (_jsx(Box, { flexDirection: "column", width: "100%", paddingX: dense ? 0 : gutter, marginBottom: 1, flexShrink: 0, overflow: "hidden", children: shortcutLines.map((line, index) => (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: line }, index))) })), hintRows > 0 && (_jsx(Box, { height: 1, width: "100%", flexShrink: 0, paddingX: dense ? 0 : gutter, overflow: "hidden", children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hintLine }) })), initialized && !dialogActive && (_jsxs(Box, { flexDirection: "column", width: "100%", backgroundColor: theme.bg, alignItems: "center", flexShrink: 0, overflow: "hidden", children: [busy && !hasCriticalPrompt ? (_jsx(Box, { width: layout.inputWidth, backgroundColor: theme.bg, flexShrink: 0, children: _jsx(LiveStatus, { columns: layout.inputWidth, activity: liveActivity, tool: activeTool, elapsedMs: busyElapsedMs, tps: decodeTps, frame: spinnerFrame, animate: animationsEnabled, gutter: 1 }) })) : null, _jsxs(Box, { flexDirection: "row", width: layout.inputWidth, backgroundColor: theme.surface, paddingY: dense ? 0 : 1, paddingLeft: 1, flexShrink: 0, children: [_jsx(Box, { borderStyle: "bold", borderTop: false, borderRight: false, borderBottom: false, borderLeftColor: inputFocused ? theme.accent : theme.border, paddingRight: 1, height: composerRows, flexShrink: 0 }), _jsx(Box, { flexGrow: 1, minWidth: 1, paddingRight: 2, height: composerRows, overflow: "hidden", children: _jsx(PromptInput, { value: inputText, onChange: (value) => {
+                                        // The `?` key toggles the shortcut sheet; ignore PromptInput's
+                                        // copy of that keystroke so it is not inserted twice.
+                                        if (shortcutGuardRef.current) {
+                                            shortcutGuardRef.current = false;
+                                            return;
+                                        }
                                         setInputText(value);
+                                        commandIndexRef.current = 0;
                                         setCommandIndex(0);
+                                        if (value)
+                                            setShowShortcuts(false);
                                     }, onSubmit: submitSafely, isDisabled: picker !== null || settingsIndex !== null || keyPrompt !== null, placeholder: "Build anything\u2026  (shift+enter newline \u00B7 @file \u00B7 /commands)", width: composerWidth, maxRows: composerMaxRows, onRowsChange: setComposerRows, caretRequest: caretRequest ?? undefined, onPaste: async (text) => {
                                         const summary = await summarizePaste(text, { label: session?.id ?? 'paste' });
                                         return summary.text;
@@ -3322,5 +4035,12 @@ const AppContent = ({ dangerouslySkipPermissions = false, logLevel, sessionId, u
  */
 export const App = (props) => {
     const [settings, setSettings] = useState(loadSettings);
-    return (_jsx(ThemeProvider, { name: settings.theme, children: _jsx(AppContent, { ...props, settings: settings, setSettings: setSettings }) }));
+    // Register user palettes before ThemeProvider resolves the palette. Without
+    // this, a saved `custom` theme kept the placeholder colour until some later
+    // state change forced a new ThemeProvider name (useMemo is keyed on name).
+    registerUserThemes(settings.themePath);
+    return (
+    // Remount when themePath changes so the provider recomputes its palette
+    // even though the selected name (`custom`) did not change.
+    _jsx(ThemeProvider, { name: settings.theme, children: _jsx(AppContent, { ...props, settings: settings, setSettings: setSettings }) }, settings.themePath ?? ''));
 };

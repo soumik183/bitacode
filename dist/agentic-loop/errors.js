@@ -7,6 +7,7 @@
 import { compactIfNeeded } from '../utils/compactor.js';
 import { logger } from '../utils/logger.js';
 import { sanitizeMessagesForProvider } from '../utils/message-sanitize.js';
+import { classifyFailure } from '../utils/provider-policy.js';
 const LIMITS = {
     MAX_REPAIR: 2,
     MAX_CONTEXT: 2,
@@ -101,6 +102,28 @@ fallbackUserContent) {
             errorMessage: 'Authentication failed. Check your API key or credentials.',
         };
     }
+    // Classify the provider failure once. Content-filter and clearly permanent
+    // rejections must not burn the transient budget; malformed 400s still go
+    // through the repair path below.
+    const failureKind = classifyFailure(apiError, status);
+    if (failureKind === 'content_filter') {
+        return {
+            handled: false,
+            shouldAbort: false,
+            silentRetry: false,
+            errorMessage: 'The provider blocked this response (content filter). Rephrase the request.',
+        };
+    }
+    if (failureKind === 'permanent' &&
+        status !== 400 && status !== 408 && status !== 409 && status !== 425 &&
+        !rateMessage && !contextMessage) {
+        return {
+            handled: false,
+            shouldAbort: false,
+            silentRetry: false,
+            errorMessage: `Provider rejected the request: ${msg.slice(0, 200) || 'unknown reason'}`,
+        };
+    }
     // Context window exceeded - force compaction (before generic 400 handling).
     // 413 (payload too large) is the same condition reported by some providers.
     const isContextTooLong = contextMessage || status === 413 ||
@@ -124,8 +147,12 @@ fallbackUserContent) {
         if (pricing && client && model) {
             try {
                 const compacted = await compactIfNeeded(client, model, messages, pricing.contextWindow, requestDefaults || {}, sessionId);
-                messages.length = 0;
-                messages.push(...compacted);
+                // Never replace history with an empty or identical array: that would
+                // send a request with no prompt and get another 400.
+                if (compacted.length > 0 && compacted !== messages) {
+                    messages.length = 0;
+                    messages.push(...compacted);
+                }
             }
             catch (compactErr) {
                 logger.error(`Compaction failed: ${compactErr}`);

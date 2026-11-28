@@ -17,12 +17,13 @@ import { App } from './App.js';
 import { ErrorBoundary } from './components/ErrorBoundary.js';
 import { getTheme, registerCustomTheme } from './theme.js';
 import { discoverThemeFiles } from './theme/discovery.js';
-import { loadSettings } from './settings.js';
+import { loadSettings, saveSettings } from './settings.js';
 import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
 import { checkForUpdate, installUpdate } from './utils/version-check.js';
 import {
   formatInstalled,
+  formatInstallFailure,
   formatUpdateAvailable,
   formatUpdateNotice,
   formatUpdateUnavailable,
@@ -35,6 +36,7 @@ import { runPluginsCommand } from './commands/plugins.js';
 import { runSessionsCommand } from './commands/sessions.js';
 import { collectDoctorReport, renderDoctorReport } from './utils/doctor.js';
 import { completionScript, isShellName } from './utils/completion.js';
+import { getOutputStyle, listOutputStyles } from './utils/output-styles.js';
 import { pruneSpillFiles } from './utils/tool-result-budget.js';
 import { createWorktree, listWorktrees, removeWorktree } from './utils/worktree.js';
 import { runMcpCommand } from './commands/mcp.js';
@@ -69,6 +71,9 @@ const packageJson: { version: string } = JSON.parse(
 // mouse, OSC, logs) pass through untouched.
 const program = new Command();
 
+/** Comma-separated CLI list, e.g. `read_file,glob`. */
+const commaList = (value: string): string[] => value.split(',').map((part) => part.trim()).filter(Boolean);
+
 program
   .name('bitacode')
   .description('Bitacode — a simple, hackable coding agent CLI')
@@ -84,11 +89,17 @@ program
   .option('--cwd <dir>', 'Run in this directory')
   .option('--max-iterations <n>', 'Cap loop iterations for -p', (value: string) => Number.parseInt(value, 10))
   .option('--save-session', 'With -p: also save the run as a session')
+  .option('--output-last-message <file>', 'With -p: write the final assistant message to a file')
+  .option('--allowed-tools <list>', 'With -p: comma-separated tool allowlist', commaList)
+  .option('--exclude-tools <list>', 'With -p: comma-separated tool denylist', commaList)
+  .option('-q, --quiet', 'With -p: suppress streamed text and tool lines on stderr')
+  .option('--timeout-ms <n>', 'With -p: per-request timeout in milliseconds', (value: string) => Number.parseInt(value, 10))
+  .option('--max-budget-usd <n>', 'With -p: abort when estimated spend exceeds this many USD', (value: string) => Number.parseFloat(value))
   .option('--autoverify', 'Run project checks after a turn that changed files')
   .action(async (options) => {
     // Non-interactive mode: no Ink, no alternate screen, machine-readable exit code.
     if (options.print) {
-      const approval = typeof options.approval === 'string' && ['manual', 'auto', 'yolo'].includes(options.approval)
+      const approval = typeof options.approval === 'string' && ['manual', 'acceptEdits', 'auto', 'yolo'].includes(options.approval)
         ? (options.approval as HeadlessApproval)
         : 'manual';
       const code = await runHeadless({
@@ -99,6 +110,12 @@ program
         ...(options.model ? { model: options.model } : {}),
         ...(options.session ? { sessionId: options.session } : {}),
         ...(Number.isFinite(options.maxIterations) ? { maxIterations: options.maxIterations as number } : {}),
+        ...(Number.isFinite(options.timeoutMs) ? { timeoutMs: options.timeoutMs as number } : {}),
+        ...(Number.isFinite(options.maxBudgetUsd) ? { maxBudgetUsd: options.maxBudgetUsd as number } : {}),
+        ...(options.outputLastMessage ? { outputLastMessage: String(options.outputLastMessage) } : {}),
+        ...(Array.isArray(options.allowedTools) && options.allowedTools.length > 0 ? { allowedTools: options.allowedTools as string[] } : {}),
+        ...(Array.isArray(options.excludeTools) && options.excludeTools.length > 0 ? { excludedTools: options.excludeTools as string[] } : {}),
+        quiet: Boolean(options.quiet),
         approval,
         saveSession: Boolean(options.saveSession),
       });
@@ -160,7 +177,7 @@ program
         if (info?.updateAvailable) {
           instance.rerender(
             <ErrorBoundary>
-              <App {...appProps} updateNotice={formatUpdateNotice(info.latest)} />
+              <App {...appProps} updateNotice={formatUpdateNotice(info.current, info.latest)} />
             </ErrorBoundary>
           );
         }
@@ -255,15 +272,18 @@ program
         return;
       }
 
+      const scope: 'global' | 'local' = options.local ? 'local' : 'global';
       const result = await installUpdate({
         version: info.latest,
         ...(options.global ? { global: true } : {}),
         ...(options.local ? { global: false } : {}),
       });
-      console.log(result.message);
-      if (result.success) {
-        console.log(formatInstalled(info.latest));
+      if (!result.success) {
+        console.error(formatInstallFailure(info.latest, scope, result.message));
+        process.exitCode = 1;
+        return;
       }
+      console.log(formatInstalled(info.current, info.latest, scope));
     } catch (error) {
       console.error('Update failed:', error instanceof Error ? error.message : String(error));
       process.exitCode = 1;
@@ -289,19 +309,17 @@ program
   });
 
 program
-  .command('permissions [action] [target]')
-  .description('Show, trust or untrust project permission rules')
+  .command('permissions [args...]')
+  .description('Show, trust, untrust or dry-run project permission rules')
   .option('--json', 'Emit JSON')
-  .action((action, target, options) => {
-    process.exitCode = runPermissionsCommand(
-      [action ?? 'show', ...(target ? [target] : [])].filter(Boolean) as string[],
-      { json: Boolean(options.json) },
-    );
+  .action((args: string[], options) => {
+    const parts = args && args.length > 0 ? args : ['show'];
+    process.exitCode = runPermissionsCommand(parts, { json: Boolean(options.json) });
   });
 
 program
   .command('sessions [args...]')
-  .description('List, inspect, replay, fork, rename, pin or export saved sessions')
+  .description('List, inspect, replay, fork, rename, pin, archive, prune, delete or export saved sessions')
   .option('--json', 'Emit JSON')
   .option('--out <file>', 'For export: write to this file')
   .action(async (args: string[], options) => {
@@ -343,6 +361,43 @@ program
       [action ?? 'list', ...(name ? [name] : [])].filter(Boolean) as string[],
       { json: Boolean(options.json) },
     );
+  });
+
+program
+  .command('styles [action] [id]')
+  .description('List output styles or set one (default, concise, explanatory, learning, proactive, custom)')
+  .option('--json', 'Emit JSON')
+  .action((action, id, options) => {
+    const sub = String(action ?? 'list').toLowerCase();
+    if (sub === 'set') {
+      if (!id) {
+        console.error('Usage: bitacode styles set <id>');
+        process.exitCode = 1;
+        return;
+      }
+      const wanted = String(id).trim().toLowerCase();
+      const style = getOutputStyle(wanted);
+      if (style.id !== wanted) {
+        console.error(`Unknown output style: ${id}`);
+        console.error(`Available: ${listOutputStyles().map((entry) => entry.id).join(', ')}`);
+        process.exitCode = 1;
+        return;
+      }
+      saveSettings({ ...loadSettings(), outputStyle: style.id });
+      console.log(`Output style set to ${style.id}`);
+      return;
+    }
+
+    const styles = listOutputStyles();
+    const active = loadSettings().outputStyle ?? 'default';
+    if (options.json) {
+      console.log(JSON.stringify({ outputStyle: active, styles }));
+      return;
+    }
+    for (const style of styles) {
+      const marker = style.id === active ? '*' : ' ';
+      console.log(`${marker} ${style.id}  (${style.source})  ${style.description}`);
+    }
   });
 
 program
@@ -430,9 +485,11 @@ program
         case 'list': {
           const result = loadAccounts();
           if (!result.ok) return fail(result.error);
+          const active = activeAccount();
+          const activeId = active.ok ? active.value?.id : undefined;
           for (const account of result.value) {
             const view = redactAccount(account);
-            console.log(`${account.id}\t${account.provider}\t${view.label}${account.id === activeAccount().value?.id ? '\t(active)' : ''}`);
+            console.log(`${account.id}\t${account.provider}\t${view.label}${account.id === activeId ? '\t(active)' : ''}`);
           }
           return;
         }

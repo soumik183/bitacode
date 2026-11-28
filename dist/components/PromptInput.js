@@ -499,7 +499,10 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         reportedRows.current = totalRows;
         onRowsChange?.(totalRows);
     }, [totalRows, onRowsChange]);
-    const popupWidth = Math.max(24, Math.min(displayWidth > 1000 ? 64 : displayWidth, 64));
+    // Never force a 24-column popup onto a narrower screen; use the space there
+    // is and shorten the legend when it cannot fit.
+    const popupWidth = Math.max(1, Math.min(displayWidth, 64));
+    const shortPopupHints = popupWidth < 32;
     const rule = '─'.repeat(Math.max(1, popupWidth - 4));
     const kindIcon = {
         file: '▤', directory: '▸', skill: '◈',
@@ -537,7 +540,7 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
         }
         return nodes;
     };
-    const fieldNode = !value ? (_jsx(Text, { color: theme.placeholder, wrap: "truncate-end", children: placeholder })) : (_jsx(Text, { color: theme.text, wrap: "truncate-end", children: windowLines.map((line, index) => {
+    const fieldNode = !value ? (_jsxs(Text, { color: theme.placeholder, wrap: "truncate-end", children: [placeholder, _jsx(Text, { inverse: true, children: '▏' })] })) : (_jsx(Text, { color: theme.text, wrap: "truncate-end", children: windowLines.map((line, index) => {
             const text = displayPoints.slice(line.start, line.end).join('');
             const newline = index > 0 ? '\n' : null;
             const rel = firstRow + index === cursorLine
@@ -545,7 +548,9 @@ export const PromptInput = ({ value, onChange, onSubmit, placeholder = '', isDis
                 : null;
             return (_jsxs(React.Fragment, { children: [newline, renderFieldRow(text, rel)] }, index));
         }) }));
-    const popupNode = popupVisible && suggestion ? (_jsxs(Box, { flexDirection: "column", width: popupWidth, flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: '◈ Reference' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ move · end skills · enter · esc` })] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), hiddenAbove > 0 ? _jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` }) : null, visibleCandidates.map((candidate, index) => {
+    const popupNode = popupVisible && suggestion ? (_jsxs(Box, { flexDirection: "column", width: popupWidth, flexShrink: 0, borderStyle: "round", borderColor: theme.border, backgroundColor: theme.surface, paddingX: 1, marginBottom: 1, children: [_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.accent, bold: true, wrap: "truncate-end", children: '◈ Reference' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: shortPopupHints
+                            ? `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ · ↵ · esc`
+                            : `${Math.min(selected + 1, suggestion.candidates.length)}/${suggestion.candidates.length} · ↑↓ move · end skills · enter · esc` })] }), _jsx(Text, { color: theme.border, wrap: "truncate-end", children: rule }), hiddenAbove > 0 ? _jsx(Text, { color: theme.dim, children: `  ↑ ${hiddenAbove} more` }) : null, visibleCandidates.map((candidate, index) => {
                 const active = popupStart + index === selected;
                 const group = candidateGroup(candidate);
                 return (_jsxs(React.Fragment, { children: [startsGroup(index) ? (_jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsx(Text, { color: theme.dim, bold: true, wrap: "truncate-end", children: group === 'skill' ? 'Skills' : 'Files' }), _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: ` ${group === 'skill' ? skillCount : fileCount}` })] })) : null, _jsxs(Box, { flexDirection: "row", justifyContent: "space-between", overflow: "hidden", children: [_jsxs(Box, { flexShrink: 0, flexDirection: "row", children: [_jsx(Text, { color: active ? theme.accent : theme.dim, children: active ? '› ' : '  ' }), _jsx(Text, { color: theme[kindColor[candidate.kind]], children: `${kindIcon[candidate.kind]} ` }), _jsx(Text, { color: active ? theme.accent : theme.text, bold: active || candidate.kind === 'skill', children: candidate.label })] }), candidate.detail ? (_jsx(Box, { flexShrink: 1, minWidth: 0, marginLeft: 2, overflow: "hidden", children: _jsx(Text, { color: theme.dim, wrap: "truncate-end", children: candidate.source ? `${candidate.source} · ${candidate.detail}` : candidate.detail }) })) : null] })] }, candidate.id));

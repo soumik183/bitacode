@@ -15,13 +15,17 @@
  * together without Ink.
  */
 import process from 'node:process';
+import fs from 'node:fs/promises';
 import { readConfig, detectConfigFromEnvironment } from './config.js';
 import { loadRuntimeConfig } from './runtime-config.js';
 import { createProviderClient } from './providers/client.js';
 import { getModelPricing, getRequestDefaultParams } from './providers/index.js';
 import { generateSystemPrompt } from './system-prompt.js';
 import { runAgenticLoop } from './agentic-loop.js';
+import { setToolGroups } from './tools/index.js';
+import { loadSettings } from './settings.js';
 import { setApprovalHandler, setApprovalMode, setDangerouslySkipPermissions } from './utils/approval.js';
+import { setToolFilter } from './tools/index.js';
 import { buildLayeredMessages } from './utils/context-layers.js';
 import { collectRepoContext, renderRepoContext } from './utils/repo-context.js';
 import { memoryFrame } from './utils/memory.js';
@@ -32,6 +36,19 @@ export const EXIT_ERROR = 1;
 export const EXIT_APPROVAL = 2;
 export const EXIT_ABORTED = 3;
 export const EXIT_NO_CONFIG = 4;
+export const EXIT_BUDGET = 5;
+/** True when a positive budget cap has been exceeded. */
+export function isOverBudget(spentUsd, capUsd) {
+    return typeof capUsd === 'number'
+        && Number.isFinite(capUsd)
+        && capUsd > 0
+        && spentUsd > capUsd;
+}
+/** Write the final assistant message, always ending with a newline. */
+export async function writeOutputLastMessage(filePath, text) {
+    const body = text.trimEnd();
+    await fs.writeFile(filePath, body.length > 0 ? `${body}\n` : '', 'utf8');
+}
 function resolveConfig(options) {
     const configured = readConfig('active');
     const base = configured ?? detectConfigFromEnvironment();
@@ -51,6 +68,8 @@ export async function runHeadless(options) {
     const stdout = options.stdout ?? ((line) => process.stdout.write(`${line}\n`));
     const stderr = options.stderr ?? ((line) => process.stderr.write(`${line}\n`));
     const emitJson = (value) => stdout(JSON.stringify(value));
+    // Honour the same tool-group setting as the interactive UI.
+    setToolGroups(loadSettings().toolGroups);
     if (options.cwd) {
         try {
             process.chdir(options.cwd);
@@ -91,6 +110,7 @@ export async function runHeadless(options) {
     const approval = options.approval ?? 'manual';
     setApprovalMode(approval);
     setDangerouslySkipPermissions(approval === 'yolo');
+    setToolFilter({ allow: options.allowedTools, deny: options.excludedTools });
     let approvalBlocked = false;
     setApprovalHandler(async (request) => {
         approvalBlocked = true;
@@ -116,10 +136,14 @@ export async function runHeadless(options) {
     process.on('SIGINT', onSigint);
     let hadError = false;
     let lastAssistantText = '';
+    let finalText = '';
+    let spentUsd = 0;
+    let budgetExceeded = false;
     const onEvent = (event) => {
         switch (event.type) {
             case 'text_delta':
                 lastAssistantText += event.content ?? '';
+                finalText += event.content ?? '';
                 if (options.json)
                     emitJson({ type: 'text', text: event.content ?? '' });
                 else if (!options.quiet)
@@ -131,6 +155,9 @@ export async function runHeadless(options) {
                 lastAssistantText = '';
                 break;
             case 'tool_call':
+                // Text before a tool call is preamble; the final answer comes after the
+                // last tool result, so reset the captured final message here.
+                finalText = '';
                 if (options.json) {
                     emitJson({
                         type: 'tool_call',
@@ -156,6 +183,11 @@ export async function runHeadless(options) {
                 }
                 break;
             case 'usage':
+                spentUsd += Number(event.usage?.cost ?? 0) || 0;
+                if (isOverBudget(spentUsd, options.maxBudgetUsd)) {
+                    budgetExceeded = true;
+                    abortController.abort();
+                }
                 if (options.json)
                     emitJson({ type: 'usage', usage: event.usage ?? null });
                 break;
@@ -200,6 +232,16 @@ export async function runHeadless(options) {
     finally {
         process.off('SIGINT', onSigint);
     }
+    if (options.outputLastMessage) {
+        try {
+            await writeOutputLastMessage(options.outputLastMessage, finalText || lastAssistantText);
+        }
+        catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            stderr(`bitacode: could not write ${options.outputLastMessage}: ${message}`);
+            hadError = true;
+        }
+    }
     // A saved headless run must be resumable, so the id has to be a real session
     // id. The runtime tag (`headless-<ts>`) is not one: it used to be written into
     // the session and rejected by the path validator, which is why
@@ -225,6 +267,14 @@ export async function runHeadless(options) {
             stdout(`Resume with: bitacode --session ${savedSessionId}`);
         }
         process.stdout.write('\n');
+    }
+    if (budgetExceeded) {
+        const cap = options.maxBudgetUsd ?? 0;
+        if (options.json)
+            emitJson({ type: 'budget_exceeded', spentUsd, capUsd: cap });
+        else
+            stderr(`bitacode: budget cap of $${cap.toFixed(2)} reached (spent ~$${spentUsd.toFixed(2)})`);
+        return EXIT_BUDGET;
     }
     if (approvalBlocked)
         return EXIT_APPROVAL;

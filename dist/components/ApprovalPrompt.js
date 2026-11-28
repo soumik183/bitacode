@@ -1,5 +1,5 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useCallback, useRef } from 'react';
+import React, { useCallback, useRef } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Select } from '@inkjs/ui';
 import { LeftBar } from './LeftBar.js';
@@ -38,9 +38,14 @@ export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 
     const showNumbers = cols >= 28;
     // LeftBar gutter (2) + Select pointer/padding (2) + the "1. " number prefix.
     const labelWidth = Math.max(1, cols - 4 - (showNumbers ? 3 : 0));
+    // On a very short terminal the three-option list cannot fit; fold it into a
+    // single numbered row so the command/path being approved stays visible.
+    const tinyOptions = height <= 4;
+    const optionRows = tinyOptions ? 1 : OPTIONS.length;
     const showHint = !embedded && height >= 5;
-    // Header + three options + hint are fixed; the remainder is the detail budget.
-    const detailRows = Math.max(0, Math.min(compact ? 1 : 2, height - 1 - OPTIONS.length - (showHint ? 1 : 0)));
+    // Header + options + hint are fixed; the detail area always gets at least
+    // one row, otherwise short terminals hid the only line that matters.
+    const detailRows = Math.max(1, Math.min(compact ? 1 : 2, height - 1 - optionRows - (showHint ? 1 : 0)));
     const detailWidth = Math.max(1, cols - 2);
     const description = request.description.replace(/\s+/g, ' ').trim();
     const details = String(request.detail ?? '')
@@ -70,8 +75,8 @@ export const ApprovalPrompt = ({ request, columns = 80, compact = false, rows = 
         if (key.escape)
             respond('reject');
     });
-    return (_jsx(LeftBar, { color: theme.accent, children: _jsxs(Box, { flexDirection: "column", children: [!embedded && (_jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: showHint ? 'Approval Required' : `Approval Required · ${hint}` })), shownDetail.map((line, index) => (_jsx(Text, { color: index === 0 ? theme.muted : theme.dim, wrap: "truncate-end", children: line }, index))), _jsx(Select, { options: OPTIONS.map((option, index) => ({
+    return (_jsx(LeftBar, { color: theme.accent, children: _jsxs(Box, { flexDirection: "column", children: [!embedded && (_jsx(Text, { color: theme.text, bold: true, wrap: "truncate-end", children: showHint ? 'Approval Required' : `Approval Required · ${hint}` })), shownDetail.map((line, index) => (_jsx(Text, { color: index === 0 ? theme.muted : theme.dim, wrap: "truncate-end", children: line }, index))), tinyOptions ? (_jsx(Text, { color: theme.muted, wrap: "truncate-end", children: OPTIONS.map((option, index) => (_jsxs(React.Fragment, { children: [index > 0 ? _jsx(Text, { color: theme.dim, children: ' · ' }) : null, _jsx(Text, { color: theme.accent, children: `${index + 1}.` }), _jsx(Text, { children: ` ${fit(option.label, Math.max(1, Math.floor(cols / 3) - 2))}` })] }, option.value))) })) : (_jsx(Select, { options: OPTIONS.map((option, index) => ({
                         value: option.value,
                         label: `${showNumbers ? `${index + 1}. ` : ''}${fit(option.label, labelWidth)}`,
-                    })), onChange: (value) => respond(value) }), showHint && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint }))] }) }));
+                    })), onChange: (value) => respond(value) })), showHint && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: hint }))] }) }));
 };

@@ -1,12 +1,8 @@
-/**
- * cli.tsx calls program.parse() on import, so it cannot be imported in tests.
- * These cover the pure formatting helpers that produce its user-facing output.
- */
-
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatInstalled,
+  formatInstallFailure,
   formatUpdateAvailable,
   formatUpdateNotice,
   formatUpdateUnavailable,
@@ -24,14 +20,37 @@ test('formatUpdateAvailable shows both versions and the follow-up command', () =
   );
 });
 
-test('formatUpdateNotice is a short hint for the in-app notice', () => {
-  assert.equal(formatUpdateNotice('0.2.0'), 'Update available: v0.2.0. Run: bitacode update');
+test('formatUpdateNotice shows the version delta and the in-app command', () => {
+  assert.equal(
+    formatUpdateNotice('0.1.25', '0.1.26'),
+    'Update available: v0.1.25 → v0.1.26 · run /update'
+  );
 });
 
 test('formatUpdateUnavailable explains a failed/offline check', () => {
   assert.match(formatUpdateUnavailable(), /offline/i);
 });
 
-test('formatInstalled reports the new version to run', () => {
-  assert.equal(formatInstalled('0.2.0'), 'Installed bitacode v0.2.0. Run: bitacode');
+test('formatInstalled reports the version delta, scope and reopen step', () => {
+  assert.equal(
+    formatInstalled('0.1.25', '0.1.26', 'global'),
+    'Updated bitacode v0.1.25 → v0.1.26 (global). Reopen bitacode to use it.'
+  );
+  assert.equal(
+    formatInstalled('0.1.26', '0.1.26', 'local'),
+    'Installed bitacode v0.1.26 (local). Reopen bitacode to use it.'
+  );
+});
+
+test('formatInstallFailure keeps one bounded line with the target and scope', () => {
+  const message = formatInstallFailure(
+    '0.1.26',
+    'global',
+    'npm install exited with code 1:\nboom failed\nmore output',
+  );
+  assert.match(message, /v0\.1\.26/);
+  assert.match(message, /global/);
+  assert.match(message, /boom failed/);
+  assert.equal(message.includes('\n'), false);
+  assert.ok(message.length <= 240, 'failure line stays bounded');
 });

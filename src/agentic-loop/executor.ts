@@ -53,6 +53,7 @@ import { evaluatePermission, type PermissionRuleSet } from '../utils/permission-
 import { runWithApprovalOverride } from '../utils/approval.js';
 import { appendJournal } from '../utils/session-journal.js';
 import { recordTurnCheckpoint } from '../utils/turn-snapshots.js';
+import { shouldBlockRepetition } from '../utils/tool-repetition.js';
 
 /** Policy knobs the loop hands down; all optional so tests can omit them. */
 export interface ToolPolicy {
@@ -212,6 +213,10 @@ export async function executeToolCalls(
     toolCalls.map((tc: any) => tc.id as string)
   );
 
+  // Doom-loop guard: identical calls within this turn are counted and the call
+  // after the threshold is refused with an actionable error.
+  const repetitionCounts = new Map<string, number>();
+
   const injectStubsForPendingToolCalls = () => {
     for (const id of pendingToolCallIds) {
       messages.push({
@@ -256,6 +261,21 @@ export async function executeToolCalls(
       }
 
       // 2. PreToolUse hooks: a blocking hook stops the call before any effect.
+      if (shouldBlockRepetition(name, args, repetitionCounts)) {
+        return {
+          id,
+          name,
+          args: argsStr,
+          status: 'error',
+          content: truncateToolResult(
+            `Error: blocked a repeated ${name} call with identical arguments (doom-loop guard). ` +
+            'Change the arguments or act on the results you already have.',
+          ),
+          result: 'repeated call blocked',
+        };
+      }
+
+      // 3. PreToolUse hooks: a blocking hook stops the call before any effect.
       if (hooks.length > 0) {
         const hookResult = await runHooks({
           event: 'PreToolUse',

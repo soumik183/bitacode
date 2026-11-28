@@ -14,6 +14,8 @@ import { chmodSync } from 'node:fs';
 import { clearTodos } from './tools/todo.js';
 import { logger } from './utils/logger.js';
 import { isUiOnlyMessageField } from './utils/message-sanitize.js';
+import { loadSettings } from './settings.js';
+import { appendEvent, writeSnapshot } from './utils/session-events.js';
 const SESSION_DIR_MODE = 0o700;
 const SESSION_FILE_MODE = 0o600;
 const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -352,6 +354,85 @@ export async function saveSession(session) {
             saveQueues.delete(session.id);
     }
     logger.debug(`Session saved: ${session.id}`);
+    // Opt-in append-only event log. A failure here is diagnostic only — the
+    // authoritative JSON session has already been written successfully.
+    if (loadSettings().sessionEventLog) {
+        void Promise.all([
+            writeSnapshot(session.id, session),
+            appendEvent({
+                sessionId: session.id,
+                type: 'note',
+                data: { title: session.title, messages: session.completionMessages.length },
+            }),
+        ]).catch((error) => logger.warn('Session event log write failed', { error: String(error) }));
+    }
+}
+/**
+ * Deterministically strip UI-only fields, system/developer turns, orphaned tool
+ * results and the oldest whole turns until the session fits `maxBytes`.
+ *
+ * The result is still a valid message history: the first system message is kept
+ * and tool results stay attached to their assistant tool-call message. Nothing
+ * here is random, so the same input always yields the same output.
+ */
+export function pruneSession(session, options = {}) {
+    const maxBytes = options.maxBytes ?? 0;
+    const keepTurns = options.keepTurns;
+    let messages = Array.isArray(session.completionMessages) ? [...session.completionMessages] : [];
+    const systemPrefix = messages.length > 0 && messages[0].role === 'system' ? [messages[0]] : [];
+    if (keepTurns !== undefined && keepTurns >= 0) {
+        const userIndexes = [];
+        messages.forEach((message, index) => {
+            if (message.role === 'user')
+                userIndexes.push(index);
+        });
+        if (userIndexes.length > keepTurns) {
+            const cutoff = userIndexes[Math.max(0, userIndexes.length - keepTurns)];
+            messages = [...systemPrefix, ...messages.slice(cutoff)];
+        }
+    }
+    let pruned = { ...session, completionMessages: messages };
+    pruned = { ...pruned, completionMessages: sanitizeCompletionMessages(pruned.completionMessages) };
+    if (maxBytes > 0) {
+        let bytes = JSON.stringify(pruned.completionMessages).length;
+        while (bytes > maxBytes && pruned.completionMessages.length > 0) {
+            const next = stripOldestTurn(pruned.completionMessages);
+            if (next.length === pruned.completionMessages.length)
+                break;
+            pruned = { ...pruned, completionMessages: next };
+            bytes = JSON.stringify(pruned.completionMessages).length;
+        }
+    }
+    return pruned;
+}
+/**
+ * Remove the oldest user→tool run after the system message. The system message
+ * and the most recent turn are always kept, so the model still has instructions
+ * and the task it is working on.
+ */
+function stripOldestTurn(messages) {
+    const firstSystem = messages.findIndex((message) => message.role === 'system');
+    const start = firstSystem >= 0 ? firstSystem + 1 : 0;
+    if (start >= messages.length - 1)
+        return messages;
+    let end = start;
+    while (end < messages.length && messages[end].role !== 'user')
+        end++;
+    if (end >= messages.length)
+        return messages;
+    // Include the assistant/tool messages that follow this user turn.
+    let stop = end + 1;
+    while (stop < messages.length && messages[stop].role !== 'user')
+        stop++;
+    if (stop >= messages.length)
+        return messages;
+    return [...messages.slice(0, end), ...messages.slice(stop)];
+}
+/** Render a human summary of a pruned session for the CLI. */
+export function describePrune(before, after) {
+    const beforeBytes = JSON.stringify(before.completionMessages).length;
+    const afterBytes = JSON.stringify(after.completionMessages).length;
+    return `pruned ${before.completionMessages.length} -> ${after.completionMessages.length} messages (${beforeBytes} -> ${afterBytes} bytes)`;
 }
 /** Load a session by ID. Returns null if not found. */
 export async function loadSession(id) {
@@ -371,6 +452,7 @@ export async function loadSession(id) {
             subAgentActivities: sanitizeSubAgentActivities(session.subAgentActivities),
             // Older files have no pin field; only real booleans are trusted.
             pinned: typeof session.pinned === 'boolean' ? session.pinned : undefined,
+            archived: typeof session.archived === 'boolean' ? session.archived : undefined,
         };
     }
     catch (err) {
@@ -418,6 +500,7 @@ export async function listSessions() {
                 // The system prompt is not a message the user sent.
                 messageCount: countConversationMessages(messages),
                 pinned: session.pinned === true ? true : undefined,
+                archived: session.archived === true ? true : undefined,
             });
         }
         catch (err) {
@@ -562,6 +645,7 @@ export async function forkSession(id, title, uptoMessageIndex) {
             ? { subAgentActivities: source.subAgentActivities.map((activity) => ({ ...activity })) }
             : {}),
         ...(source.pinned === true ? { pinned: true } : {}),
+        ...(source.archived === true ? { archived: true } : {}),
     };
     await saveSession(fork);
     return fork;
@@ -581,6 +665,15 @@ export async function setSessionPinned(id, pinned) {
     if (!session)
         return false;
     session.pinned = pinned === true;
+    await saveSession(session);
+    return true;
+}
+/** Archive or unarchive a saved session. Returns false when the id does not resolve. */
+export async function setSessionArchived(id, archived) {
+    const session = await loadSession(id);
+    if (!session)
+        return false;
+    session.archived = archived === true;
     await saveSession(session);
     return true;
 }

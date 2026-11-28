@@ -352,6 +352,26 @@ export function evaluatePermission(set: PermissionRuleSet | undefined, call: Per
   return { decision: 'ask' };
 }
 
+export interface RuleMatchBuckets {
+  deny: PermissionRule[];
+  ask: PermissionRule[];
+  allow: PermissionRule[];
+}
+
+/**
+ * Every rule that matches a call, bucketed. Used by `bitacode permissions test`
+ * to explain a verdict, including rules that lost to higher precedence.
+ */
+export function matchRules(set: PermissionRuleSet | undefined, call: PermissionCall): RuleMatchBuckets {
+  const buckets: RuleMatchBuckets = { deny: [], ask: [], allow: [] };
+  if (!set || !call.tool || !call.tool.trim()) return buckets;
+  const candidates = argumentCandidates(call);
+  for (const rule of set.deny) if (ruleMatches(rule, call, candidates)) buckets.deny.push(rule);
+  for (const rule of set.ask) if (ruleMatches(rule, call, candidates)) buckets.ask.push(rule);
+  for (const rule of set.allow) if (ruleMatches(rule, call, candidates)) buckets.allow.push(rule);
+  return buckets;
+}
+
 /** Human-readable listing for `bitacode permissions show`. */
 export function describeRuleSet(set: PermissionRuleSet): string[] {
   const lines: string[] = [];

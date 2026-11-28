@@ -80,14 +80,14 @@ function attempt(candidate, spawnFn) {
     });
 }
 /** Try every candidate in order; return a toast message with the URL on failure. */
-export async function openInBrowser(rawUrl, spawnFn = spawn) {
+export async function openInBrowser(rawUrl, spawnFn = spawn, platform = process.platform) {
     const url = validHttpUrl(rawUrl);
     if (!url)
         return `Error: invalid URL: ${String(rawUrl)}`;
     const fallback = `Open manually: ${url}`;
     let candidates;
     try {
-        candidates = browserCandidates(url);
+        candidates = browserCandidates(url, platform);
     }
     catch (err) {
         return `Error: could not resolve browser: ${err instanceof Error ? err.message : String(err)}`;

@@ -31,7 +31,7 @@ At runtime, the user interacts only with the Ink UI. The UI delegates model/tool
 ### Entry and shell
 
 - `src/cli.tsx`
-  - Parses `--dangerously-accept-all`, `--log-level`, `--session`, and the `configure` subcommand.
+  - Parses `--dangerously-accept-all`, `--log-level`, `--session`, headless `-p` flags, and the subcommands (`configure`, `init`, `update`, `doctor`, `permissions`, `sessions`, `plugins`, `styles`, `completion`).
   - Renders either `App` or `ConfigureComponent`.
 
 ### Main application layer
@@ -68,6 +68,7 @@ At runtime, the user interacts only with the Ink UI. The UI delegates model/tool
 - `src/sessions.ts`
   - Creates, loads, saves, lists, and deletes JSON session files.
   - Persists completion messages, provider/model metadata, and per-session TODO state.
+  - Supports pinning, archiving, deterministic pruning (`pruneSession`) and fork/rename/export.
 
 ### Extension systems
 
@@ -87,6 +88,7 @@ At runtime, the user interacts only with the Ink UI. The UI delegates model/tool
   - Static built-in tool registry.
   - Dynamic tool and handler registries.
   - Central dispatch for tool execution.
+  - Optional per-process tool filter (`setToolFilter`) used by headless allow/deny flags.
 
 - Built-in tools in `src/tools/*`
   - `read-file.ts`
@@ -113,6 +115,10 @@ These handle Markdown-ish formatting, left-bar indicators for callouts, and stru
 - `src/utils/compactor.ts`
 - `src/utils/cost-tracker.ts`
 - `src/utils/logger.ts`
+- `src/utils/rules.ts` — instruction-file merge (AGENTS.md/CLAUDE.md tree, imports, rules dirs)
+- `src/utils/output-styles.ts` — voice presets for the system prompt
+- `src/utils/repo-outline.ts` — bounded symbol outline
+- `src/utils/protected-paths.ts` — write refusal for control-plane directories
 
 ## 3. Startup Flow
 

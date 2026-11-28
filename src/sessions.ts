@@ -78,6 +78,8 @@ export interface Session {
   subAgentActivities?: SubAgentActivity[];
   /** Pinned sessions float to the top of user-facing lists. */
   pinned?: boolean;
+  /** Archived sessions are hidden from the picker but kept on disk. */
+  archived?: boolean;
 }
 
 export interface SessionSummary {
@@ -89,6 +91,7 @@ export interface SessionSummary {
   model?: string;
   messageCount: number;
   pinned?: boolean;
+  archived?: boolean;
 }
 
 /** True once the transcript has anything beyond the system prompt. */
@@ -443,6 +446,86 @@ export async function saveSession(session: Session): Promise<void> {
   }
 }
 
+/** Options for deterministic session pruning. */
+export interface PruneOptions {
+  /** How many bytes per session are worth storing. */
+  maxBytes?: number;
+  /** Prune a session to the last N user turns. */
+  keepTurns?: number;
+}
+
+/**
+ * Deterministically strip UI-only fields, system/developer turns, orphaned tool
+ * results and the oldest whole turns until the session fits `maxBytes`.
+ *
+ * The result is still a valid message history: the first system message is kept
+ * and tool results stay attached to their assistant tool-call message. Nothing
+ * here is random, so the same input always yields the same output.
+ */
+export function pruneSession(session: Session, options: PruneOptions = {}): Session {
+  const maxBytes = options.maxBytes ?? 0;
+  const keepTurns = options.keepTurns;
+
+  let messages = Array.isArray(session.completionMessages) ? [...session.completionMessages] : [];
+  const systemPrefix = messages.length > 0 && (messages[0] as any).role === 'system' ? [messages[0]] : [];
+  if (keepTurns !== undefined && keepTurns >= 0) {
+    const userIndexes: number[] = [];
+    messages.forEach((message, index) => {
+      if ((message as any).role === 'user') userIndexes.push(index);
+    });
+    if (userIndexes.length > keepTurns) {
+      const cutoff = userIndexes[Math.max(0, userIndexes.length - keepTurns)];
+      messages = [...systemPrefix, ...messages.slice(cutoff)];
+    }
+  }
+
+  let pruned: Session = { ...session, completionMessages: messages };
+  pruned = { ...pruned, completionMessages: sanitizeCompletionMessages(pruned.completionMessages) };
+
+  if (maxBytes > 0) {
+    let bytes = JSON.stringify(pruned.completionMessages).length;
+    while (bytes > maxBytes && pruned.completionMessages.length > 0) {
+      const next = stripOldestTurn(pruned.completionMessages);
+      if (next.length === pruned.completionMessages.length) break;
+      pruned = { ...pruned, completionMessages: next };
+      bytes = JSON.stringify(pruned.completionMessages).length;
+    }
+  }
+
+  return pruned;
+}
+
+/**
+ * Remove the oldest user→tool run after the system message. The system message
+ * and the most recent turn are always kept, so the model still has instructions
+ * and the task it is working on.
+ */
+function stripOldestTurn(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+  const firstSystem = messages.findIndex((message) => (message as any).role === 'system');
+  const start = firstSystem >= 0 ? firstSystem + 1 : 0;
+  if (start >= messages.length - 1) return messages;
+
+  let end = start;
+  while (end < messages.length && (messages[end] as any).role !== 'user') end++;
+  if (end >= messages.length) return messages;
+  // Include the assistant/tool messages that follow this user turn.
+  let stop = end + 1;
+  while (stop < messages.length && (messages[stop] as any).role !== 'user') stop++;
+  if (stop >= messages.length) return messages;
+
+  return [...messages.slice(0, end), ...messages.slice(stop)];
+}
+
+/** Render a human summary of a pruned session for the CLI. */
+export function describePrune(before: Session, after: Session): string {
+  const beforeBytes = JSON.stringify(before.completionMessages).length;
+  const afterBytes = JSON.stringify(after.completionMessages).length;
+  return `pruned ${before.completionMessages.length} -> ${after.completionMessages.length} messages (${beforeBytes} -> ${afterBytes} bytes)`;
+}
+
+
 /** Load a session by ID. Returns null if not found. */
 export async function loadSession(id: string): Promise<Session | null> {
   try {
@@ -463,6 +546,7 @@ export async function loadSession(id: string): Promise<Session | null> {
       subAgentActivities: sanitizeSubAgentActivities(session.subAgentActivities),
       // Older files have no pin field; only real booleans are trusted.
       pinned: typeof session.pinned === 'boolean' ? session.pinned : undefined,
+      archived: typeof session.archived === 'boolean' ? session.archived : undefined,
     };
   } catch (err) {
     // A missing file is normal; anything else means a corrupt session, which the
@@ -507,6 +591,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
         // The system prompt is not a message the user sent.
         messageCount: countConversationMessages(messages),
         pinned: session.pinned === true ? true : undefined,
+        archived: session.archived === true ? true : undefined,
       });
     } catch (err) {
       // Skip corrupt session files, but leave a trace: silently dropping files
@@ -661,6 +746,7 @@ export async function forkSession(
       ? { subAgentActivities: source.subAgentActivities.map((activity) => ({ ...activity })) }
       : {}),
     ...(source.pinned === true ? { pinned: true } : {}),
+    ...(source.archived === true ? { archived: true } : {}),
   };
 
   await saveSession(fork);
@@ -681,6 +767,15 @@ export async function setSessionPinned(id: string, pinned: boolean): Promise<boo
   const session = await loadSession(id);
   if (!session) return false;
   session.pinned = pinned === true;
+  await saveSession(session);
+  return true;
+}
+
+/** Archive or unarchive a saved session. Returns false when the id does not resolve. */
+export async function setSessionArchived(id: string, archived: boolean): Promise<boolean> {
+  const session = await loadSession(id);
+  if (!session) return false;
+  session.archived = archived === true;
   await saveSession(session);
   return true;
 }

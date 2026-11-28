@@ -2,6 +2,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validatePath } from '../utils/path-validation.js';
+import { assertWritablePath } from '../utils/protected-paths.js';
 import { approve, cancelled, computeUnifiedDiff, errorMessage, readRegularFile, requireString, safe, } from './file-helpers.js';
 const MAX_EDIT_FILES = 20;
 const MAX_EDIT_FILE_BYTES = 2 * 1024 * 1024;
@@ -111,6 +112,7 @@ export async function multiedit(edits, sessionId) {
             let validated;
             try {
                 validated = await validatePath(filePath);
+                assertWritablePath(validated);
             }
             catch (err) {
                 throw new Error(`edits[${i}]: ${errorMessage(err)}`);

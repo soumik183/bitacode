@@ -8,6 +8,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validatePath } from '../utils/path-validation.js';
+import { assertWritablePath } from '../utils/protected-paths.js';
 import { findSimilarPaths } from '../utils/path-suggestions.js';
 import { requestApproval } from '../utils/approval.js';
 import { checkReadBefore, recordRead } from '../utils/file-time.js';
@@ -201,6 +202,7 @@ export async function editFile(filePath, oldString, newString, expectedReplaceme
     let validated;
     try {
         validated = await validatePath(filePath);
+        assertWritablePath(validated);
     }
     catch (err) {
         return `Error: ${err.message}`;

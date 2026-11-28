@@ -3,6 +3,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { validatePath } from '../utils/path-validation.js';
+import { assertWritablePath } from '../utils/protected-paths.js';
 import {
   approve,
   cancelled,
@@ -139,6 +140,7 @@ export async function multiedit(edits: unknown, sessionId?: string): Promise<str
       let validated: string;
       try {
         validated = await validatePath(filePath);
+        assertWritablePath(validated);
       } catch (err) {
         throw new Error(`edits[${i}]: ${errorMessage(err)}`);
       }

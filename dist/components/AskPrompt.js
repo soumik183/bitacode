@@ -25,6 +25,22 @@ function clampText(text, width) {
     return `${single.slice(0, width - 1)}…`;
 }
 /**
+ * Contextual keyboard legend for an ask prompt. Exported so an embedding Dialog
+ * can show the same hint when AskPrompt itself runs with `embedded` and hides it.
+ */
+export function askPromptHint({ typing, hasOptions, canType, multiple }) {
+    if (typing)
+        return 'enter send · esc skip';
+    return [
+        hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
+        hasOptions && canType ? 'tab type' : '',
+        multiple ? 'enter toggle/confirm' : 'enter send',
+        'esc skip',
+    ]
+        .filter(Boolean)
+        .join(' · ');
+}
+/**
  * Interactive "the agent is asking you something" prompt.
  *
  * Design goals:
@@ -202,14 +218,10 @@ export const AskPrompt = ({ questions, columns, compact = false, embedded = fals
                         // labels keep as much room as the terminal allows.
                         const labelMax = Math.max(1, cols - GUTTER - indent - recWidth);
                         return (_jsxs(Box, { flexDirection: "column", backgroundColor: active ? theme.surfaceAlt : undefined, paddingRight: 1, children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${active ? '❯' : ' '} ` }), multiple && (_jsx(Text, { color: isPicked ? theme.accent : theme.dim, children: `${isPicked ? CHECKED : UNCHECKED} ` })), _jsx(Text, { color: theme.dim, children: `${optionIndex + 1}. ` }), _jsx(Text, { color: active ? theme.text : theme.muted, bold: active, children: clampText(option.label, labelMax) }), option.recommended && (_jsx(Text, { color: theme.success, children: showRecommendedText ? `  ${RECOMMENDED_TAG}` : ' ★' }))] }), active && option.description && (_jsx(Text, { color: theme.dim, wrap: "truncate-end", children: `${' '.repeat(indent)}${clampText(option.description, Math.max(1, cols - GUTTER - indent))}` }))] }, `${option.label}-${optionIndex}`));
-                    }) })), typing && (_jsx(Box, { marginTop: gap, children: _jsxs(Text, { children: [_jsx(Text, { color: theme.accent, children: '> ' }), _jsx(Text, { color: theme.text, children: draft }), _jsx(Text, { inverse: true, children: ' ' })] }) })), !embedded && (_jsx(Box, { marginTop: gap, children: _jsx(HintLine, { compact: compact, hint: typing
-                            ? 'enter send · esc skip'
-                            : [
-                                hasOptions ? '↑↓ or 1-9 pick' : 'type your answer',
-                                hasOptions && canType ? 'tab type' : '',
-                                question.multiple ? 'enter toggle/confirm' : 'enter send',
-                                'esc skip',
-                            ]
-                                .filter(Boolean)
-                                .join(' · ') }) }))] }) }));
+                    }) })), typing && (_jsx(Box, { marginTop: gap, children: _jsxs(Text, { children: [_jsx(Text, { color: theme.accent, children: '> ' }), _jsx(Text, { color: theme.text, children: draft }), _jsx(Text, { inverse: true, children: ' ' })] }) })), !embedded && (_jsx(Box, { marginTop: gap, children: _jsx(HintLine, { compact: compact, hint: askPromptHint({
+                            typing,
+                            hasOptions,
+                            canType,
+                            multiple: Boolean(question.multiple),
+                        }) }) }))] }) }));
 };

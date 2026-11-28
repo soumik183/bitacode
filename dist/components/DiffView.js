@@ -3,6 +3,7 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { useTheme } from '../theme.js';
 import { annotateDiff, displayFilePath } from '../utils/file-diff.js';
+import { diffWords } from '../utils/word-diff.js';
 /** Safety ceiling for a collapsed diff; kept as the public export for callers. */
 export const DIFF_PREVIEW_LINES = 2000;
 /** @deprecated Expansion now shows the whole diff; kept for API compatibility. */
@@ -31,11 +32,49 @@ function gutterNumbers(kind, number, gutter) {
 }
 const signFor = (kind) => kind === 'add' ? '+' : kind === 'remove' ? '-' : ' ';
 /**
- * Professional unified-diff card: two line-number gutters, a continuous side
- * rule, and one flat colour per row (red removals, green additions). All lines
- * render by default; only a generous ceiling clips an unusually large patch.
+ * Pair each run of removed rows with the following run of added rows (by
+ * position in the run) and remember which words changed on each side. Rows
+ * that are not part of such a pair keep their plain, single-colour rendering.
  */
-export const DiffView = ({ header, diff, filePath, operation, maxRows, expanded = false, entries, }) => {
+function highlightChangedWords(lines) {
+    const highlights = new Map();
+    let index = 0;
+    while (index < lines.length) {
+        if (lines[index].kind !== 'remove') {
+            index++;
+            continue;
+        }
+        const removeStart = index;
+        while (index < lines.length && lines[index].kind === 'remove')
+            index++;
+        const removeEnd = index;
+        const addStart = index;
+        while (index < lines.length && lines[index].kind === 'add')
+            index++;
+        const pairs = Math.min(removeEnd - removeStart, index - addStart);
+        for (let offset = 0; offset < pairs; offset++) {
+            const removed = lines[removeStart + offset];
+            const added = lines[addStart + offset];
+            const { old, new: next } = diffWords(removed.text, added.text);
+            if (old.length > 0)
+                highlights.set(removed, old);
+            if (next.length > 0)
+                highlights.set(added, next);
+        }
+    }
+    return highlights;
+}
+/** Nested Text nodes keep the row's colour; only changed words get bold. */
+function renderWordSegments(segments) {
+    return segments.map((segment, index) => (_jsx(Text, { bold: segment.changed, children: segment.text }, index)));
+}
+/**
+ * Professional unified-diff card: two line-number gutters, a continuous side
+ * rule, and one flat colour per row (red removals, green additions) with bold
+ * on the words that changed between paired remove/add rows. All lines render
+ * by default; only a generous ceiling clips an unusually large patch.
+ */
+export const DiffView = ({ header, diff, filePath, operation, maxRows, expanded = false, entries, wordHighlight = true, }) => {
     const theme = useTheme();
     const files = React.useMemo(() => {
         const source = entries && entries.length > 0
@@ -63,7 +102,11 @@ export const DiffView = ({ header, diff, filePath, operation, maxRows, expanded 
     const renderedFiles = files.map((file) => {
         const visible = file.lines.slice(0, Math.max(0, remaining));
         remaining -= visible.length;
-        return { ...file, visible };
+        return {
+            ...file,
+            visible,
+            highlights: wordHighlight ? highlightChangedWords(visible) : new Map(),
+        };
     });
     const shownCount = renderedFiles.reduce((total, file) => total + file.visible.length, 0);
     const hidden = Math.max(0, totalLines - shownCount);
@@ -88,6 +131,7 @@ export const DiffView = ({ header, diff, filePath, operation, maxRows, expanded 
     let key = 0;
     return (_jsxs(Box, { flexDirection: "column", borderStyle: "round", borderColor: theme.border, paddingX: 1, marginY: 1, width: "100%", overflow: "hidden", children: [_jsxs(Text, { wrap: "truncate-end", children: [_jsx(Text, { color: theme.success, children: "\u2713 " }), _jsx(Text, { color: theme.text, bold: true, children: title }), showPaths && _jsx(Text, { color: theme.muted, children: `  ${paths}` }), additions > 0 && _jsx(Text, { color: theme.success, children: `  +${additions}` }), removals > 0 && _jsx(Text, { color: theme.error, children: `  -${removals}` }), expanded && toggleAvailable && _jsx(Text, { color: theme.dim, children: '  click to collapse' })] }), totalLines === 0 && row('empty', blank, blank, ' ', theme.dim, 'No textual changes.'), renderedFiles.map((file, fileIndex) => (_jsxs(React.Fragment, { children: [files.length > 1 && row(`file-${fileIndex}`, blank, blank, ' ', theme.info, `▸ ${file.label}`), file.visible.map((diffLine) => {
                         const numbers = gutterNumbers(diffLine.kind, diffLine.number, gutter);
-                        return row(`line-${key++}`, numbers.old, numbers.next, signFor(diffLine.kind), lineColor(diffLine.kind, theme), diffLine.text);
+                        const segments = file.highlights.get(diffLine);
+                        return row(`line-${key++}`, numbers.old, numbers.next, signFor(diffLine.kind), lineColor(diffLine.kind, theme), segments && segments.length > 0 ? renderWordSegments(segments) : diffLine.text);
                     })] }, fileIndex))), hidden > 0 && row('truncated', blank, blank, ' ', theme.dim, `… ${hidden} more line${hidden === 1 ? '' : 's'} (diff truncated)${!expanded && toggleAvailable ? ' · click to expand' : ''}`)] }));
 };

@@ -1,6 +1,6 @@
 import { jsx as _jsx } from "react/jsx-runtime";
 import { createContext, useContext, useMemo } from 'react';
-import { getTheme } from './palettes.js';
+import { customThemeVersion, getTheme } from './palettes.js';
 const ThemeContext = createContext(null);
 /**
  * Publishes one immutable palette to every descendant. The palette is derived
@@ -8,7 +8,10 @@ const ThemeContext = createContext(null);
  * mutating a module-level object during render.
  */
 export const ThemeProvider = ({ name, children }) => {
-    const palette = useMemo(() => getTheme(name), [name]);
+    // `customThemeVersion` is a live ESM binding: registering a theme after the
+    // first render changes the memo key, so the next provider render resolves the
+    // new palette instead of keeping the placeholder captured on mount.
+    const palette = useMemo(() => getTheme(name), [name, customThemeVersion]);
     return _jsx(ThemeContext.Provider, { value: palette, children: children });
 };
 /**

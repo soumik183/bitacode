@@ -50,6 +50,7 @@ CLI (Commander)
 - `--dangerously-accept-all`
 - `--log-level <level>`
 - `--session <id>`
+- `-p/--print <prompt>` plus headless flags: `--json`, `--approval`, `--provider`, `--model`, `--cwd`, `--max-iterations`, `--save-session`, `--allowed-tools`, `--exclude-tools`, `--output-last-message`, `-q/--quiet`, `--timeout-ms`
 
 ### Interactive slash commands
 
@@ -269,6 +270,12 @@ Each model entry may declare:
 
 The model picker and all provider lookups operate on this merged runtime registry rather than a hardcoded provider list alone.
 
+### Prompt inputs added by the harness
+
+- **Instruction files** (`src/utils/rules.ts`): merged `AGENTS.md`/`CLAUDE.md` tree from the filesystem root to the working directory (nearest last), `@path` imports, `.cursorrules`/`.windsurfrules`/`.clinerules`, and `.bitacode/rules/*.md` / `.claude/rules/*.md`.
+- **Output styles** (`src/utils/output-styles.ts`): built-in and custom voice presets; selected with `bitacode styles set <id>` and persisted in `settings.json` as `outputStyle`.
+- **Repo outline** (`src/utils/repo-outline.ts`): bounded, cached declaration outline injected after the project tree.
+
 ## 6. Agentic Loop
 
 The core loop in `src/agentic-loop.ts` works like this:
@@ -338,6 +345,10 @@ Two systems can register runtime tools:
 
 All file tools validate requested paths through `src/utils/path-validation.ts`.
 
+### Protected paths (write-only guard)
+
+`src/utils/protected-paths.ts` refuses mutations inside `.git`, `.hg`, `.svn`, `.aws`, `.ssh`, `.gnupg`, `.bitacode` and `.agents`, regardless of approval mode. Reads remain allowed. `write_file`, `edit_file`, `multiedit` and `apply_patch` enforce it after `validatePath()`; other structural mutators (`delete`, `rename`, `move`, `copy`, `mkdir`) still rely on approval.
+
 ### Current behavior
 
 - paths must resolve inside `process.cwd()`
@@ -392,6 +403,8 @@ Sessions are stored as JSON files in:
 - session IDs are validated before file access
 - resuming a session refreshes the system prompt at the top of the message list
 - helper functions exist for list/load/save/delete, though the main user-facing flow is `--session <id>`
+- `bitacode sessions` exposes `list` (hides archived; `--all` includes them), `show`, `replay`, `stats`, `journal`, `fork`, `rename`, `pin`, `archive`, `unarchive`, `delete`, `prune` (`--keep-turns` / `--max-bytes`) and `export`
+- archived sessions stay on disk and remain resumable; `delete` removes the file
 
 ## 11. Cost Tracking and Compaction
 
@@ -569,12 +582,16 @@ Logs are written under the user's Bitacode data directory rather than printed di
 
 Implemented since this specification was first written (see `NEW-FEATURES.md`):
 
+Implemented since this specification was first written (see `NEW-FEATURES.md`):
+
 - tool groups / deferred tool discovery, named agents, session steering and queueing
 - git worktree sandboxes and opt-in git-native snapshots
 - background-job completion notifications, structured `form` questions
 - event-sourced session log with recovery claims, session search/import, draft stash
 - multi-account credentials, local provider presets, provider policy, shell-aware rules
 - config watching, custom themes, keybinding overrides, goal mode, scheduling
+- instruction-file merge, output styles, repo outline, protected paths, permission dry-run
+- session archive/delete/prune, headless tool filters and budget cap, `secret_scan`
 
 Still intentionally out of scope:
 

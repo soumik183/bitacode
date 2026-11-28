@@ -240,7 +240,13 @@ export const DialogList: React.FC<DialogListProps> = ({
                 <Text color={theme.dim} bold wrap="truncate-end">{`  ${item.section}`}</Text>
               </Box>
             ) : null}
-            <Box flexDirection="row" justifyContent="space-between" overflow="hidden">
+            <Box
+              flexDirection="row"
+              justifyContent="space-between"
+              width="100%"
+              backgroundColor={active ? theme.surfaceAlt : undefined}
+              overflow="hidden"
+            >
               <Box flexShrink={1} minWidth={1} flexDirection="row">
                 <Text color={active ? theme.accent : theme.dim}>{active ? '› ' : '  '}</Text>
                 {item.swatch ? (

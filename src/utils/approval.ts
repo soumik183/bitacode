@@ -111,6 +111,8 @@ export async function requestApproval(req: ApprovalRequest): Promise<boolean> {
   if (override === 'granted') return true;
   if (override !== 'required') {
     if (approvalMode === 'auto' || approvalMode === 'yolo') return true;
+    // acceptEdits auto-approves file changes but still gates shell commands.
+    if (approvalMode === 'acceptEdits' && (req.type === 'file_write' || req.type === 'file_edit')) return true;
     if (dangerouslySkipPermissions) return true;
   }
 
