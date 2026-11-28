@@ -20,7 +20,7 @@ import { discoverThemeFiles } from './theme/discovery.js';
 import { loadSettings, saveSettings } from './settings.js';
 import { logger } from './utils/logger.js';
 import { installStableRenderer, installTerminalRestore } from './utils/stable-render.js';
-import { checkForUpdate, installUpdate } from './utils/version-check.js';
+import { checkForUpdate, clearUpdateCache, installUpdate } from './utils/version-check.js';
 import {
   formatInstalled,
   formatInstallFailure,
@@ -264,6 +264,7 @@ program
         return;
       }
       if (!info.updateAvailable) {
+        clearUpdateCache();
         console.log(formatUpToDate(info.current));
         return;
       }
@@ -283,6 +284,7 @@ program
         process.exitCode = 1;
         return;
       }
+      clearUpdateCache();
       console.log(formatInstalled(info.current, info.latest, scope));
     } catch (error) {
       console.error('Update failed:', error instanceof Error ? error.message : String(error));

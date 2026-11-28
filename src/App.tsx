@@ -150,7 +150,7 @@ import { nextThinkingExpansion } from './utils/thinking-expansion.js';
 import { formatSessionExit } from './utils/session-exit-format.js';
 import { formatUpdateExit } from './utils/update-exit-format.js';
 import { formatInstallFailure } from './utils/cli-update-format.js';
-import { checkForUpdate, installUpdate } from './utils/version-check.js';
+import { checkForUpdate, clearUpdateCache, installUpdate } from './utils/version-check.js';
 import {
   clampScroll,
   maxScrollOffset,
@@ -881,6 +881,9 @@ const AppContent: React.FC<AppContentProps> = ({
   const [showErrorPanel, setShowErrorPanel] = useState(false);
   // Live one-line hint/toast (retry, copy, background task completion, …).
   const [toast, setToast] = useState<string | null>(null);
+  // Once we know the install is done (or already current), the startup banner
+  // must stay gone even after the toast timer expires.
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const toastActiveRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastToastAtRef = useRef(0);
@@ -2558,6 +2561,8 @@ const AppContent: React.FC<AppContentProps> = ({
         return;
       }
       if (!info.updateAvailable) {
+        setUpdateDismissed(true);
+        clearUpdateCache();
         showToast(`Already up to date (v${info.current})`);
         return;
       }
@@ -2573,6 +2578,8 @@ const AppContent: React.FC<AppContentProps> = ({
       // old code. Save the conversation, close the TUI, and print a card telling
       // the user to reopen for the new version.
       exitUpdateRef.current = { from: info.current, to: info.latest, scope };
+      setUpdateDismissed(true);
+      clearUpdateCache();
       showToast(`Updated to v${info.latest} — closing…`, 0);
       exiting = true;
       setTimeout(() => exitWithSave(), 450);
@@ -3758,6 +3765,7 @@ const AppContent: React.FC<AppContentProps> = ({
     subAgentActivities.length,
     showSubAgentPanel ? 1 : 0,
     updateNotice ? 1 : 0,
+    updateDismissed ? 1 : 0,
     mode,
     toast?.length ?? 0,
     composerRows,
@@ -4394,6 +4402,7 @@ const AppContent: React.FC<AppContentProps> = ({
   // competes with UI that needs the user's attention.
   const showUpdateNotice =
     Boolean(updateNotice) &&
+    !updateDismissed &&
     !hasCriticalPrompt &&
     !toast &&
     picker === null &&
